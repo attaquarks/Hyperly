@@ -308,6 +308,26 @@ async fn run_continuous_capture(
                         // Emit progress every second
                         if audio_buffer.len() % (sr as usize) == 0 {
                             let _ = app.emit("recording-progress", elapsed.as_secs());
+
+                            // Emit a partial transcript roughly every 2 seconds so the UI can
+                            // show a real-time running transcript while the user is still talking.
+                            // We only do this once we have at least 2 seconds of audio so the
+                            // STT engine has something meaningful to work with.
+                            if audio_buffer.len() >= (sr as usize) * 2
+                                && audio_buffer.len() % (sr as usize * 2) == 0
+                            {
+                                let partial_cleaned = apply_noise_gate(
+                                    &audio_buffer,
+                                    config.noise_gate_threshold,
+                                );
+                                let partial_normalized =
+                                    normalize_audio_level(&partial_cleaned, 0.1);
+                                if let Ok(partial_b64) =
+                                    samples_to_wav_b64(sr, &partial_normalized)
+                                {
+                                    let _ = app.emit("speech-partial", partial_b64);
+                                }
+                            }
                         }
 
                         // Check size limit (safety)

@@ -63,6 +63,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
     startContinuousRecording,
     ignoreContinuousRecording,
     scrollAreaRef,
+    pendingScreenshot,
+    setPendingScreenshot,
+    livePartial,
   } = props;
 
   const { supportsImages } = useApp();
@@ -70,7 +73,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
   // View mode toggle
   const [conversationMode, setConversationMode] = useState(false);
 
-  // Screenshot state
+  // Screenshot state — local copy drives the preview UI; the actual base64 is forwarded to
+  // the hook via setPendingScreenshot so the next AI call can attach it.
   const [screenshotImage, setScreenshotImage] = useState<string | null>(null);
   const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
 
@@ -93,7 +97,12 @@ export const SystemAudio = (props: useSystemAudioType) => {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isPopoverOpen]);
 
-  // Reset screenshot when processing starts (message is being sent)
+  // Mirror the local preview into the hook so the next AI call can attach it.
+  useEffect(() => {
+    setPendingScreenshot(screenshotImage);
+  }, [screenshotImage, setPendingScreenshot]);
+
+  // Reset local preview when the hook consumed the pending screenshot (processing started).
   useEffect(() => {
     if (isProcessing && screenshotImage) {
       setScreenshotImage(null);
@@ -123,10 +132,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
     try {
       
 
-      // Capture screenshot
-      const base64: string = await invoke("capture_screenshot", {
-        screenId: null, // Use default screen
-      });
+      // Capture full-screen screenshot. The Rust command is `capture_to_base64`.
+      const base64: string = await invoke("capture_to_base64");
 
       setScreenshotImage(base64);
     } catch (err) {
@@ -332,6 +339,23 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       onStopAndSend={manualStopAndSend}
                       onIgnore={ignoreContinuousRecording}
                     />
+
+                    {/* Live running transcript (shown while audio is still being captured
+                        and no final transcript has arrived yet). */}
+                    {capturing && livePartial && !lastTranscription && (
+                      <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 space-y-2">
+                        <div className="flex items-center gap-1.5">
+                          <HeadphonesIcon className="w-3.5 h-3.5 text-primary" />
+                          <h4 className="text-xs font-medium text-primary">
+                            Listening...
+                          </h4>
+                          <span className="inline-block w-2 h-2 rounded-full bg-primary animate-pulse ml-1" />
+                        </div>
+                        <p className="text-xs text-foreground/90 whitespace-pre-wrap leading-relaxed">
+                          {livePartial}
+                        </p>
+                      </div>
+                    )}
 
                     {/* AI Response */}
                     <ResultsSection

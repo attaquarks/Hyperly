@@ -35,7 +35,10 @@ export interface VadConfig {
 
 // OPTIMIZED VAD defaults - matches backend exactly for perfect performance
 const DEFAULT_VAD_CONFIG: VadConfig = {
-  enabled: true,
+  // Manual mode is the default: the user explicitly starts / stops a recording
+  // and the AI only fires when they hit "Stop & Send". Users can flip to VAD
+  // (auto) mode in the listen panel if they want per-utterance auto-transcription.
+  enabled: false,
   hop_size: 1024,
   sensitivity_rms: 0.012, // Much less sensitive - only real speech
   peak_threshold: 0.035, // Higher threshold - filters clicks/noise
@@ -82,6 +85,20 @@ export function useSystemAudio() {
   const [showQuickActions, setShowQuickActions] = useState<boolean>(true);
   const [vadConfig, setVadConfig] = useState<VadConfig>(DEFAULT_VAD_CONFIG);
   const [recordingProgress, setRecordingProgress] = useState<number>(0); // For continuous mode
+  // Live, growing transcript shown while audio is still being captured. Each "speech-partial"
+  // event from the Rust side yields an STT result that is appended here so the user can see the
+  // running text. When they hit Stop & Send, the final canonical transcript replaces this.
+  const [livePartial, setLivePartial] = useState<string>("");
+  // Screenshot captured via the listen panel — attached to the next AI call when manual stop fires.
+  const [pendingScreenshot, setPendingScreenshot] = useState<string | null>(null);
+  // Mirror in a ref so callbacks always see the latest value without rebuilding deps.
+  const pendingScreenshotRef = useRef<string | null>(null);
+  useEffect(() => {
+    pendingScreenshotRef.current = pendingScreenshot;
+  }, [pendingScreenshot]);
+  // Accumulates the running partial transcript across "speech-partial" events. Hoisted to the
+  // outer hook scope so callers (startCapture / stopCapture) can reset it.
+  const partialAccumulatorRef = useRef<string>("");
   const [isContinuousMode, setIsContinuousMode] = useState<boolean>(false);
   const [isRecordingInContinuousMode, setIsRecordingInContinuousMode] =
     useState<boolean>(false);
@@ -219,9 +236,48 @@ export function useSystemAudio() {
   // Handle single speech detection event (both VAD and continuous modes)
   useEffect(() => {
     let speechUnlisten: (() => void) | undefined;
+    let partialUnlisten: (() => void) | undefined;
 
     const setupEventListener = async () => {
       try {
+        // Listen for incremental audio chunks and update the live transcript as we go.
+        partialUnlisten = await listen(
+          "speech-partial",
+          async (event: { payload: string }) => {
+            if (!capturing) return;
+            const base64Audio = event.payload as string;
+            try {
+              const binaryString = atob(base64Audio);
+              const bytes = new Uint8Array(binaryString.length);
+              for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+              }
+              const audioBlob = new Blob([bytes], { type: "audio/wav" });
+
+              const useHyperlyAPI = await shouldUseHyperlyAPI();
+              if (!selectedSttProvider.provider && !useHyperlyAPI) return;
+              const providerConfig = allSttProviders.find(
+                (p) => p.id === selectedSttProvider.provider
+              );
+              if (!providerConfig && !useHyperlyAPI) return;
+
+              const partial = await fetchSTT({
+                provider: providerConfig,
+                selectedProvider: selectedSttProvider,
+                audio: audioBlob,
+              });
+
+              if (partial && partial.trim()) {
+                partialAccumulatorRef.current = partial;
+                setLivePartial(partial);
+              }
+            } catch (err) {
+              // Swallow partial errors so they don't interrupt the recording.
+              console.warn("Partial STT failed:", err);
+            }
+          }
+        );
+
         speechUnlisten = await listen("speech-detected", async (event) => {
           try {
             if (!capturing) return;
@@ -274,6 +330,10 @@ export function useSystemAudio() {
 
               if (transcription.trim()) {
                 setLastTranscription(transcription);
+                // The full transcript just arrived — clear the live running one so the UI
+                // shows the canonical final text and the AI response.
+                setLivePartial("");
+                partialAccumulatorRef.current = "";
                 setError("");
 
                 const effectiveSystemPrompt = useSystemPrompt
@@ -312,6 +372,7 @@ export function useSystemAudio() {
 
     return () => {
       if (speechUnlisten) speechUnlisten();
+      if (partialUnlisten) partialUnlisten();
     };
   }, [
     capturing,
@@ -501,6 +562,12 @@ export function useSystemAudio() {
           return;
         }
 
+        // Capture the current pending screenshot (if any) and clear it so it is only
+        // attached to the next call.
+        const screenshotForThisCall = pendingScreenshotRef.current;
+        pendingScreenshotRef.current = null;
+        setPendingScreenshot(null);
+
         try {
           for await (const chunk of fetchAIResponse({
             provider: useHyperlyAPI ? undefined : provider,
@@ -508,7 +575,7 @@ export function useSystemAudio() {
             systemPrompt: prompt,
             history: previousMessages,
             userMessage: transcription,
-            imagesBase64: [],
+            imagesBase64: screenshotForThisCall ? [screenshotForThisCall] : [],
           })) {
             fullResponse += chunk;
             setLastAIResponse((prev) => prev + chunk);
@@ -577,6 +644,8 @@ export function useSystemAudio() {
       setIsPopoverOpen(true);
       setIsContinuousMode(isContinuous);
       setRecordingProgress(0);
+      setLivePartial("");
+      partialAccumulatorRef.current = "";
 
       // If continuous mode
       if (isContinuous) {
@@ -627,6 +696,8 @@ export function useSystemAudio() {
       setLastAIResponse("");
       setError("");
       setIsPopoverOpen(false);
+      setLivePartial("");
+      partialAccumulatorRef.current = "";
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(`Failed to stop capture: ${errorMessage}`);
@@ -779,6 +850,8 @@ export function useSystemAudio() {
     setIsAIProcessing(false);
     setIsPopoverOpen(false);
     setUseSystemPrompt(true);
+    setLivePartial("");
+    partialAccumulatorRef.current = "";
   }, []);
 
   // Update VAD configuration
@@ -922,6 +995,11 @@ export function useSystemAudio() {
     manualStopAndSend,
     startContinuousRecording,
     ignoreContinuousRecording,
+    // Screenshot captured in the listen panel — sent with the next AI call
+    pendingScreenshot,
+    setPendingScreenshot,
+    // Live running transcript shown while audio is still being captured
+    livePartial,
     // Scroll area ref for keyboard navigation
     scrollAreaRef,
   };
