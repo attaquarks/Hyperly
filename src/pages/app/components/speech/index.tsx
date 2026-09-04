@@ -14,6 +14,8 @@ import {
   CameraIcon,
   PlusIcon,
   XIcon,
+  SunIcon,
+  MoonIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { ModeSwitcher } from "./ModeSwitcher";
@@ -23,8 +25,10 @@ import { SettingsPanel } from "./SettingsPanel";
 import { PermissionFlow } from "./PermissionFlow";
 import { QuickActions } from "./QuickActions";
 import { Warning } from "./Warning";
+import { ConversationHistory } from "./ConversationHistory";
 import { useSystemAudioType } from "@/hooks";
 import { useApp } from "@/contexts";
+import { useTheme } from "@/contexts/theme.context";
 import { cn } from "@/lib/utils";
 
 export const SystemAudio = (props: useSystemAudioType) => {
@@ -45,6 +49,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     contextContent,
     setContextContent,
     startNewConversation,
+    loadConversation,
     conversation,
     resizeWindow,
     quickActions,
@@ -63,12 +68,18 @@ export const SystemAudio = (props: useSystemAudioType) => {
     startContinuousRecording,
     ignoreContinuousRecording,
     scrollAreaRef,
-    pendingScreenshot,
     setPendingScreenshot,
     livePartial,
   } = props;
 
   const { supportsImages } = useApp();
+  const { theme, setTheme } = useTheme();
+
+  // Cycle through light -> dark -> system on each click.
+  const cycleTheme = useCallback(() => {
+    const next = theme === "dark" ? "light" : theme === "light" ? "system" : "dark";
+    setTheme(next);
+  }, [theme, setTheme]);
 
   // View mode toggle
   const [conversationMode, setConversationMode] = useState(false);
@@ -77,6 +88,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
   // the hook via setPendingScreenshot so the next AI call can attach it.
   const [screenshotImage, setScreenshotImage] = useState<string | null>(null);
   const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
+  // Conversation-history sidebar visibility. Defaults off so the panel stays compact.
+  const [showHistory, setShowHistory] = useState(false);
 
   const isVadMode = vadConfig.enabled;
   const hasResponse = lastAIResponse || isAIProcessing;
@@ -240,6 +253,54 @@ export const SystemAudio = (props: useSystemAudioType) => {
                     </Button>
                   )}
 
+                  {/* Theme Switcher */}
+                  {!setupRequired && (
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6"
+                      title={`Theme: ${theme} (click to change)`}
+                      onClick={cycleTheme}
+                    >
+                      {theme === "dark" ? (
+                        <MoonIcon className="h-3.5 w-3.5" />
+                      ) : theme === "light" ? (
+                        <SunIcon className="h-3.5 w-3.5" />
+                      ) : (
+                        <SunIcon className="h-3.5 w-3.5 opacity-60" />
+                      )}
+                    </Button>
+                  )}
+
+                  {/* History Sidebar Toggle */}
+                  {!setupRequired && (
+                    <Button
+                      size="icon"
+                      variant={showHistory ? "default" : "ghost"}
+                      className="h-6 w-6"
+                      title={
+                        showHistory
+                          ? "Hide conversation history"
+                          : "Show conversation history"
+                      }
+                      onClick={() => setShowHistory((v) => !v)}
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M3 12h18M3 6h18M3 18h12" />
+                      </svg>
+                    </Button>
+                  )}
+
                   {/* New Conversation Button */}
                   {!setupRequired && (
                     <Button
@@ -273,7 +334,15 @@ export const SystemAudio = (props: useSystemAudioType) => {
               </div>
             </div>
 
-            <ScrollArea className="flex-1 min-h-0" ref={scrollAreaRef}>
+            <div className="flex flex-1 min-h-0">
+              {showHistory && (
+                <ConversationHistory
+                  loadConversation={loadConversation}
+                  activeConversationId={conversation.id}
+                />
+              )}
+
+              <ScrollArea className="flex-1 min-h-0" ref={scrollAreaRef}>
               <div className="p-2 space-y-2">
                 {/* Screenshot Preview */}
                 {screenshotImage && (
@@ -382,7 +451,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
                   </>
                 )}
               </div>
-            </ScrollArea>
+              </ScrollArea>
+            </div>
 
             {/* Quick Actions */}
             {!setupRequired && hasResponse && (

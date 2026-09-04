@@ -17,6 +17,7 @@ import {
   CONVERSATION_SAVE_DEBOUNCE_MS,
   generateConversationId,
   generateMessageId,
+  getConversationById,
 } from "@/lib";
 import { Message } from "@/types/completion";
 
@@ -854,6 +855,30 @@ export function useSystemAudio() {
     partialAccumulatorRef.current = "";
   }, []);
 
+  // Load an existing conversation from history into the listen panel. Used by the
+  // conversation sidebar so the user can pick up a previous session.
+  const loadConversation = useCallback(async (conversationId: string) => {
+    try {
+      const parsed = await getConversationById(conversationId);
+      if (!parsed || !parsed.id) return;
+
+      setConversation(parsed);
+      // Restore the last visible user message and assistant response so the panel
+      // immediately shows context without requiring a new recording.
+      const lastUser = parsed.messages.find((m) => m.role === "user");
+      const lastAssistant = [...parsed.messages]
+        .reverse()
+        .find((m) => m.role === "assistant");
+      setLastTranscription(lastUser?.content ?? "");
+      setLastAIResponse(lastAssistant?.content ?? "");
+      setLivePartial("");
+      partialAccumulatorRef.current = "";
+      setError("");
+    } catch (err) {
+      console.error("Failed to load conversation:", err);
+    }
+  }, []);
+
   // Update VAD configuration
   const updateVadConfiguration = useCallback(async (config: VadConfig) => {
     try {
@@ -975,6 +1000,7 @@ export function useSystemAudio() {
     contextContent,
     setContextContent: updateContextContent,
     startNewConversation,
+    loadConversation,
     // Window resize
     resizeWindow,
     quickActions,

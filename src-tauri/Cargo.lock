@@ -2189,6 +2189,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperly"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "cpal",
+ "dotenv",
+ "futures-util",
+ "hound",
+ "image",
+ "libpulse-binding",
+ "libpulse-simple-binding",
+ "once_cell",
+ "reqwest",
+ "ringbuf",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-http",
+ "tauri-plugin-opener",
+ "tauri-plugin-shell",
+ "tauri-plugin-sql",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wasapi",
+ "xcap",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3814,39 +3847,6 @@ dependencies = [
  "quick-xml 0.38.1",
  "serde",
  "time",
-]
-
-[[package]]
-name = "pluely"
-version = "0.1.9"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "cpal",
- "dotenv",
- "futures-util",
- "hound",
- "image",
- "libpulse-binding",
- "libpulse-simple-binding",
- "once_cell",
- "reqwest",
- "ringbuf",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-http",
- "tauri-plugin-opener",
- "tauri-plugin-shell",
- "tauri-plugin-sql",
- "tokio",
- "tracing",
- "uuid",
- "wasapi",
- "xcap",
 ]
 
 [[package]]
