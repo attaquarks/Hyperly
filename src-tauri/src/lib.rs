@@ -4,6 +4,7 @@ mod api;
 mod capture;
 mod db;
 mod shortcuts;
+mod startup;
 mod window;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -47,6 +48,59 @@ pub fn run() {
         // tauri_plugin_updater removed for the personal/Windows-only build.
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_shell::init()) // Shell plugin
+        // Global shortcut plugin MUST be registered on the builder, BEFORE
+        // .setup(): the dashboard webview invokes `update_shortcuts` as soon as
+        // it loads, and any earlier global_shortcut() access panics with
+        // "state() called before manage()" if the plugin isn't managed yet.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |app, shortcut, event| {
+                    use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
+
+                    let action_id = {
+                        let state = app.state::<shortcuts::RegisteredShortcuts>();
+                        let registered = match state.shortcuts.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => {
+                                eprintln!("Mutex poisoned in handler, recovering...");
+                                poisoned.into_inner()
+                            }
+                        };
+
+                        registered.iter().find_map(|(action_id, shortcut_str)| {
+                            if let Ok(s) = shortcut_str.parse::<Shortcut>() {
+                                if &s == shortcut {
+                                    return Some(action_id.clone());
+                                }
+                            }
+                            None
+                        })
+                    };
+
+                    if let Some(action_id) = action_id {
+                        match event.state() {
+                            ShortcutState::Pressed => {
+                                if let Some(direction) =
+                                    action_id.strip_prefix("move_window_")
+                                {
+                                    shortcuts::start_move_window(app, direction);
+                                } else {
+                                    eprintln!("Shortcut triggered: {}", action_id);
+                                    shortcuts::handle_shortcut_action(app, &action_id);
+                                }
+                            }
+                            ShortcutState::Released => {
+                                if let Some(direction) =
+                                    action_id.strip_prefix("move_window_")
+                                {
+                                    shortcuts::stop_move_window(app, direction);
+                                }
+                            }
+                        }
+                    }
+                })
+                .build(),
+        )
         // PostHog, keychain, machine_uid, and macOS NSPanel plugins removed for the
         // personal/Windows-only build.
         .invoke_handler(tauri::generate_handler![
@@ -95,6 +149,8 @@ pub fn run() {
             speaker::get_output_devices,
         ])
         .setup(|app| {
+            // Remove registrations left by releases that supported autostart.
+            startup::remove_legacy_autostart();
             // Setup main window positioning
             window::setup_main_window(app).expect("Failed to setup main window");
             // macOS NSPanel init removed for the Windows-only build.
@@ -105,73 +161,8 @@ pub fn run() {
                 }
             }
 
-            #[cfg(desktop)]
-            {
-                use tauri_plugin_autostart::MacosLauncher;
-
-                // The MacosLauncher variant is harmless on Windows/Linux —
-                // tauri-plugin-autostart picks the right backend per-OS.
-                #[allow(deprecated, unexpected_cfgs)]
-                if let Err(e) = app.handle().plugin(tauri_plugin_autostart::init(
-                    MacosLauncher::LaunchAgent,
-                    Some(vec![]),
-                )) {
-                    eprintln!("Failed to initialize autostart plugin: {}", e);
-                }
-            }
-
-            // Initialize global shortcut plugin with centralized handler
-            app.handle()
-                .plugin(
-                    tauri_plugin_global_shortcut::Builder::new()
-                        .with_handler(move |app, shortcut, event| {
-                            use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
-
-                            let action_id = {
-                                let state = app.state::<shortcuts::RegisteredShortcuts>();
-                                let registered = match state.shortcuts.lock() {
-                                    Ok(guard) => guard,
-                                    Err(poisoned) => {
-                                        eprintln!("Mutex poisoned in handler, recovering...");
-                                        poisoned.into_inner()
-                                    }
-                                };
-
-                                registered.iter().find_map(|(action_id, shortcut_str)| {
-                                    if let Ok(s) = shortcut_str.parse::<Shortcut>() {
-                                        if &s == shortcut {
-                                            return Some(action_id.clone());
-                                        }
-                                    }
-                                    None
-                                })
-                            };
-
-                            if let Some(action_id) = action_id {
-                                match event.state() {
-                                    ShortcutState::Pressed => {
-                                        if let Some(direction) =
-                                            action_id.strip_prefix("move_window_")
-                                        {
-                                            shortcuts::start_move_window(app, direction);
-                                        } else {
-                                            eprintln!("Shortcut triggered: {}", action_id);
-                                            shortcuts::handle_shortcut_action(app, &action_id);
-                                        }
-                                    }
-                                    ShortcutState::Released => {
-                                        if let Some(direction) =
-                                            action_id.strip_prefix("move_window_")
-                                        {
-                                            shortcuts::stop_move_window(app, direction);
-                                        }
-                                    }
-                                }
-                            }
-                        })
-                        .build(),
-                )
-                .expect("Failed to initialize global shortcut plugin");
+            // Global shortcut plugin is registered on the builder above (must
+            // precede window creation). Only the initial registrations run here.
             if let Err(e) = shortcuts::setup_global_shortcuts(app.handle()) {
                 eprintln!("Failed to setup global shortcuts: {}", e);
             }
