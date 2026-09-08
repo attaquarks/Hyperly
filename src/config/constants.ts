@@ -15,7 +15,6 @@ export const STORAGE_KEYS = {
   CUSTOMIZABLE: "customizable",
   HYPERLY_API_ENABLED: "hyperly_api_enabled",
   SHORTCUTS: "shortcuts",
-  AUTOSTART_INITIALIZED: "autostart_initialized",
 
   SELECTED_AUDIO_DEVICES: "selected_audio_devices",
   RESPONSE_SETTINGS: "response_settings",

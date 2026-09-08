@@ -11,7 +11,6 @@ import {
   setCustomizableState,
   updateAppIconVisibility,
   updateAlwaysOnTop,
-  updateAutostart,
   CustomizableState,
   DEFAULT_CUSTOMIZABLE_STATE,
   CursorType,
@@ -22,7 +21,6 @@ import curl2Json from "@bany/curl-to-json";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { enable, disable } from "@tauri-apps/plugin-autostart";
 import {
   ReactNode,
   createContext,
@@ -244,18 +242,6 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     if (!stored) {
       // save the default state
       setCustomizableState(customizableState);
-    } else {
-      // check if we need to update the schema
-      try {
-        const parsed = JSON.parse(stored);
-        if (!parsed.autostart) {
-          // save the merged state with new autostart property
-          setCustomizableState(customizableState);
-          updateCursor(customizableState.cursor.type || "invisible");
-        }
-      } catch (error) {
-        console.debug("Failed to check customizable state schema:", error);
-      }
     }
 
     // Load Hyperly API enabled state
@@ -343,34 +329,6 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
     applyCustomizableSettings();
   }, [customizable]);
-
-  useEffect(() => {
-    const initializeAutostart = async () => {
-      try {
-        const autostartInitialized = safeLocalStorage.getItem(
-          STORAGE_KEYS.AUTOSTART_INITIALIZED
-        );
-
-        // Only apply autostart on the very first launch
-        if (!autostartInitialized) {
-          const autostartEnabled = customizable?.autostart?.isEnabled ?? true;
-
-          if (autostartEnabled) {
-            await enable();
-          } else {
-            await disable();
-          }
-
-          // Mark as initialized so this never runs again
-          safeLocalStorage.setItem(STORAGE_KEYS.AUTOSTART_INITIALIZED, "true");
-        }
-      } catch (error) {
-        console.debug("Autostart initialization skipped:", error);
-      }
-    };
-
-    initializeAutostart();
-  }, []);
 
   // Listen for app icon hide/show events when window is toggled
   useEffect(() => {
@@ -566,23 +524,6 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
-  const toggleAutostart = async (isEnabled: boolean) => {
-    const newState = updateAutostart(isEnabled);
-    setCustomizable(newState);
-    try {
-      if (isEnabled) {
-        await enable();
-      } else {
-        await disable();
-      }
-      loadData();
-    } catch (error) {
-      console.error("Failed to toggle autostart:", error);
-      const revertedState = updateAutostart(!isEnabled);
-      setCustomizable(revertedState);
-    }
-  };
-
   const setCursorType = (type: CursorType) => {
     setCustomizable((prev) => ({ ...prev, cursor: { type } }));
     updateCursor(type);
@@ -645,7 +586,6 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     customizable,
     toggleAppIconVisibility,
     toggleAlwaysOnTop,
-    toggleAutostart,
     loadData,
     hyperlyApiEnabled,
     setHyperlyApiEnabled,
