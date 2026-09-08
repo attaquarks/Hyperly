@@ -32,7 +32,18 @@ const AutoSpeechVADInternal = ({
   const vad = useMicVAD({
     userSpeakingThreshold: 0.6,
     startOnLoad: true,
-    additionalAudioConstraints: audioConstraints,
+    // vad-react >=0.0.31 replaced `additionalAudioConstraints` with a `getStream`
+    // callback; mirror the lib's default audio constraints + our device selection.
+    getStream: async () =>
+      navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          autoGainControl: true,
+          noiseSuppression: true,
+          ...audioConstraints,
+        },
+      }),
     onSpeechEnd: async (audio) => {
       try {
         // convert float32array to blob

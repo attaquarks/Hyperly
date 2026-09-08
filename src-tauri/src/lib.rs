@@ -4,6 +4,7 @@ mod api;
 mod capture;
 mod db;
 mod shortcuts;
+mod startup;
 mod window;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -148,6 +149,8 @@ pub fn run() {
             speaker::get_output_devices,
         ])
         .setup(|app| {
+            // Remove registrations left by releases that supported autostart.
+            startup::remove_legacy_autostart();
             // Setup main window positioning
             window::setup_main_window(app).expect("Failed to setup main window");
             // macOS NSPanel init removed for the Windows-only build.
