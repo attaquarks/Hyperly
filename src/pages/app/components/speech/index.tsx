@@ -31,6 +31,7 @@ import { useApp } from "@/contexts";
 import { useTheme } from "@/contexts/theme.context";
 import { cn } from "@/lib/utils";
 import { TranscriptThread } from "./TranscriptThread";
+import { ListenControls } from "./ListenControls";
 
 export const SystemAudio = (props: useSystemAudioType) => {
   const {
@@ -72,6 +73,13 @@ export const SystemAudio = (props: useSystemAudioType) => {
     setPendingScreenshot,
     livePartial,
     transcriptSegments,
+    listenMode,
+    setListenMode,
+    autoResponseMode,
+    setAutoResponseMode,
+    detectionConfidence,
+    isPaused,
+    pauseCapture,
   } = props;
 
   const { supportsImages } = useApp();
@@ -346,6 +354,16 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
               <ScrollArea className="flex-1 min-h-0" ref={scrollAreaRef}>
               <div className="p-2 space-y-2">
+                <ListenControls
+                  mode={listenMode}
+                  onModeChange={setListenMode}
+                  autoResponseMode={autoResponseMode}
+                  onAutoResponseModeChange={setAutoResponseMode}
+                  confidence={detectionConfidence}
+                  isPaused={isPaused}
+                  onPause={pauseCapture}
+                  onStop={stopCapture}
+                />
                 {/* Screenshot Preview */}
                 {screenshotImage && (
                   <div className="flex items-center gap-2 p-2 rounded-lg bg-primary/5 border border-primary/20">
@@ -480,3 +498,4 @@ export const SystemAudio = (props: useSystemAudioType) => {
   );
 };
 export * from "./TranscriptThread";
+export * from "./ListenControls";

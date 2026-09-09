@@ -20,7 +20,11 @@ import {
   getConversationById,
 } from "@/lib";
 import { Message } from "@/types/completion";
-import { TranscriptSegment } from "@/types/system-audio";
+import {
+  AutoResponseMode,
+  ListenMode,
+  TranscriptSegment,
+} from "@/types/system-audio";
 
 // VAD Configuration interface matching Rust
 export interface VadConfig {
@@ -92,6 +96,11 @@ export function useSystemAudio() {
   // running text. When they hit Stop & Send, the final canonical transcript replaces this.
   const [livePartial, setLivePartial] = useState<string>("");
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
+  const [listenMode, setListenMode] = useState<ListenMode>("auto");
+  const [autoResponseMode, setAutoResponseMode] =
+    useState<AutoResponseMode>("on-question");
+  const [detectionConfidence, setDetectionConfidence] = useState<number | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
   const sessionStartRef = useRef<number>(Date.now());
   // Screenshot captured via the listen panel — attached to the next AI call when manual stop fires.
   const [pendingScreenshot, setPendingScreenshot] = useState<string | null>(null);
@@ -701,6 +710,8 @@ export function useSystemAudio() {
       setRecordingProgress(0);
       setLivePartial("");
       setTranscriptSegments([]);
+      setDetectionConfidence(null);
+      setIsPaused(false);
       sessionStartRef.current = Date.now();
       partialAccumulatorRef.current = "";
 
@@ -935,6 +946,24 @@ export function useSystemAudio() {
     }
   }, []);
 
+  const pauseCapture = useCallback(async () => {
+    if (!capturing) return;
+    if (isPaused) {
+      await startContinuousRecording();
+      setIsPaused(false);
+      return;
+    }
+    await invoke("stop_system_audio_capture");
+    setIsPaused(true);
+  }, [capturing, isPaused, startContinuousRecording]);
+
+  const setListenModeValue = useCallback((mode: ListenMode) => {
+    setListenMode(mode);
+    if (mode === "auto") {
+      setAutoResponseMode("on-question");
+    }
+  }, []);
+
   // Update VAD configuration
   const updateVadConfiguration = useCallback(async (config: VadConfig) => {
     try {
@@ -1083,6 +1112,14 @@ export function useSystemAudio() {
     // Live running transcript shown while audio is still being captured
     livePartial,
     transcriptSegments,
+    listenMode,
+    setListenMode: setListenModeValue,
+    autoResponseMode,
+    setAutoResponseMode,
+    detectionConfidence,
+    setDetectionConfidence,
+    isPaused,
+    pauseCapture,
     // Scroll area ref for keyboard navigation
     scrollAreaRef,
   };
