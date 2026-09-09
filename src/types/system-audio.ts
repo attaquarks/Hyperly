@@ -7,3 +7,13 @@ export type TranscriptSegment = {
   text: string;
   isPartial?: boolean;
 };
+
+export type ListenMode =
+  | "auto"
+  | "general"
+  | "interview"
+  | "coding"
+  | "translate"
+  | "meeting";
+
+export type AutoResponseMode = "off" | "on-question" | "manual";
