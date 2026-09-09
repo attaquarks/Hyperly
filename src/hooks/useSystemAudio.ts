@@ -20,6 +20,7 @@ import {
   getConversationById,
 } from "@/lib";
 import { Message } from "@/types/completion";
+import { TranscriptSegment } from "@/types/system-audio";
 
 // VAD Configuration interface matching Rust
 export interface VadConfig {
@@ -90,6 +91,8 @@ export function useSystemAudio() {
   // event from the Rust side yields an STT result that is appended here so the user can see the
   // running text. When they hit Stop & Send, the final canonical transcript replaces this.
   const [livePartial, setLivePartial] = useState<string>("");
+  const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
+  const sessionStartRef = useRef<number>(Date.now());
   // Screenshot captured via the listen panel — attached to the next AI call when manual stop fires.
   const [pendingScreenshot, setPendingScreenshot] = useState<string | null>(null);
   // Mirror in a ref so callbacks always see the latest value without rebuilding deps.
@@ -234,6 +237,55 @@ export function useSystemAudio() {
     };
   }, []);
 
+  const elapsedSeconds = () =>
+    Math.max(0, Math.floor((Date.now() - sessionStartRef.current) / 1000));
+
+  const upsertPartialSegment = (text: string) => {
+    const timestamp = elapsedSeconds();
+    setTranscriptSegments((segments) => {
+      const last = segments[segments.length - 1];
+      if (last?.isPartial) {
+        return [
+          ...segments.slice(0, -1),
+          { ...last, timestamp, text, isPartial: true },
+        ];
+      }
+      return [
+        ...segments,
+        {
+          id: `segment-${Date.now()}`,
+          timestamp,
+          speaker: "Speaker 1",
+          text,
+          isPartial: true,
+        },
+      ];
+    });
+  };
+
+  const finalizeTranscriptSegment = (text: string) => {
+    const timestamp = elapsedSeconds();
+    setTranscriptSegments((segments) => {
+      const last = segments[segments.length - 1];
+      if (last?.isPartial) {
+        return [
+          ...segments.slice(0, -1),
+          { ...last, timestamp, text, isPartial: false },
+        ];
+      }
+      return [
+        ...segments,
+        {
+          id: `segment-${Date.now()}`,
+          timestamp,
+          speaker: "Speaker 1",
+          text,
+          isPartial: false,
+        },
+      ];
+    });
+  };
+
   // Handle single speech detection event (both VAD and continuous modes)
   useEffect(() => {
     let speechUnlisten: (() => void) | undefined;
@@ -271,6 +323,7 @@ export function useSystemAudio() {
               if (partial && partial.trim()) {
                 partialAccumulatorRef.current = partial;
                 setLivePartial(partial);
+                upsertPartialSegment(partial);
               }
             } catch (err) {
               // Swallow partial errors so they don't interrupt the recording.
@@ -331,6 +384,7 @@ export function useSystemAudio() {
 
               if (transcription.trim()) {
                 setLastTranscription(transcription);
+                finalizeTranscriptSegment(transcription);
                 // The full transcript just arrived — clear the live running one so the UI
                 // shows the canonical final text and the AI response.
                 setLivePartial("");
@@ -646,6 +700,8 @@ export function useSystemAudio() {
       setIsContinuousMode(isContinuous);
       setRecordingProgress(0);
       setLivePartial("");
+      setTranscriptSegments([]);
+      sessionStartRef.current = Date.now();
       partialAccumulatorRef.current = "";
 
       // If continuous mode
@@ -1026,6 +1082,7 @@ export function useSystemAudio() {
     setPendingScreenshot,
     // Live running transcript shown while audio is still being captured
     livePartial,
+    transcriptSegments,
     // Scroll area ref for keyboard navigation
     scrollAreaRef,
   };

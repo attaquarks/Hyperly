@@ -30,6 +30,7 @@ import { useSystemAudioType } from "@/hooks";
 import { useApp } from "@/contexts";
 import { useTheme } from "@/contexts/theme.context";
 import { cn } from "@/lib/utils";
+import { TranscriptThread } from "./TranscriptThread";
 
 export const SystemAudio = (props: useSystemAudioType) => {
   const {
@@ -70,6 +71,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     scrollAreaRef,
     setPendingScreenshot,
     livePartial,
+    transcriptSegments,
   } = props;
 
   const { supportsImages } = useApp();
@@ -371,6 +373,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
                   </div>
                 )}
 
+                <TranscriptThread segments={transcriptSegments} livePartial={livePartial} />
+
                 {/* Error Display */}
                 {error && !setupRequired && (
                   <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-50 border border-red-200">
@@ -475,3 +479,4 @@ export const SystemAudio = (props: useSystemAudioType) => {
     </Popover>
   );
 };
+export * from "./TranscriptThread";
