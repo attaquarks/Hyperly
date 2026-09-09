@@ -4,11 +4,13 @@ import {
   Completion,
   AudioVisualizer,
   StatusIndicator,
+  OverlayChrome,
+  OverlayMode,
 } from "./components";
 import { useApp } from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
-import { SparklesIcon, MinusIcon, XIcon } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { MinusIcon, XIcon } from "lucide-react";
+import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ErrorBoundary } from "react-error-boundary";
 import { ErrorLayout } from "@/layouts";
@@ -18,14 +20,13 @@ const App = () => {
   const { isHidden, systemAudio } = useApp();
   const { customizable } = useAppContext();
   const platform = getPlatform();
+  const [mode, setMode] = useState<OverlayMode>("ask");
 
-  const openDashboard = async () => {
-    try {
-      await invoke("open_dashboard");
-    } catch (error) {
-      console.error("Failed to open dashboard:", error);
+  useEffect(() => {
+    if (systemAudio?.capturing) {
+      setMode("listen");
     }
-  };
+  }, [systemAudio?.capturing]);
 
   const hideWindow = async () => {
     try {
@@ -58,8 +59,27 @@ const App = () => {
           isHidden ? "hidden pointer-events-none" : ""
         }`}
       >
-        <Card className="w-full flex flex-row items-center gap-2 p-2">
-          <SystemAudio {...systemAudio} />
+        <Card className="w-full border-0 bg-transparent p-0 shadow-none overflow-hidden">
+          <OverlayChrome
+            mode={mode}
+            onModeChange={setMode}
+            status={
+              systemAudio?.isAIProcessing
+                ? "Answering..."
+                : systemAudio?.capturing
+                ? "Listening"
+                : "Ready"
+            }
+            statusTone={
+              systemAudio?.isAIProcessing
+                ? "working"
+                : systemAudio?.capturing
+                ? "active"
+                : "ready"
+            }
+          >
+          <div className="flex flex-row items-center gap-2 p-2">
+          {mode === "listen" ? <SystemAudio {...systemAudio} /> : null}
           {systemAudio?.capturing ? (
             <div className="flex flex-row items-center gap-2 justify-between w-full">
               <div className="flex flex-1 items-center gap-2">
@@ -84,15 +104,7 @@ const App = () => {
                 : "w-full flex flex-row gap-2 items-center"
             }`}
           >
-            <Completion isHidden={isHidden} />
-            <Button
-              size={"icon"}
-              className="cursor-pointer"
-              title="Open dashboard"
-              onClick={openDashboard}
-            >
-              <SparklesIcon className="h-4 w-4" />
-            </Button>
+            {mode === "ask" ? <Completion isHidden={isHidden} /> : null}
             <Button
               size={"icon"}
               variant="ghost"
@@ -113,6 +125,8 @@ const App = () => {
             </Button>
           </div>
 
+          </div>
+          </OverlayChrome>
           <Updater />
           <DragButton />
         </Card>
