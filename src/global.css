@@ -315,3 +315,64 @@ body {
 .hyperly-overlay-content {
   min-width: 0;
 }
+
+
+.hyperly-thread {
+  padding: 10px 12px;
+  color: var(--hyperly-text);
+  background: rgb(255 255 255 / 0.035);
+  border: 1px solid var(--hyperly-line);
+  border-radius: 10px;
+}
+
+.hyperly-thread-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  color: var(--hyperly-text-muted);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+.hyperly-thread-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--hyperly-text-muted);
+  font-size: 10px;
+  font-weight: 450;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.hyperly-thread-list {
+  display: grid;
+  gap: 6px;
+}
+
+.hyperly-transcript-row {
+  display: grid;
+  grid-template-columns: 40px 72px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  color: rgb(248 248 248 / 0.86);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.hyperly-transcript-time,
+.hyperly-transcript-speaker {
+  color: var(--hyperly-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.hyperly-transcript-speaker {
+  color: rgb(248 248 248 / 0.72);
+}
+
+.hyperly-transcript-live {
+  color: rgb(110 231 183 / 0.92);
+}
