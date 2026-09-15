@@ -1,4 +1,4 @@
-import { Card, Updater, DragButton, CustomCursor, Button } from "@/components";
+import { Card, Updater, CustomCursor } from "@/components";
 import {
   SystemAudio,
   Completion,
@@ -9,9 +9,7 @@ import {
 } from "./components";
 import { useApp } from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
-import { MinusIcon, XIcon } from "lucide-react";
 import { useEffect, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ErrorBoundary } from "react-error-boundary";
 import { ErrorLayout } from "@/layouts";
 import { getPlatform } from "@/lib";
@@ -27,22 +25,6 @@ const App = () => {
       setMode("listen");
     }
   }, [systemAudio?.capturing]);
-
-  const hideWindow = async () => {
-    try {
-      await getCurrentWindow().hide();
-    } catch (error) {
-      console.error("Failed to hide window:", error);
-    }
-  };
-
-  const minimizeWindow = async () => {
-    try {
-      await getCurrentWindow().minimize();
-    } catch (error) {
-      console.error("Failed to minimize window:", error);
-    }
-  };
 
   return (
     <ErrorBoundary
@@ -78,57 +60,37 @@ const App = () => {
                 : "ready"
             }
           >
-          <div className="flex flex-row items-center gap-2 p-2">
-          {mode === "listen" ? <SystemAudio {...systemAudio} /> : null}
-          {systemAudio?.capturing ? (
-            <div className="flex flex-row items-center gap-2 justify-between w-full">
-              <div className="flex flex-1 items-center gap-2">
-                <AudioVisualizer isRecording={systemAudio?.capturing} />
-              </div>
-              <div className="flex !w-fit items-center gap-2">
-                <StatusIndicator
-                  setupRequired={systemAudio.setupRequired}
-                  error={systemAudio.error}
-                  isProcessing={systemAudio.isProcessing}
-                  isAIProcessing={systemAudio.isAIProcessing}
-                  capturing={systemAudio.capturing}
-                />
+            <div className="flex flex-row items-center gap-2 p-2">
+              {mode === "listen" ? <SystemAudio {...systemAudio} /> : null}
+              {systemAudio?.capturing ? (
+                <div className="flex flex-row items-center gap-2 justify-between w-full">
+                  <div className="flex flex-1 items-center gap-2">
+                    <AudioVisualizer isRecording={systemAudio?.capturing} />
+                  </div>
+                  <div className="flex !w-fit items-center gap-2">
+                    <StatusIndicator
+                      setupRequired={systemAudio.setupRequired}
+                      error={systemAudio.error}
+                      isProcessing={systemAudio.isProcessing}
+                      isAIProcessing={systemAudio.isAIProcessing}
+                      capturing={systemAudio.capturing}
+                    />
+                  </div>
+                </div>
+              ) : null}
+
+              <div
+                className={`${
+                  systemAudio?.capturing
+                    ? "hidden w-full fade-out transition-all duration-300"
+                    : "w-full flex flex-row gap-2 items-center"
+                }`}
+              >
+                {mode === "ask" ? <Completion isHidden={isHidden} /> : null}
               </div>
             </div>
-          ) : null}
-
-          <div
-            className={`${
-              systemAudio?.capturing
-                ? "hidden w-full fade-out transition-all duration-300"
-                : "w-full flex flex-row gap-2 items-center"
-            }`}
-          >
-            {mode === "ask" ? <Completion isHidden={isHidden} /> : null}
-            <Button
-              size={"icon"}
-              variant="ghost"
-              className="cursor-pointer"
-              title="Minimize window"
-              onClick={minimizeWindow}
-            >
-              <MinusIcon className="h-4 w-4" />
-            </Button>
-            <Button
-              size={"icon"}
-              variant="ghost"
-              className="cursor-pointer"
-              title="Hide window (Ctrl+\)"
-              onClick={hideWindow}
-            >
-              <XIcon className="h-4 w-4" />
-            </Button>
-          </div>
-
-          </div>
           </OverlayChrome>
           <Updater />
-          <DragButton />
         </Card>
         {customizable.cursor.type === "invisible" && platform !== "linux" ? (
           <CustomCursor />

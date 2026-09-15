@@ -10,18 +10,38 @@ const isAnyPopoverOpen = (): boolean => {
   return popoverContents.length > 0;
 };
 
+// The overlay is a compact, undecorated window pinned to the top of the screen.
+// The collapsed height MUST be tall enough to render the header (~42px) plus the
+// composer row (~54px). At the old 54px value the body was clipped by
+// `overflow: hidden`, so only the top bar was visible.
+export const OVERLAY_COLLAPSED_HEIGHT = 96;
+export const OVERLAY_EXPANDED_HEIGHT = 540;
+
+// Module-level pin flag. When the user explicitly expands the overlay with the
+// maximize control, auto-collapse (drag mouseup + DOM observer) must not snap it
+// back to the bar. Shared across every useWindowResize instance on purpose.
+let overlayPinnedOpen = false;
+
+export const setOverlayPinnedOpen = (pinned: boolean) => {
+  overlayPinnedOpen = pinned;
+};
+
+export const isOverlayPinnedOpen = () => overlayPinnedOpen;
+
 export const useWindowResize = () => {
   const resizeWindow = useCallback(async (expanded: boolean) => {
     try {
       const window = getCurrentWebviewWindow();
 
-      if (!expanded && isAnyPopoverOpen()) {
+      if (!expanded && (isAnyPopoverOpen() || isOverlayPinnedOpen())) {
         return;
       }
 
       // Keep the overlay well above the Windows taskbar (~40-48px tall)
       // 540px = ~90% of a 1080p screen, leaves room for the taskbar
-      const newHeight = expanded ? 540 : 54;
+      const newHeight = expanded
+        ? OVERLAY_EXPANDED_HEIGHT
+        : OVERLAY_COLLAPSED_HEIGHT;
 
       await invoke("set_window_height", {
         window,
