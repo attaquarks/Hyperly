@@ -21,10 +21,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { ModeSwitcher } from "./ModeSwitcher";
 import { RecordingPanel } from "./RecordingPanel";
 import { ResultsSection } from "./ResultsSection";
-import { SettingsPanel } from "./SettingsPanel";
 import { PermissionFlow } from "./PermissionFlow";
 import { QuickActions } from "./QuickActions";
-import { Warning } from "./Warning";
 import { ConversationHistory } from "./ConversationHistory";
 import { useSystemAudioType } from "@/hooks";
 import { useApp } from "@/contexts";
@@ -46,10 +44,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
     stopCapture,
     isPopoverOpen,
     setIsPopoverOpen,
-    useSystemPrompt,
-    setUseSystemPrompt,
-    contextContent,
-    setContextContent,
     startNewConversation,
     loadConversation,
     conversation,
@@ -75,11 +69,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     transcriptSegments,
     listenMode,
     setListenMode,
-    autoResponseMode,
-    setAutoResponseMode,
     detectionConfidence,
-    isPaused,
-    pauseCapture,
   } = props;
 
   const { supportsImages } = useApp();
@@ -145,6 +135,12 @@ export const SystemAudio = (props: useSystemAudioType) => {
       ...vadConfig,
       enabled: vadEnabled,
     });
+
+    // Switching to Auto-detect engages listening immediately. Switching back to
+    // Manual leaves any in-flight capture alone so the user keeps control.
+    if (vadEnabled && !capturing) {
+      void startCapture();
+    }
   };
 
   // Capture screenshot functionality
@@ -357,12 +353,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
                 <ListenControls
                   mode={listenMode}
                   onModeChange={setListenMode}
-                  autoResponseMode={autoResponseMode}
-                  onAutoResponseModeChange={setAutoResponseMode}
                   confidence={detectionConfidence}
-                  isPaused={isPaused}
-                  onPause={pauseCapture}
-                  onStop={stopCapture}
                 />
                 {/* Screenshot Preview */}
                 {screenshotImage && (
@@ -458,18 +449,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       setConversationMode={setConversationMode}
                     />
 
-                    {/* Settings Panel */}
-                    <SettingsPanel
-                      vadConfig={vadConfig}
-                      onUpdateVadConfig={updateVadConfiguration}
-                      useSystemPrompt={useSystemPrompt}
-                      setUseSystemPrompt={setUseSystemPrompt}
-                      contextContent={contextContent}
-                      setContextContent={setContextContent}
-                    />
-
-                    {/* Help/Keyboard Shortcuts */}
-                    <Warning isVadMode={isVadMode} />
                   </>
                 )}
               </div>

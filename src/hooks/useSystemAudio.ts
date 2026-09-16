@@ -21,7 +21,6 @@ import {
 } from "@/lib";
 import { Message } from "@/types/completion";
 import {
-  AutoResponseMode,
   ListenMode,
   TranscriptSegment,
 } from "@/types/system-audio";
@@ -97,10 +96,7 @@ export function useSystemAudio() {
   const [livePartial, setLivePartial] = useState<string>("");
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
   const [listenMode, setListenMode] = useState<ListenMode>("auto");
-  const [autoResponseMode, setAutoResponseMode] =
-    useState<AutoResponseMode>("on-question");
   const [detectionConfidence, setDetectionConfidence] = useState<number | null>(null);
-  const [isPaused, setIsPaused] = useState(false);
   const sessionStartRef = useRef<number>(Date.now());
   // Screenshot captured via the listen panel — attached to the next AI call when manual stop fires.
   const [pendingScreenshot, setPendingScreenshot] = useState<string | null>(null);
@@ -711,7 +707,6 @@ export function useSystemAudio() {
       setLivePartial("");
       setTranscriptSegments([]);
       setDetectionConfidence(null);
-      setIsPaused(false);
       sessionStartRef.current = Date.now();
       partialAccumulatorRef.current = "";
 
@@ -946,21 +941,9 @@ export function useSystemAudio() {
     }
   }, []);
 
-  const pauseCapture = useCallback(async () => {
-    if (!capturing) return;
-    if (isPaused) {
-      await startContinuousRecording();
-      setIsPaused(false);
-      return;
-    }
-    await invoke("stop_system_audio_capture");
-    setIsPaused(true);
-  }, [capturing, isPaused, startContinuousRecording]);
-
   const setListenModeValue = useCallback((mode: ListenMode) => {
     setListenMode(mode);
     if (mode === "auto") {
-      setAutoResponseMode("on-question");
     }
   }, []);
 
@@ -1017,33 +1000,27 @@ export function useSystemAudio() {
       if (!isPopoverOpen || !isContinuousMode) return;
       if (isProcessing || isAIProcessing) return;
 
-      // Enter: Start recording (when not recording) or Stop & Send (when recording)
-      if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
-        e.preventDefault();
-        if (!isRecordingInContinuousMode) {
-          startContinuousRecording();
-        } else {
-          manualStopAndSend();
-        }
-      }
-
       // Escape: Ignore recording (when recording)
       if (e.key === "Escape" && isRecordingInContinuousMode) {
         e.preventDefault();
         ignoreContinuousRecording();
       }
 
-      // Space: Start recording (when not recording) - only if not typing in input
+      // Space: Start recording, or Stop & Send when a recording is in progress.
+      // Ignored while the user is typing in an input or textarea.
       if (
         e.key === " " &&
-        !isRecordingInContinuousMode &&
         !e.metaKey &&
         !e.ctrlKey &&
         !(e.target instanceof HTMLInputElement) &&
         !(e.target instanceof HTMLTextAreaElement)
       ) {
         e.preventDefault();
-        startContinuousRecording();
+        if (!isRecordingInContinuousMode) {
+          startContinuousRecording();
+        } else {
+          manualStopAndSend();
+        }
       }
     };
 
@@ -1114,12 +1091,8 @@ export function useSystemAudio() {
     transcriptSegments,
     listenMode,
     setListenMode: setListenModeValue,
-    autoResponseMode,
-    setAutoResponseMode,
     detectionConfidence,
     setDetectionConfidence,
-    isPaused,
-    pauseCapture,
     // Scroll area ref for keyboard navigation
     scrollAreaRef,
   };
