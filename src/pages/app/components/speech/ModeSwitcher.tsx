@@ -21,25 +21,6 @@ export const ModeSwitcher = ({
     >
       <button
         type="button"
-        onClick={() => onModeChange(true)}
-        disabled={disabled}
-        className={cn(
-          "flex-1 flex items-center justify-center gap-2 px-2.5 py-1.5 rounded-md transition-all",
-          isVadMode
-            ? "bg-background shadow-sm text-foreground"
-            : "text-muted-foreground hover:text-foreground"
-        )}
-      >
-        <AudioWaveformIcon className="w-4 h-4 flex-shrink-0" />
-        <div className="flex flex-col items-start">
-          <span className="text-xs font-medium leading-tight">Auto-detect</span>
-          <span className="text-[9px] font-normal opacity-60 leading-tight">
-            (voice activity)
-          </span>
-        </div>
-      </button>
-      <button
-        type="button"
         onClick={() => onModeChange(false)}
         disabled={disabled}
         className={cn(
@@ -54,6 +35,25 @@ export const ModeSwitcher = ({
           <span className="text-xs font-medium leading-tight">Manual</span>
           <span className="text-[9px] font-normal opacity-60 leading-tight">
             (press to record)
+          </span>
+        </div>
+      </button>
+      <button
+        type="button"
+        onClick={() => onModeChange(true)}
+        disabled={disabled}
+        className={cn(
+          "flex-1 flex items-center justify-center gap-2 px-2.5 py-1.5 rounded-md transition-all",
+          isVadMode
+            ? "bg-background shadow-sm text-foreground"
+            : "text-muted-foreground hover:text-foreground"
+        )}
+      >
+        <AudioWaveformIcon className="w-4 h-4 flex-shrink-0" />
+        <div className="flex flex-col items-start">
+          <span className="text-xs font-medium leading-tight">Auto-detect</span>
+          <span className="text-[9px] font-normal opacity-60 leading-tight">
+            (voice activity)
           </span>
         </div>
       </button>

@@ -15,5 +15,3 @@ export type ListenMode =
   | "coding"
   | "translate"
   | "meeting";
-
-export type AutoResponseMode = "off" | "on-question" | "manual";
