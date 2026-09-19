@@ -4,7 +4,6 @@ import { cn } from "@/lib/utils";
 type Props = {
   mode: ListenMode;
   onModeChange: (mode: ListenMode) => void;
-  confidence: number | null;
 };
 
 const modes: Array<[ListenMode, string]> = [
@@ -16,7 +15,7 @@ const modes: Array<[ListenMode, string]> = [
   ["meeting", "Meeting"],
 ];
 
-export const ListenControls = ({ mode, onModeChange, confidence }: Props) => (
+export const ListenControls = ({ mode, onModeChange }: Props) => (
   <div className="hyperly-listen-controls">
     <div className="hyperly-mode-row" role="tablist" aria-label="Listen mode">
       {modes.map(([value, label]) => (
@@ -31,9 +30,6 @@ export const ListenControls = ({ mode, onModeChange, confidence }: Props) => (
           {label}
         </button>
       ))}
-      {confidence !== null && (
-        <span className="hyperly-detection-confidence">detected · {Math.round(confidence * 100)}%</span>
-      )}
     </div>
   </div>
 );

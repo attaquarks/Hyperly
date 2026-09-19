@@ -143,6 +143,8 @@ async fn run_vad_capture(
     let mut pre_speech: VecDeque<f32> =
         VecDeque::with_capacity(config.pre_speech_chunks * config.hop_size);
     let mut speech_buffer = Vec::new();
+    // speech_buffer length at the last partial emit; drives the ~2s cadence.
+    let mut last_partial_mark = 0usize;
     let mut in_speech = false;
     let mut silence_chunks = 0;
     let mut speech_chunks = 0;
@@ -171,6 +173,7 @@ async fn run_vad_capture(
                     // Speech START detected
                     in_speech = true;
                     speech_chunks = 0;
+                    last_partial_mark = 0;
 
                     // Include pre-speech buffer for natural sound
                     speech_buffer.extend(pre_speech.drain(..));
@@ -182,6 +185,18 @@ async fn run_vad_capture(
                 speech_buffer.extend_from_slice(&mono);
                 silence_chunks = 0; // Reset silence counter on any speech
 
+                // Emit a live partial roughly every 2s of accumulated speech so
+                // Auto mode shows the same running transcript as Manual. The
+                // buffer is already noise-gated (the gate ran per-chunk before
+                // the VAD check), so only normalize before encoding.
+                if speech_buffer.len() >= last_partial_mark + (sr as usize) * 2 {
+                    last_partial_mark = speech_buffer.len();
+                    let partial_normalized = normalize_audio_level(&speech_buffer, 0.1);
+                    if let Ok(partial_b64) = samples_to_wav_b64(sr, &partial_normalized) {
+                        let _ = app.emit("speech-partial", partial_b64);
+                    }
+                }
+
                 // Safety cap: force emit if exceeds 30s
                 if speech_buffer.len() > max_samples {
                     let normalized_buffer = normalize_audio_level(&speech_buffer, 0.1);
@@ -192,6 +207,7 @@ async fn run_vad_capture(
                     speech_buffer.clear();
                     in_speech = false;
                     speech_chunks = 0;
+                    last_partial_mark = 0;
                 }
             } else {
                 // Silence detected
@@ -236,6 +252,7 @@ async fn run_vad_capture(
                         in_speech = false;
                         silence_chunks = 0;
                         speech_chunks = 0;
+                        last_partial_mark = 0;
                     }
                 } else {
                     // Not in speech yet - maintain rolling pre-speech buffer

@@ -2,12 +2,12 @@
 Version=1.0
 Type=Application
 Name=Hyperly
-Comment=The Open Source Alternative to Cluely - Lightning-fast, privacy-first AI assistant for meetings and conversations
+Comment=A privacy-first AI assistant overlay with text, screenshot, and voice support
 Exec=hyperly
 Icon=hyperly
 Terminal=false
 Categories=Utility;AudioVideo;Audio;Development;Office;
-Keywords=ai;assistant;voice;speech;microphone;meeting;interview;cluely;stealth;privacy;
+Keywords=ai;assistant;voice;speech;microphone;meeting;interview;stealth;privacy;
 StartupNotify=true
 StartupWMClass=hyperly
 MimeType=audio/wav;audio/mp3;audio/ogg;

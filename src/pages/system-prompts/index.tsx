@@ -23,7 +23,6 @@ import {
 } from "lucide-react";
 import { DeleteSystemPrompt } from "./Delete";
 import { CreateEditDialog } from "./CreateEditDialog";
-import HyperlyPrompts from "./HyperlyPrompts";
 import { useState } from "react";
 import { PageLayout } from "@/layouts";
 
@@ -293,9 +292,6 @@ const SystemPrompts = () => {
         promptName={form.name}
         onDelete={handleDeleteConfirm}
       />
-
-      {/* Hyperly Default Prompts */}
-      <HyperlyPrompts />
     </PageLayout>
   );
 };

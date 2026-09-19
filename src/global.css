@@ -314,6 +314,9 @@ body {
 
 .hyperly-overlay-content {
   min-width: 0;
+
+  overflow-y: auto;
+  max-height: calc(100vh - 3.5rem);
 }
 
 
@@ -413,12 +416,5 @@ body {
   color: var(--hyperly-text);
   background: rgb(52 211 153 / 0.12);
   border-color: rgb(52 211 153 / 0.28);
-}
-
-.hyperly-detection-confidence {
-  margin-left: auto;
-  color: rgb(110 231 183 / 0.9);
-  font-size: 10px;
-  white-space: nowrap;
 }
 

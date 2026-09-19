@@ -68,6 +68,10 @@ export interface UseCompletionReturn {
   micOpen: boolean;
   /** Function to control microphone state */
   setMicOpen: Dispatch<SetStateAction<boolean>>;
+  /** Live transcript of the in-progress mic utterance, shown under the "User" label while speaking */
+  micTranscript: string;
+  /** Function to update the live mic transcript */
+  setMicTranscript: Dispatch<SetStateAction<string>>;
 
   // Conversation management
   /** ID of the currently active conversation, null for new conversation */
@@ -131,5 +135,7 @@ export interface UseCompletionReturn {
 
 /**
  * Type for the useCompletion hook function signature
+ * @param capturing - Whether system-audio capture is running; when it flips
+ * true the hook pauses the Ask mic so the two never transcribe in parallel.
  */
-export type UseCompletionHook = () => UseCompletionReturn;
+export type UseCompletionHook = (capturing?: boolean) => UseCompletionReturn;

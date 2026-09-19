@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components";
 import { AudioVisualizer } from "@/pages/app/components/speech/audio-visualizer";
-import { shouldUseHyperlyAPI, fetchSTT } from "@/lib";
+import { fetchSTT } from "@/lib";
 import { useApp } from "@/contexts";
 import { StopCircle, Send } from "lucide-react";
 
@@ -149,13 +149,12 @@ export const AudioRecorder = ({
     try {
       const audioBlob = new Blob(chunks, { type: mimeType });
 
-      const useHyperlyAPI = await shouldUseHyperlyAPI();
       const provider = allSttProviders.find(
         (p) => p.id === selectedSttProvider.provider
       );
 
       const text = await fetchSTT({
-        provider: useHyperlyAPI ? undefined : provider,
+        provider,
         selectedProvider: selectedSttProvider,
         audio: audioBlob,
       });

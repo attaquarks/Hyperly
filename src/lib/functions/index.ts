@@ -1,4 +1,4 @@
 export * from "./ai-response.function";
 export * from "./stt.function";
 export * from "./common.function";
-export * from "./hyperly.api";
+export * from "./fetch-models.function";

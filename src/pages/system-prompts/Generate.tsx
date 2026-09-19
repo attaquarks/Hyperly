@@ -5,9 +5,10 @@ import {
   Button,
   Textarea,
 } from "@/components";
+import { useApp } from "@/contexts";
+import { fetchAIResponse } from "@/lib";
 import { SparklesIcon } from "lucide-react";
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 
 interface GenerateSystemPromptProps {
   onGenerate: (prompt: string, promptName: string) => void;
@@ -18,10 +19,13 @@ interface SystemPromptResponse {
   system_prompt: string;
 }
 
+const GENERATE_META_PROMPT = `You generate system prompts for an AI assistant. The user describes the behavior they want. Reply with ONLY a raw JSON object (no markdown, no code fences, no commentary) in exactly this shape:
+{"prompt_name": "short 2-4 word title", "system_prompt": "the full system prompt text"}`;
+
 export const GenerateSystemPrompt = ({
   onGenerate,
 }: GenerateSystemPromptProps) => {
-  // License removed: feature is always available.
+  const { allAiProviders, selectedAIProvider } = useApp();
   const [userPrompt, setUserPrompt] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,21 +37,42 @@ export const GenerateSystemPrompt = ({
       return;
     }
 
+    const provider = allAiProviders.find(
+      (p) => p.id === selectedAIProvider.provider
+    );
+    if (!provider) {
+      setError("No AI provider configured. Set one up in Dev space first.");
+      return;
+    }
+
     try {
       setIsGenerating(true);
       setError(null);
 
-      const response = await invoke<SystemPromptResponse>(
-        "create_system_prompt",
-        {
-          userPrompt: userPrompt.trim(),
-        }
-      );
+      let raw = "";
+      for await (const chunk of fetchAIResponse({
+        provider,
+        selectedProvider: selectedAIProvider,
+        systemPrompt: GENERATE_META_PROMPT,
+        userMessage: userPrompt.trim(),
+      })) {
+        raw += chunk;
+      }
+
+      // Tolerate models that wrap the JSON in code fences
+      const cleaned = raw
+        .trim()
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```$/, "")
+        .trim();
+      const response: SystemPromptResponse = JSON.parse(cleaned);
 
       if (response.system_prompt && response.prompt_name) {
         onGenerate(response.system_prompt, response.prompt_name);
         setIsOpen(false);
         setUserPrompt("");
+      } else {
+        setError("The AI response was missing fields. Please try again.");
       }
     } catch (err) {
       const errorMessage =
@@ -99,22 +124,22 @@ export const GenerateSystemPrompt = ({
           {error && <p className="text-xs text-destructive">{error}</p>}
 
           <Button
-              className="w-full"
-              onClick={handleGenerate}
-              disabled={!userPrompt.trim() || isGenerating}
-            >
-              {isGenerating ? (
-                <>
-                  <SparklesIcon className="h-4 w-4 animate-pulse" />
-                  Generating...
-                </>
-              ) : (
-                <>
-                  <SparklesIcon className="h-4 w-4" />
-                  Generate
-                </>
-              )}
-            </Button>
+            className="w-full"
+            onClick={handleGenerate}
+            disabled={!userPrompt.trim() || isGenerating}
+          >
+            {isGenerating ? (
+              <>
+                <SparklesIcon className="h-4 w-4 animate-pulse" />
+                Generating...
+              </>
+            ) : (
+              <>
+                <SparklesIcon className="h-4 w-4" />
+                Generate
+              </>
+            )}
+          </Button>
         </div>
       </PopoverContent>
     </Popover>

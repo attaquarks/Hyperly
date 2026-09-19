@@ -15,7 +15,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { ShortcutRecorder } from "./ShortcutRecorder";
 
 export const ShortcutManager = () => {
-  // License removed: was destructured here for hasActiveLicense.
   const [actions, setActions] = useState<ShortcutAction[]>([]);
   const [bindings, setBindings] = useState<Record<string, ShortcutBinding>>({});
   const [editingAction, setEditingAction] = useState<string | null>(null);
@@ -28,8 +27,7 @@ export const ShortcutManager = () => {
 
   const loadShortcuts = () => {
     const config = getShortcutsConfig();
-    // License removed: always pass true for backward compatibility.
-    const allActions = getAllShortcutActions(true);
+    const allActions = getAllShortcutActions();
     setActions(allActions);
     setBindings(config.bindings);
   };
@@ -134,19 +132,6 @@ export const ShortcutManager = () => {
           </p>
         </div>
         <div className="flex gap-2">
-          {/* COMMENTED OUT: Custom shortcut creation */}
-          {/* {hasActiveLicense && (
-            <Button
-              size="sm"
-              variant="default"
-              onClick={() => setIsCreatingNew(!isCreatingNew)}
-              disabled={isApplying}
-              title="Create custom shortcut"
-            >
-              <Plus className="h-4 w-4" />
-              New
-            </Button>
-          )} */}
           <Button
             size="sm"
             variant="outline"

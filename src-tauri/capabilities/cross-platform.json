@@ -1,9 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "cross-platform",
-  "description": "Capability for the main window on Windows (personal build).",
+  "description": "Capability for the main window on Windows and Linux",
   "windows": ["main", "dashboard", "capture-overlay-*"],
-  "platforms": ["windows"],
+  "platforms": ["windows", "linux"],
   "permissions": [
     "core:default",
     "opener:default",

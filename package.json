@@ -1,8 +1,8 @@
 {
-  "name": "hyperly-windows",
+  "name": "hyperly",
   "private": false,
   "version": "0.2.0",
-  "description": "Hyperly (Windows-only personal build). A privacy-first AI assistant overlay with text, screenshot, and voice support.",
+  "description": "Hyperly. A privacy-first AI assistant overlay with text, screenshot, and voice support.",
   "author": {
     "name": "Attaquarks",
     "email": "mail@attaquarks.com",
@@ -24,8 +24,7 @@
     "privacy-first",
     "meeting-assistant",
     "speech-to-text",
-    "llm",
-    "windows"
+    "llm"
   ],
   "type": "module",
   "scripts": {

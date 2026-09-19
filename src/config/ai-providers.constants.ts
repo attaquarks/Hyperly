@@ -131,3 +131,40 @@ export const AI_PROVIDERS = [
     streaming: true,
   },
 ];
+
+/**
+ * Overrides for `fetchProviderModels`. Providers not listed here are treated
+ * as OpenAI-compatible: the models URL is derived from the chat curl
+ * (`…/chat/completions` → `…/models`, or the last path segment swapped for
+ * `models`) and ids are read from `data[].id`. A `null` entry means the
+ * provider exposes no model-list endpoint, so the UI keeps the manual model
+ * input.
+ */
+export const MODEL_LIST_OVERRIDES: Record<
+  string,
+  {
+    url: (apiKey: string) => string;
+    listPath: string;
+    idPath: string;
+    stripPrefix?: string;
+    filter?: { path: string; includes: string };
+  } | null
+> = {
+  gemini: {
+    url: (apiKey) =>
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
+    listPath: "models",
+    idPath: "name",
+    stripPrefix: "models/",
+    filter: {
+      path: "supportedGenerationMethods",
+      includes: "generateContent",
+    },
+  },
+  cohere: {
+    url: () => "https://api.cohere.ai/v1/models",
+    listPath: "models",
+    idPath: "name",
+  },
+  perplexity: null,
+};

@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useApp } from "@/contexts";
 import {
   extractVariables,
   safeLocalStorage,
   deleteAllConversations,
+  fetchProviderModels,
 } from "@/lib";
 import { STORAGE_KEYS } from "@/config";
+import { ModelListState, TYPE_PROVIDER } from "@/types";
 
 export const useSettings = () => {
   const {
@@ -29,6 +31,10 @@ export const useSettings = () => {
   >([]);
 
   const [showDeleteConfirmDialog, setShowDeleteConfirmDialog] = useState(false);
+  const [modelList, setModelList] = useState<ModelListState>({
+    status: "idle",
+    models: [],
+  });
 
   const handleScreenshotModeChange = (value: "auto" | "manual") => {
     const newConfig = { ...screenshotConfiguration, mode: value };
@@ -82,6 +88,66 @@ export const useSettings = () => {
     }
   }, [selectedSttProvider.provider]);
 
+  // Guards against a slow response for a previously selected provider
+  // overwriting the list of the current one.
+  const modelRequestRef = useRef(0);
+
+  const loadModels = (
+    provider: TYPE_PROVIDER,
+    variables: Record<string, string>,
+    keepModels = false
+  ) => {
+    const requestId = ++modelRequestRef.current;
+    setModelList((prev) => ({
+      status: "loading",
+      models: keepModels ? prev.models : [],
+    }));
+    fetchProviderModels(provider, variables).then((result) => {
+      if (requestId !== modelRequestRef.current) return;
+      if (result.status === "ok") {
+        setModelList({ status: "ok", models: result.models });
+      } else if (result.status === "unsupported") {
+        setModelList({ status: "unsupported", models: [] });
+      } else {
+        setModelList({ status: "error", models: [], error: result.message });
+      }
+    });
+  };
+
+  // Model auto-detect: fetch the provider's model list when the selection
+  // changes — but only unprompted when the request can't fail for missing
+  // credentials, i.e. an API key is already stored or the endpoint is local
+  // and keyless. Otherwise the user triggers the fetch with the refresh
+  // button once they've entered the key (the key input commits per
+  // keystroke, so watching it would fire a request per character).
+  useEffect(() => {
+    const provider = allAiProviders.find(
+      (p) => p.id === selectedAIProvider.provider
+    );
+    if (!provider) {
+      modelRequestRef.current++;
+      setModelList({ status: "idle", models: [] });
+      return;
+    }
+    const needsKey = provider.curl.includes("{{API_KEY}}");
+    const hasKey = !!selectedAIProvider.variables?.api_key?.trim();
+    const isLocal = /localhost|127\.0\.0\.1/.test(provider.curl);
+    if (needsKey && !hasKey && !isLocal) {
+      modelRequestRef.current++;
+      setModelList({ status: "idle", models: [] });
+      return;
+    }
+    loadModels(provider, selectedAIProvider.variables);
+  }, [selectedAIProvider.provider]);
+
+  const refreshModels = () => {
+    const provider = allAiProviders.find(
+      (p) => p.id === selectedAIProvider.provider
+    );
+    if (!provider) return;
+    loadModels(provider, selectedAIProvider.variables, true);
+  };
+
   const handleDeleteAllChatsConfirm = async () => {
     try {
       await deleteAllConversations();
@@ -108,5 +174,7 @@ export const useSettings = () => {
     setShowDeleteConfirmDialog,
     variables,
     sttVariables,
+    modelList,
+    refreshModels,
   };
 };

@@ -11,6 +11,8 @@ import { PlusIcon, SaveIcon } from "lucide-react";
 import { useCustomAiProviders } from "@/hooks";
 import { useApp } from "@/contexts";
 import { cn } from "@/lib/utils";
+import { useState } from "react";
+import { buildOpenAICompatibleCurl } from "@/lib";
 
 interface CreateEditProviderProps {
   customProviderHook?: ReturnType<typeof useCustomAiProviders>;
@@ -35,6 +37,37 @@ export const CreateEditProvider = ({
     handleAutoFill,
   } = hookInstance;
 
+  // Simple mode generates an OpenAI-compatible curl template from a base
+  // URL (+ optional key/model), so providers like LM Studio or a company
+  // gateway can be added without writing raw curl. Editing an existing
+  // provider always opens the advanced form, since an arbitrary curl can't
+  // be decomposed back into the simple fields.
+  const [formMode, setFormMode] = useState<"simple" | "advanced">("simple");
+  const [simpleFields, setSimpleFields] = useState({
+    baseUrl: "",
+    apiKey: "",
+    model: "",
+    supportsImages: true,
+  });
+  const mode = editingProvider ? "advanced" : formMode;
+
+  const updateSimpleFields = (
+    patch: Partial<{
+      baseUrl: string;
+      apiKey: string;
+      model: string;
+      supportsImages: boolean;
+    }>
+  ) => {
+    const next = { ...simpleFields, ...patch };
+    setSimpleFields(next);
+    setFormData((prev) => ({
+      ...prev,
+      curl: buildOpenAICompatibleCurl(next),
+      responseContentPath: "choices[0].message.content",
+    }));
+  };
+
   return (
     <>
       {!showForm ? (
@@ -42,6 +75,13 @@ export const CreateEditProvider = ({
           onClick={() => {
             setShowForm(true);
             setErrors({});
+            setFormMode("simple");
+            setSimpleFields({
+              baseUrl: "",
+              apiKey: "",
+              model: "",
+              supportsImages: true,
+            });
           }}
           variant="outline"
           className="w-full h-11 border-1 border-input/50 focus:border-primary/50 transition-colors"
@@ -57,24 +97,109 @@ export const CreateEditProvider = ({
               description="Create a custom AI provider to use with your AI-powered applications."
             />
 
-            <div className="w-[120px]">
-              <Selection
-                options={allAiProviders
-                  ?.filter((provider) => !provider?.isCustom)
-                  .map((provider) => {
-                    return {
-                      label: provider?.id || "AI Provider",
-                      value: provider?.id || "AI Provider",
-                    };
-                  })}
-                placeholder={"Auto-fill"}
-                onChange={(value) => {
-                  handleAutoFill(value);
-                }}
-              />
-            </div>
+            {mode === "advanced" ? (
+              <div className="w-[120px]">
+                <Selection
+                  options={allAiProviders
+                    ?.filter((provider) => !provider?.isCustom)
+                    .map((provider) => {
+                      return {
+                        label: provider?.id || "AI Provider",
+                        value: provider?.id || "AI Provider",
+                      };
+                    })}
+                  placeholder={"Auto-fill"}
+                  onChange={(value) => {
+                    handleAutoFill(value);
+                  }}
+                />
+              </div>
+            ) : null}
           </div>
 
+          {!editingProvider ? (
+            <div className="flex gap-2 py-2">
+              <Button
+                type="button"
+                size="sm"
+                variant={mode === "simple" ? "default" : "outline"}
+                onClick={() => setFormMode("simple")}
+              >
+                Simple setup
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={mode === "advanced" ? "default" : "outline"}
+                onClick={() => setFormMode("advanced")}
+              >
+                Advanced (raw curl)
+              </Button>
+            </div>
+          ) : null}
+
+          {mode === "simple" ? (
+            <div className="space-y-3 py-2">
+              <div className="space-y-1">
+                <Header
+                  title="Base URL *"
+                  description="Base URL of any OpenAI-compatible API, e.g. http://localhost:1234/v1 (LM Studio) or https://api.groq.com/openai/v1."
+                />
+                <TextInput
+                  placeholder="http://localhost:1234/v1"
+                  value={simpleFields.baseUrl}
+                  onChange={(value) => updateSimpleFields({ baseUrl: value })}
+                  error={
+                    errors.curl
+                      ? "Enter a base URL to generate the request template."
+                      : undefined
+                  }
+                />
+              </div>
+
+              <div className="space-y-1">
+                <Header
+                  title="API Key"
+                  description="Optional — leave empty to enter it when selecting the provider."
+                />
+                <TextInput
+                  placeholder="sk-..."
+                  value={simpleFields.apiKey}
+                  onChange={(value) => updateSimpleFields({ apiKey: value })}
+                />
+              </div>
+
+              <div className="space-y-1">
+                <Header
+                  title="Model"
+                  description="Optional — leave empty to pick the model when selecting the provider."
+                />
+                <TextInput
+                  placeholder="llama-3.3-70b-versatile"
+                  value={simpleFields.model}
+                  onChange={(value) => updateSimpleFields({ model: value })}
+                />
+              </div>
+
+              <div className="flex justify-between items-center">
+                <Header
+                  title="Image input"
+                  description="Include an image slot in the request template. Turn off for text-only endpoints."
+                />
+                <Switch
+                  checked={simpleFields.supportsImages}
+                  onCheckedChange={(checked) =>
+                    updateSimpleFields({ supportsImages: checked })
+                  }
+                />
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                Generates an OpenAI-compatible chat-completions template with
+                the response path preconfigured.
+              </p>
+            </div>
+          ) : (
           <div className="">
             {/* Basic Configuration */}
             <div className="space-y-1">
@@ -211,6 +336,7 @@ export const CreateEditProvider = ({
               </div>
             </div>
           </div>
+          )}
 
           <div className="flex justify-between items-center space-x-2">
             <Header
@@ -227,26 +353,29 @@ export const CreateEditProvider = ({
               }
             />
           </div>
-          {/* Response Configuration */}
-          <div className="space-y-2">
-            <Header
-              title="Response Content Path *"
-              description="The path to extract content from the API response."
-            />
+          {/* Response Configuration — simple mode always uses the
+              OpenAI-compatible path, so the field is advanced-only */}
+          {mode === "advanced" ? (
+            <div className="space-y-2">
+              <Header
+                title="Response Content Path *"
+                description="The path to extract content from the API response."
+              />
 
-            <TextInput
-              placeholder="choices[0].message.content"
-              value={formData.responseContentPath || ""}
-              onChange={(value) =>
-                setFormData((prev) => ({
-                  ...prev,
-                  responseContentPath: value,
-                }))
-              }
-              error={errors.responseContentPath}
-              notes="The path to extract content from the API response. Examples: choices[0].message.content, text, candidates[0].content.parts[0].text"
-            />
-          </div>
+              <TextInput
+                placeholder="choices[0].message.content"
+                value={formData.responseContentPath || ""}
+                onChange={(value) =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    responseContentPath: value,
+                  }))
+                }
+                error={errors.responseContentPath}
+                notes="The path to extract content from the API response. Examples: choices[0].message.content, text, candidates[0].content.parts[0].text"
+              />
+            </div>
+          ) : null}
 
           <div className="flex justify-end gap-2 -mt-3">
             <Button

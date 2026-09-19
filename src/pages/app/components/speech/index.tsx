@@ -22,7 +22,6 @@ import { ModeSwitcher } from "./ModeSwitcher";
 import { RecordingPanel } from "./RecordingPanel";
 import { ResultsSection } from "./ResultsSection";
 import { PermissionFlow } from "./PermissionFlow";
-import { QuickActions } from "./QuickActions";
 import { ConversationHistory } from "./ConversationHistory";
 import { useSystemAudioType } from "@/hooks";
 import { useApp } from "@/contexts";
@@ -31,7 +30,9 @@ import { cn } from "@/lib/utils";
 import { TranscriptThread } from "./TranscriptThread";
 import { ListenControls } from "./ListenControls";
 
-export const SystemAudio = (props: useSystemAudioType) => {
+export const SystemAudio = (
+  props: useSystemAudioType & { panelVisible?: boolean }
+) => {
   const {
     capturing,
     isProcessing,
@@ -48,14 +49,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
     loadConversation,
     conversation,
     resizeWindow,
-    quickActions,
-    addQuickAction,
-    removeQuickAction,
-    isManagingQuickActions,
-    setIsManagingQuickActions,
-    showQuickActions,
-    setShowQuickActions,
-    handleQuickActionClick,
     vadConfig,
     updateVadConfiguration,
     isRecordingInContinuousMode,
@@ -69,8 +62,13 @@ export const SystemAudio = (props: useSystemAudioType) => {
     transcriptSegments,
     listenMode,
     setListenMode,
-    detectionConfidence,
   } = props;
+
+  // While the user is on the Ask tab, the listen panel stays mounted (so the
+  // capture, transcript, and scroll position survive the switch) but its
+  // popover content is hidden with CSS. The DOM node remains, which also keeps
+  // the window-resize observer from collapsing the overlay mid-capture.
+  const panelVisible = props.panelVisible ?? true;
 
   const { supportsImages } = useApp();
   const { theme, setTheme } = useTheme();
@@ -92,7 +90,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
   const [showHistory, setShowHistory] = useState(false);
 
   const isVadMode = vadConfig.enabled;
-  const hasResponse = lastAIResponse || isAIProcessing;
 
   // Keyboard shortcut for Cmd+K to toggle view mode
   useEffect(() => {
@@ -212,10 +209,13 @@ export const SystemAudio = (props: useSystemAudioType) => {
         <PopoverContent
           align="end"
           side="bottom"
-          className="select-none w-screen p-0 border shadow-lg overflow-hidden border-input/50"
+          className={cn(
+            "select-none w-full max-w-[calc(100vw-2rem)] p-0 border shadow-lg overflow-hidden border-input/50",
+            !panelVisible && "hidden"
+          )}
           sideOffset={8}
         >
-          <div className="flex flex-col h-[calc(100vh-4rem)] overflow-hidden">
+          <div className="flex flex-col max-h-[calc(100vh-6rem)] overflow-hidden">
             {/* Header - Mode Switcher + Actions */}
             <div className="flex-shrink-0 p-3 border-b border-border/50">
               <div className="flex items-center justify-between gap-2">
@@ -353,7 +353,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
                 <ListenControls
                   mode={listenMode}
                   onModeChange={setListenMode}
-                  confidence={detectionConfidence}
                 />
                 {/* Screenshot Preview */}
                 {screenshotImage && (
@@ -455,21 +454,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
               </ScrollArea>
             </div>
 
-            {/* Quick Actions */}
-            {!setupRequired && hasResponse && (
-              <div className="flex-shrink-0 border-t border-border/50 p-2">
-                <QuickActions
-                  actions={quickActions}
-                  onActionClick={handleQuickActionClick}
-                  onAddAction={addQuickAction}
-                  onRemoveAction={removeQuickAction}
-                  isManaging={isManagingQuickActions}
-                  setIsManaging={setIsManagingQuickActions}
-                  show={showQuickActions}
-                  setShow={setShowQuickActions}
-                />
-              </div>
-            )}
+
           </div>
         </PopoverContent>
       )}

@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use tauri::LogicalPosition;
 use tauri::{App, AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 
 // The offset from the top of the screen to the window
@@ -148,16 +150,35 @@ pub fn move_window(app: tauri::AppHandle, direction: String, step: i32) -> Resul
 pub fn create_dashboard_window<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<WebviewWindow<R>, tauri::Error> {
-    // Windows-only build: standard desktop window without macOS NSPanel extras.
-    let window = WebviewWindowBuilder::new(app, "dashboard", tauri::WebviewUrl::App("/chats".into()))
+    let base_builder =
+        WebviewWindowBuilder::new(app, "dashboard", tauri::WebviewUrl::App("/chats".into()));
+
+    // macOS: overlay title bar with hidden title and inset traffic lights,
+    // shown immediately.
+    #[cfg(target_os = "macos")]
+    let base_builder = base_builder
+        .title("Hyperly - Dashboard")
+        .center()
+        .decorations(true)
+        .inner_size(1200.0, 800.0)
+        .min_inner_size(900.0, 600.0)
+        .hidden_title(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .content_protected(true)
+        .visible(true)
+        .traffic_light_position(LogicalPosition::new(14.0, 18.0));
+
+    #[cfg(not(target_os = "macos"))]
+    let base_builder = base_builder
         .title("Hyperly - Dashboard")
         .center()
         .decorations(true)
         .inner_size(1200.0, 800.0)
         .min_inner_size(900.0, 600.0)
         .content_protected(true)
-        .visible(false)
-        .build()?;
+        .visible(false);
+
+    let window = base_builder.build()?;
 
     // Set up close event handler - hide window instead of destroying it
     setup_dashboard_close_handler(&window);

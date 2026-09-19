@@ -634,6 +634,9 @@ the "copyright" line and a pointer to where the full notice is found.
     Hyperly - Invisible AI Assistant.
     Copyright (C) 2025  Attaquarks <mail@attaquarks.com>
 
+    Based on Pluely - Invisible AI Assistant.
+    Copyright (C) 2025  Srikanth Nani <mail@srikanthnani.com>
+
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
@@ -649,14 +652,19 @@ the "copyright" line and a pointer to where the full notice is found.
 
 Also add information on how to contact you by electronic and paper mail.
 
-You can contact the author at: Attaquarks <mail@attaquarks.com>
-Project website: https://hyperly.com
-Author website: https://www.attaquarks.com
+You can contact the original author at: Srikanth Nani <mail@srikanthnani.com>
+Original project website: https://pluely.com
+Original author website: https://www.srikanthnani.com
+
+Hyperly fork maintained by: Attaquarks <mail@attaquarks.com>
+Hyperly project website: https://hyperly.com
+Hyperly author website: https://www.attaquarks.com
 
 If the program does terminal interaction, make it output a short
 notice like this when it starts in an interactive mode:
 
     Hyperly  Copyright (C) 2025  Attaquarks <mail@attaquarks.com>
+    Based on Pluely  Copyright (C) 2025  Srikanth Nani <mail@srikanthnani.com>
     This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.
     This is free software, and you are welcome to redistribute it
     under certain conditions; type `show c' for details.

@@ -90,7 +90,9 @@ export const Input = ({
         <PopoverContent
           align="end"
           side="bottom"
-          className="w-screen p-0 border shadow-lg overflow-hidden"
+          className={`w-full max-w-[calc(100vw-2rem)] p-0 border shadow-lg overflow-hidden${
+            isHidden ? " hidden" : ""
+          }`}
           sideOffset={8}
         >
           <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/30">
@@ -153,7 +155,7 @@ export const Input = ({
             </div>
           </div>
 
-          <ScrollArea ref={scrollAreaRef} className="h-[calc(100vh-7rem)]">
+          <ScrollArea ref={scrollAreaRef} className="max-h-[calc(100vh-8rem)]">
             <div className="p-4">
               {error && (
                 <div className="mb-4 p-3 bg-destructive/10 border border-destructive/20 rounded text-sm text-destructive">
@@ -182,7 +184,7 @@ export const Input = ({
                           key={message.id}
                           className={`p-3 rounded-lg text-sm ${
                             message.role === "user"
-                              ? "bg-primary/10 border-l-4 border-primary"
+                              ? "bg-primary/10 border border-primary/20"
                               : "bg-muted/50"
                           }`}
                         >

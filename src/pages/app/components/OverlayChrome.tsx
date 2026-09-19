@@ -168,7 +168,7 @@ export const OverlayChrome = ({
           <DragButton />
         </div>
       </header>
-      <div className="hyperly-overlay-content">{children}</div>
+      <div className="hyperly-overlay-content overflow-y-auto max-h-[calc(100vh-3.5rem)]">{children}</div>
     </div>
   );
 };

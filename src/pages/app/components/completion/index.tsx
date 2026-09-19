@@ -4,8 +4,14 @@ import { Files } from "./Files";
 import { Audio } from "./Audio";
 import { Input } from "./Input";
 
-export const Completion = ({ isHidden }: { isHidden: boolean }) => {
-  const completion = useCompletion();
+export const Completion = ({
+  isHidden,
+  capturing = false,
+}: {
+  isHidden: boolean;
+  capturing?: boolean;
+}) => {
+  const completion = useCompletion(capturing);
 
   return (
     <>

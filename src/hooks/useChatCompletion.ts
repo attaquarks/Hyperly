@@ -6,7 +6,6 @@ import {
   saveConversation,
   getConversationById,
   generateConversationTitle,
-  shouldUseHyperlyAPI,
   MESSAGE_ID_OFFSET,
   generateMessageId,
   generateRequestId,
@@ -172,9 +171,8 @@ export const useChatCompletion = (
           });
         }
 
-        const useHyperlyAPI = await shouldUseHyperlyAPI();
         // Check if AI provider is configured
-        if (!selectedAIProvider.provider && !useHyperlyAPI) {
+        if (!selectedAIProvider.provider) {
           setState((prev) => ({
             ...prev,
             error: "Please select an AI provider in settings",
@@ -185,7 +183,7 @@ export const useChatCompletion = (
         const provider = allAiProviders.find(
           (p) => p.id === selectedAIProvider.provider
         );
-        if (!provider && !useHyperlyAPI) {
+        if (!provider) {
           setState((prev) => ({
             ...prev,
             error: "Invalid provider selected",
@@ -225,7 +223,7 @@ export const useChatCompletion = (
         try {
           // Use the fetchAIResponse function with signal
           for await (const chunk of fetchAIResponse({
-            provider: useHyperlyAPI ? undefined : provider,
+            provider,
             selectedProvider: selectedAIProvider,
             systemPrompt: systemPrompt || undefined,
             history: messageHistory,

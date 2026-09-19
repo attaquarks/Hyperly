@@ -1,7 +1,7 @@
 [package]
 name = "hyperly"
 version = "0.2.0"
-description = "The Open Source Alternative to Cluely - A lightning-fast, privacy-first AI assistant that works seamlessly during meetings, interviews, and conversations without anyone knowing."
+description = "A privacy-first AI assistant overlay with text, screenshot, and voice support."
 authors = ["Attaquarks <mail@attaquarks.com>"]
 license = "GPL-3.0"
 repository = "https://github.com/attaquarks/hyperly"
@@ -26,7 +26,7 @@ tauri-build = { version = "2", features = [] }
 dotenv = "0.15"
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-http = "2.5.2"
 tauri-plugin-global-shortcut = "2"
@@ -49,6 +49,11 @@ ringbuf = "0.4.8"
 tauri-plugin-shell = "2.3.1"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-plugin-macos-permissions = "2"
+cidre = "0.11.3"
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wasapi = "0.19.0"

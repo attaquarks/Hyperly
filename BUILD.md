@@ -1,4 +1,9 @@
-# Hyperly (Windows-only) — Build Notes
+# Hyperly — Build Notes
+
+> The toolchain troubleshooting below is Windows-specific. On macOS, install
+> Xcode Command Line Tools (`xcode-select --install`), then use the same
+> `npm install` / `npm run tauri dev` / `npm run tauri build` commands —
+> the bundle lands in `src-tauri/target/release/bundle/` as a `.app`/`.dmg`.
 
 ## Prerequisites
 

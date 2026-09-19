@@ -7,11 +7,11 @@ import { fetchSTT, fetchAIResponse } from "@/lib/functions";
 import {
   DEFAULT_QUICK_ACTIONS,
   DEFAULT_SYSTEM_PROMPT,
+  LISTEN_MODE_PROMPTS,
   STORAGE_KEYS,
 } from "@/config";
 import {
   safeLocalStorage,
-  shouldUseHyperlyAPI,
   generateConversationTitle,
   saveConversation,
   CONVERSATION_SAVE_DEBOUNCE_MS,
@@ -52,6 +52,13 @@ const DEFAULT_VAD_CONFIG: VadConfig = {
   pre_speech_chunks: 12, // ~0.27s - enough to catch word start
   noise_gate_threshold: 0.003, // Stronger noise filtering
   max_recording_duration_secs: 180, // 3 minutes default
+};
+
+// Compose the system prompt for listen-panel AI calls: the active mode's
+// preset (when it has one) rides on top of the user's configured prompt.
+const composeListenPrompt = (base: string, mode: ListenMode): string => {
+  const preset = LISTEN_MODE_PROMPTS[mode];
+  return preset ? `${base}\n\n${preset}` : base;
 };
 
 // Chat message interface (reusing from useCompletion)
@@ -96,7 +103,9 @@ export function useSystemAudio() {
   const [livePartial, setLivePartial] = useState<string>("");
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
   const [listenMode, setListenMode] = useState<ListenMode>("auto");
-  const [detectionConfidence, setDetectionConfidence] = useState<number | null>(null);
+  // Ref mirror so the speech-detected listener — whose effect deps don't
+  // include listenMode — always reads the current mode.
+  const listenModeRef = useRef<ListenMode>("auto");
   const sessionStartRef = useRef<number>(Date.now());
   // Screenshot captured via the listen panel — attached to the next AI call when manual stop fires.
   const [pendingScreenshot, setPendingScreenshot] = useState<string | null>(null);
@@ -160,6 +169,31 @@ export function useSystemAudio() {
         setVadConfig(parsed);
       } catch (error) {
         console.error("Failed to load VAD config:", error);
+      }
+    }
+
+    // Load listen mode
+    const savedListenMode = safeLocalStorage.getItem(
+      STORAGE_KEYS.SYSTEM_AUDIO_LISTEN_MODE
+    );
+    if (savedListenMode) {
+      try {
+        const parsed = JSON.parse(savedListenMode);
+        if (
+          [
+            "auto",
+            "general",
+            "interview",
+            "coding",
+            "translate",
+            "meeting",
+          ].includes(parsed)
+        ) {
+          setListenMode(parsed);
+          listenModeRef.current = parsed;
+        }
+      } catch (error) {
+        console.error("Failed to load listen mode:", error);
       }
     }
   }, []);
@@ -312,12 +346,11 @@ export function useSystemAudio() {
               }
               const audioBlob = new Blob([bytes], { type: "audio/wav" });
 
-              const useHyperlyAPI = await shouldUseHyperlyAPI();
-              if (!selectedSttProvider.provider && !useHyperlyAPI) return;
+              if (!selectedSttProvider.provider) return;
               const providerConfig = allSttProviders.find(
                 (p) => p.id === selectedSttProvider.provider
               );
-              if (!providerConfig && !useHyperlyAPI) return;
+              if (!providerConfig) return;
 
               const partial = await fetchSTT({
                 provider: providerConfig,
@@ -350,8 +383,7 @@ export function useSystemAudio() {
             }
             const audioBlob = new Blob([bytes], { type: "audio/wav" });
 
-            const useHyperlyAPI = await shouldUseHyperlyAPI();
-            if (!selectedSttProvider.provider && !useHyperlyAPI) {
+            if (!selectedSttProvider.provider) {
               setError("No speech provider selected.");
               return;
             }
@@ -360,7 +392,7 @@ export function useSystemAudio() {
               (p) => p.id === selectedSttProvider.provider
             );
 
-            if (!providerConfig && !useHyperlyAPI) {
+            if (!providerConfig) {
               setError("Speech provider config not found.");
               return;
             }
@@ -396,9 +428,13 @@ export function useSystemAudio() {
                 partialAccumulatorRef.current = "";
                 setError("");
 
-                const effectiveSystemPrompt = useSystemPrompt
+                const baseSystemPrompt = useSystemPrompt
                   ? systemPrompt || DEFAULT_SYSTEM_PROMPT
                   : contextContent || DEFAULT_SYSTEM_PROMPT;
+                const effectiveSystemPrompt = composeListenPrompt(
+                  baseSystemPrompt,
+                  listenModeRef.current
+                );
 
                 const previousMessages = conversation.messages.map((msg) => {
                   return { role: msg.role, content: msg.content };
@@ -511,9 +547,10 @@ export function useSystemAudio() {
   const handleQuickActionClick = async (action: string) => {
     setError("");
 
-    const effectiveSystemPrompt = useSystemPrompt
+    const baseSystemPrompt = useSystemPrompt
       ? systemPrompt || DEFAULT_SYSTEM_PROMPT
       : contextContent || DEFAULT_SYSTEM_PROMPT;
+    const effectiveSystemPrompt = composeListenPrompt(baseSystemPrompt, listenMode);
 
     // Include the most recent transcription in conversation history if it exists
     let updatedMessages = [...conversation.messages];
@@ -608,8 +645,7 @@ export function useSystemAudio() {
 
         let fullResponse = "";
 
-        const useHyperlyAPI = await shouldUseHyperlyAPI();
-        if (!selectedAIProvider.provider && !useHyperlyAPI) {
+        if (!selectedAIProvider.provider) {
           setError("No AI provider selected.");
           return;
         }
@@ -617,7 +653,7 @@ export function useSystemAudio() {
         const provider = allAiProviders.find(
           (p) => p.id === selectedAIProvider.provider
         );
-        if (!provider && !useHyperlyAPI) {
+        if (!provider) {
           setError("AI provider config not found.");
           return;
         }
@@ -630,7 +666,7 @@ export function useSystemAudio() {
 
         try {
           for await (const chunk of fetchAIResponse({
-            provider: useHyperlyAPI ? undefined : provider,
+            provider,
             selectedProvider: selectedAIProvider,
             systemPrompt: prompt,
             history: previousMessages,
@@ -706,17 +742,15 @@ export function useSystemAudio() {
       setRecordingProgress(0);
       setLivePartial("");
       setTranscriptSegments([]);
-      setDetectionConfidence(null);
       sessionStartRef.current = Date.now();
       partialAccumulatorRef.current = "";
 
-      // If continuous mode
-      if (isContinuous) {
-        setIsRecordingInContinuousMode(false);
-        return;
-      }
+      // Manual and Auto both start capturing audio immediately. Manual used
+      // to arm first and wait for a separate Space/button press, which read
+      // as dead (button clicked, nothing happens) and made `capturing` claim
+      // audio was flowing while nothing was being captured.
+      setIsRecordingInContinuousMode(false);
 
-      // VAD mode: Start recording immediately
       // Stop any existing capture
       await invoke<string>("stop_system_audio_capture");
 
@@ -832,6 +866,10 @@ export function useSystemAudio() {
     resizeWindow,
   ]);
 
+  // `capturing` is a dependency on purpose: the registered callback closes
+  // over it, and startCapture/stopCapture are both stable across capture
+  // state changes — without it the global shortcut kept a stale `capturing`
+  // and could start a capture but never stop one.
   useEffect(() => {
     globalShortcuts.registerSystemAudioCallback(async () => {
       if (capturing) {
@@ -840,7 +878,7 @@ export function useSystemAudio() {
         await startCapture();
       }
     });
-  }, [startCapture, stopCapture]);
+  }, [capturing, startCapture, stopCapture]);
 
   useEffect(() => {
     return () => {
@@ -943,8 +981,11 @@ export function useSystemAudio() {
 
   const setListenModeValue = useCallback((mode: ListenMode) => {
     setListenMode(mode);
-    if (mode === "auto") {
-    }
+    listenModeRef.current = mode;
+    safeLocalStorage.setItem(
+      STORAGE_KEYS.SYSTEM_AUDIO_LISTEN_MODE,
+      JSON.stringify(mode)
+    );
   }, []);
 
   // Update VAD configuration
@@ -1006,10 +1047,10 @@ export function useSystemAudio() {
         ignoreContinuousRecording();
       }
 
-      // Space: Start recording, or Stop & Send when a recording is in progress.
-      // Ignored while the user is typing in an input or textarea.
+      // Space or Enter: Start recording, or Stop & Send when a recording is
+      // in progress. Ignored while the user is typing in an input or textarea.
       if (
-        e.key === " " &&
+        (e.key === " " || e.key === "Enter") &&
         !e.metaKey &&
         !e.ctrlKey &&
         !(e.target instanceof HTMLInputElement) &&
@@ -1091,8 +1132,6 @@ export function useSystemAudio() {
     transcriptSegments,
     listenMode,
     setListenMode: setListenModeValue,
-    detectionConfidence,
-    setDetectionConfidence,
     // Scroll area ref for keyboard navigation
     scrollAreaRef,
   };

@@ -1,14 +1,17 @@
 import { Button, Header, Input, Selection, TextInput } from "@/components";
 import { UseSettingsReturn } from "@/types";
 import curl2Json, { ResultJSON } from "@bany/curl-to-json";
-import { KeyIcon, TrashIcon } from "lucide-react";
+import { KeyIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { cn } from "@/lib/utils";
 
 export const Providers = ({
   allAiProviders,
   selectedAIProvider,
   onSetSelectedAIProvider,
   variables,
+  modelList,
+  refreshModels,
 }: UseSettingsReturn) => {
   const [localSelectedProvider, setLocalSelectedProvider] =
     useState<ResultJSON | null>(null);
@@ -184,6 +187,32 @@ export const Providers = ({
               return selectedAIProvider.variables[variable.key] || "";
             };
 
+            const setVariableValue = (value: string) => {
+              if (!variable?.key || !selectedAIProvider) return;
+
+              onSetSelectedAIProvider({
+                ...selectedAIProvider,
+                variables: {
+                  ...selectedAIProvider.variables,
+                  [variable.key]: value,
+                },
+              });
+            };
+
+            // The MODEL variable gets an auto-detected dropdown once the
+            // provider's model list has been fetched; every other variable
+            // (and the model when the list is unavailable) keeps the
+            // free-text input.
+            const isModelVariable = variable?.key === "model";
+            const storedModel = isModelVariable ? getVariableValue() : "";
+            const modelOptions = (
+              storedModel && !modelList.models.includes(storedModel)
+                ? [storedModel, ...modelList.models]
+                : modelList.models
+            ).map((id) => ({ label: id, value: id }));
+            const showModelDropdown =
+              modelList.status === "ok" || modelList.status === "loading";
+
             return (
               <div className="space-y-1" key={variable?.key}>
                 <Header
@@ -199,27 +228,70 @@ export const Providers = ({
                       : selectedAIProvider?.provider
                   }`}
                 />
-                <TextInput
-                  placeholder={`Enter ${
-                    allAiProviders?.find(
-                      (p) => p?.id === selectedAIProvider?.provider
-                    )?.isCustom
-                      ? "Custom Provider"
-                      : selectedAIProvider?.provider
-                  } ${variable?.key?.replace(/_/g, " ") || "value"}`}
-                  value={getVariableValue()}
-                  onChange={(value) => {
-                    if (!variable?.key || !selectedAIProvider) return;
-
-                    onSetSelectedAIProvider({
-                      ...selectedAIProvider,
-                      variables: {
-                        ...selectedAIProvider.variables,
-                        [variable.key]: value,
-                      },
-                    });
-                  }}
-                />
+                {isModelVariable ? (
+                  <div className="space-y-1">
+                    <div className="flex gap-2">
+                      <div className="flex-1">
+                        {showModelDropdown ? (
+                          <Selection
+                            selected={storedModel}
+                            options={modelOptions}
+                            placeholder="Select a model"
+                            isLoading={modelList.status === "loading"}
+                            onChange={(value) => setVariableValue(value)}
+                          />
+                        ) : (
+                          <TextInput
+                            placeholder={`Enter ${
+                              allAiProviders?.find(
+                                (p) => p?.id === selectedAIProvider?.provider
+                              )?.isCustom
+                                ? "Custom Provider"
+                                : selectedAIProvider?.provider
+                            } model`}
+                            value={storedModel}
+                            onChange={(value) => setVariableValue(value)}
+                          />
+                        )}
+                      </div>
+                      {modelList.status !== "unsupported" ? (
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          className="shrink-0 h-11 w-11 border-1 border-input/50"
+                          title="Refresh model list"
+                          disabled={modelList.status === "loading"}
+                          onClick={refreshModels}
+                        >
+                          <RefreshCwIcon
+                            className={cn(
+                              "h-4 w-4",
+                              modelList.status === "loading" && "animate-spin"
+                            )}
+                          />
+                        </Button>
+                      ) : null}
+                    </div>
+                    {modelList.status === "error" ? (
+                      <p className="text-xs text-red-500">
+                        Couldn't fetch the model list: {modelList.error} You can
+                        still type the model name manually.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <TextInput
+                    placeholder={`Enter ${
+                      allAiProviders?.find(
+                        (p) => p?.id === selectedAIProvider?.provider
+                      )?.isCustom
+                        ? "Custom Provider"
+                        : selectedAIProvider?.provider
+                    } ${variable?.key?.replace(/_/g, " ") || "value"}`}
+                    value={getVariableValue()}
+                    onChange={(value) => setVariableValue(value)}
+                  />
+                )}
               </div>
             );
           })}

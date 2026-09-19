@@ -30,30 +30,6 @@ impl Default for RegisteredShortcuts {
     }
 }
 
-#[allow(dead_code)]
-pub struct LicenseState {
-    has_active_license: AtomicBool,
-}
-
-impl Default for LicenseState {
-    fn default() -> Self {
-        LicenseState {
-            has_active_license: AtomicBool::new(false),
-        }
-    }
-}
-
-#[allow(dead_code)]
-impl LicenseState {
-    pub fn is_active(&self) -> bool {
-        self.has_active_license.load(Ordering::Relaxed)
-    }
-
-    pub fn set_active(&self, active: bool) {
-        self.has_active_license.store(active, Ordering::Relaxed);
-    }
-}
-
 pub(crate) type MoveWindowTask = Arc<AtomicBool>;
 
 pub(crate) struct MoveWindowState {
@@ -177,6 +153,48 @@ pub fn stop_all_move_windows<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Show and focus the main window, keeping all three sources of truth in
+/// sync: the OS window, our own `is_hidden` flag (so the next toggle_window
+/// press hides instead of no-oping), and the frontend's `isHidden` state
+/// (which keeps the React root `hidden` until it receives this event —
+/// without it, a shortcut fired on a hidden window changes state invisibly).
+/// Every shortcut handler that surfaces the window goes through here.
+fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    if let Err(e) = window.show() {
+        eprintln!("Failed to show window: {}", e);
+    }
+    if let Err(e) = window.unminimize() {
+        // Unminimize is best-effort; ignore errors (window may not be minimized).
+        eprintln!("Failed to unminimize window (non-fatal): {}", e);
+    }
+    if let Err(e) = window.set_focus() {
+        eprintln!("Failed to focus window: {}", e);
+    }
+
+    // On macOS the overlay window is an NSPanel: re-show it as a panel so it
+    // floats above full-screen apps and joins all Spaces. (Hiding needs no
+    // panel call — `window.hide()` already covers it.)
+    #[cfg(target_os = "macos")]
+    {
+        let panel = app.get_webview_panel("main").unwrap();
+        panel.show();
+    }
+
+    {
+        let state = app.state::<WindowVisibility>();
+        let mut is_hidden = state.is_hidden.lock().unwrap();
+        *is_hidden = false;
+    }
+
+    if let Err(e) = window.emit("toggle-window-visibility", false) {
+        eprintln!("Failed to emit toggle-window-visibility event: {}", e);
+    }
+}
+
 /// Handle app toggle (hide/show) with input focus and app icon management
 fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
     // Get the main window
@@ -189,54 +207,36 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
     //     on Windows is unreliable because focus changes can flip it).
     //   - Toggle the flag, then hide or show+focus accordingly.
     //   - Always emit focus-text-input on show so the input is ready.
-    let state = app.state::<WindowVisibility>();
-    let mut is_hidden = state.is_hidden.lock().unwrap();
-    *is_hidden = !*is_hidden;
-    let should_be_hidden = *is_hidden;
-
-    if let Err(e) = window.emit("toggle-window-visibility", should_be_hidden) {
-        eprintln!("Failed to emit toggle-window-visibility event: {}", e);
-    }
+    // The guard is scoped to this block: show_main_window locks the same
+    // mutex, and std Mutex is not reentrant.
+    let should_be_hidden = {
+        let state = app.state::<WindowVisibility>();
+        let mut is_hidden = state.is_hidden.lock().unwrap();
+        *is_hidden = !*is_hidden;
+        *is_hidden
+    };
 
     if should_be_hidden {
+        if let Err(e) = window.emit("toggle-window-visibility", true) {
+            eprintln!("Failed to emit toggle-window-visibility event: {}", e);
+        }
         if let Err(e) = window.hide() {
             eprintln!("Failed to hide window: {}", e);
         }
         return;
     }
 
-    if let Err(e) = window.show() {
-        eprintln!("Failed to show window: {}", e);
-    }
-    if let Err(e) = window.unminimize() {
-        // Unminimize is best-effort; ignore errors (window may not be minimized).
-        eprintln!("Failed to unminimize window (non-fatal): {}", e);
-    }
-    if let Err(e) = window.set_focus() {
-        eprintln!("Failed to focus window: {}", e);
-    }
+    show_main_window(app);
+
     if let Err(e) = window.emit("focus-text-input", json!({})) {
         eprintln!("Failed to emit focus-text-input event: {}", e);
     }
-
-    // (Toggle logic moved above for unified cross-platform behavior.
-    //  The macOS-specific NSPanel handling is intentionally omitted in the
-    //  Windows-only build.)
 }
 
 /// Handle audio shortcut
 fn handle_audio_shortcut<R: Runtime>(app: &AppHandle<R>) {
+    show_main_window(app);
     if let Some(window) = app.get_webview_window("main") {
-        // Ensure window is visible
-        if let Ok(false) = window.is_visible() {
-            if let Err(_e) = window.show() {
-                return;
-            }
-            if let Err(e) = window.set_focus() {
-                eprintln!("Failed to focus window: {}", e);
-            }
-        }
-
         // Emit event to start audio recording
         if let Err(e) = window.emit("start-audio-recording", json!({})) {
             eprintln!("Failed to emit audio recording event: {}", e);
@@ -246,6 +246,10 @@ fn handle_audio_shortcut<R: Runtime>(app: &AppHandle<R>) {
 
 /// Handle screenshot shortcut
 fn handle_screenshot_shortcut<R: Runtime>(app: &AppHandle<R>) {
+    // This was the only action handler that never surfaced the window, so the
+    // shortcut looked dead whenever the overlay was hidden — the screenshot
+    // and its AI response land on the Ask panel, which the user has to see.
+    show_main_window(app);
     if let Some(window) = app.get_webview_window("main") {
         // Emit event to trigger screenshot - frontend will determine auto/manual mode
         if let Err(e) = window.emit("trigger-screenshot", json!({})) {
@@ -256,18 +260,8 @@ fn handle_screenshot_shortcut<R: Runtime>(app: &AppHandle<R>) {
 
 /// Handle system audio shortcut
 fn handle_system_audio_shortcut<R: Runtime>(app: &AppHandle<R>) {
+    show_main_window(app);
     if let Some(window) = app.get_webview_window("main") {
-        // Ensure window is visible
-        if let Ok(false) = window.is_visible() {
-            if let Err(e) = window.show() {
-                eprintln!("Failed to show window: {}", e);
-                return;
-            }
-            if let Err(e) = window.set_focus() {
-                eprintln!("Failed to focus window: {}", e);
-            }
-        }
-
         // Emit event to toggle system audio capture - frontend will determine current state
         if let Err(e) = window.emit("toggle-system-audio", json!({})) {
             eprintln!("Failed to emit system audio event: {}", e);
@@ -464,14 +458,6 @@ pub fn validate_shortcut_key(key: String) -> Result<bool, String> {
     }
 }
 
-#[tauri::command]
-pub fn set_license_status<R: Runtime>(_app: AppHandle<R>, has_license: bool) -> Result<(), String> {
-    // License gating removed: this command is kept as a no-op for backward
-    // compatibility with any leftover frontend callers.
-    let _ = has_license;
-    Ok(())
-}
-
 /// Tauri command to set app icon visibility in dock/taskbar
 #[tauri::command]
 pub fn set_app_icon_visibility<R: Runtime>(app: AppHandle<R>, visible: bool) -> Result<(), String> {
@@ -565,13 +551,8 @@ fn handle_toggle_dashboard<R: Runtime>(app: &AppHandle<R>) {
 
 /// Handle focus input shortcut
 fn handle_focus_input<R: Runtime>(app: &AppHandle<R>) {
+    show_main_window(app);
     if let Some(window) = app.get_webview_window("main") {
-        // Ensure window is visible
-        if let Ok(false) = window.is_visible() {
-            let _ = window.show();
-        }
-
-        let _ = window.set_focus();
         let _ = window.emit("focus-text-input", json!({}));
     }
 }

@@ -43,12 +43,11 @@ Hit **Start** and Hyperly transcribes your mic and system audio live, with speak
 
 ## 🧰 What else is in the box
 
-- **200+ hosted models** on Pro plans: GPT, Gemini, Claude, Llama and more, searchable and switchable mid-conversation, no API keys to manage.
-- **Free forever with your own keys**: connect any LLM or speech-to-text provider through a curl template, or plug in the AI CLIs you already have (Claude Code, Gemini CLI, Codex, Qwen Code, Ollama). No limits from us; it's your account.
+- **Free forever with your own keys**: connect any LLM or speech-to-text provider through a curl template — model lists auto-detect on OpenAI-compatible endpoints — or plug in the AI CLIs you already have (Claude Code, Gemini CLI, Codex, Qwen Code, Ollama). No limits from us; it's your account.
 - **Real stealth**: excluded from screen capture, absent from recordings and screenshots, never steals focus from the app you're in, and the icon can disappear from the taskbar.
 - **Keyboard-first**: global hotkeys for summon, capture, and listening; single keys scroll the answer and transcript once the overlay has focus.
 - **Private by architecture**: chats, meetings, transcripts, and files live in a local SQLite database on your machine. Your own provider keys stay local. Your conversations never train anything.
-- **Light & dark themes**, a relay panel with sidebar to browse past conversations, custom prompts with knowledge files, a document library, plan and usage meters.
+- **Light & dark themes**, a relay panel with sidebar to browse past conversations, custom prompts with knowledge files, and a document library.
 
 ## 📥 Download & install
 

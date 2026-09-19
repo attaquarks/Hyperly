@@ -1,3 +1,5 @@
+import type { ListenMode } from "@/types";
+
 // Storage keys
 export const STORAGE_KEYS = {
   THEME: "theme",
@@ -12,8 +14,8 @@ export const STORAGE_KEYS = {
   SELECTED_STT_PROVIDER: "curl_selected_stt_provider",
   SYSTEM_AUDIO_CONTEXT: "system_audio_context",
   SYSTEM_AUDIO_QUICK_ACTIONS: "system_audio_quick_actions",
+  SYSTEM_AUDIO_LISTEN_MODE: "system_audio_listen_mode",
   CUSTOMIZABLE: "customizable",
-  HYPERLY_API_ENABLED: "hyperly_api_enabled",
   SHORTCUTS: "shortcuts",
 
   SELECTED_AUDIO_DEVICES: "selected_audio_devices",
@@ -84,3 +86,20 @@ export const DEFAULT_QUICK_ACTIONS = [
   "Fact-check",
   "Recap",
 ];
+
+// Listen-mode presets: appended to the system prompt for listen-panel AI
+// calls while the matching pill is active. "auto" deliberately has no
+// preset — it keeps the default assistant behavior rather than guessing at
+// the conversation kind.
+export const LISTEN_MODE_PROMPTS: Partial<Record<ListenMode, string>> = {
+  general:
+    "You are listening in on a conversation. Answer whatever comes up briefly and practically.",
+  interview:
+    "The user is being interviewed live. Answer each question in first person as the user: confident, specific, and concise (~60-120 seconds spoken length) unless depth is asked for.",
+  coding:
+    "The conversation is technical. Prefer concrete code, exact commands, and precise terminology over prose explanations.",
+  translate:
+    "Translate the transcribed speech into English. Output only the translation, no commentary. If the speech is already in English, provide a brief summary instead.",
+  meeting:
+    "You are assisting in a meeting. Surface decisions and action items, and answer questions raised as concisely as possible.",
+};

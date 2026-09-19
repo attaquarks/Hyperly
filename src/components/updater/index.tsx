@@ -1,4 +1,4 @@
-// Updater has been removed for the personal/Windows-only build.
+// Updater has been removed for the personal build.
 // The original Updater relied on the Tauri updater plugin and process
 // plugin, both of which are no longer wired up.
 //

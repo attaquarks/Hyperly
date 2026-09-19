@@ -8,7 +8,6 @@ import {
   saveConversation,
   getConversationById,
   generateConversationTitle,
-  shouldUseHyperlyAPI,
   MESSAGE_ID_OFFSET,
   generateConversationId,
   generateMessageId,
@@ -52,7 +51,7 @@ interface CompletionState {
   conversationHistory: ChatMessage[];
 }
 
-export const useCompletion = () => {
+export const useCompletion = (capturing: boolean = false) => {
   const {
     selectedAIProvider,
     allAiProviders,
@@ -73,6 +72,9 @@ export const useCompletion = () => {
   });
   const [micOpen, setMicOpen] = useState(false);
   const [enableVAD, setEnableVAD] = useState(false);
+  // Live transcript of the in-progress mic utterance, shown in the Ask panel's
+  // mic popover under a "User" label while the user is still speaking.
+  const [micTranscript, setMicTranscript] = useState("");
   const [messageHistoryOpen, setMessageHistoryOpen] = useState(false);
   const [isFilesPopoverOpen, setIsFilesPopoverOpen] = useState(false);
   const [isScreenshotLoading, setIsScreenshotLoading] = useState(false);
@@ -80,6 +82,9 @@ export const useCompletion = () => {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const isProcessingScreenshotRef = useRef(false);
   const screenshotConfigRef = useRef(screenshotConfiguration);
+  // Tracks the previous capture state so the mic is paused only on the
+  // false→true transition, not on every render while a capture runs.
+  const prevCapturingRef = useRef(false);
   const screenshotInitiatedByThisContext = useRef(false);
 
   const { resizeWindow } = useWindowResize();
@@ -178,9 +183,8 @@ export const useCompletion = () => {
 
         let fullResponse = "";
 
-        const useHyperlyAPI = await shouldUseHyperlyAPI();
         // Check if AI provider is configured
-        if (!selectedAIProvider.provider && !useHyperlyAPI) {
+        if (!selectedAIProvider.provider) {
           setState((prev) => ({
             ...prev,
             error: "Please select an AI provider in settings",
@@ -191,7 +195,7 @@ export const useCompletion = () => {
         const provider = allAiProviders.find(
           (p) => p.id === selectedAIProvider.provider
         );
-        if (!provider && !useHyperlyAPI) {
+        if (!provider) {
           setState((prev) => ({
             ...prev,
             error: "Invalid provider selected",
@@ -210,7 +214,7 @@ export const useCompletion = () => {
         try {
           // Use the fetchAIResponse function with signal
           for await (const chunk of fetchAIResponse({
-            provider: useHyperlyAPI ? undefined : provider,
+            provider,
             selectedProvider: selectedAIProvider,
             systemPrompt: systemPrompt || undefined,
             history: messageHistory,
@@ -581,9 +585,8 @@ export const useCompletion = () => {
 
             let fullResponse = "";
 
-            const useHyperlyAPI = await shouldUseHyperlyAPI();
             // Check if AI provider is configured
-            if (!selectedAIProvider.provider && !useHyperlyAPI) {
+            if (!selectedAIProvider.provider) {
               setState((prev) => ({
                 ...prev,
                 error: "Please select an AI provider in settings",
@@ -594,7 +597,7 @@ export const useCompletion = () => {
             const provider = allAiProviders.find(
               (p) => p.id === selectedAIProvider.provider
             );
-            if (!provider && !useHyperlyAPI) {
+            if (!provider) {
               setState((prev) => ({
                 ...prev,
                 error: "Invalid provider selected",
@@ -613,7 +616,7 @@ export const useCompletion = () => {
 
             // Use the fetchAIResponse function with image and signal
             for await (const chunk of fetchAIResponse({
-              provider: useHyperlyAPI ? undefined : provider,
+              provider,
               selectedProvider: selectedAIProvider,
               systemPrompt: systemPrompt || undefined,
               history: messageHistory,
@@ -774,6 +777,20 @@ export const useCompletion = () => {
     resizeWindow,
     isFilesPopoverOpen,
   ]);
+
+  // Ask↔Listen coordination: starting a system-audio capture pauses the Ask
+  // mic, so the two never run parallel STT pipelines and the hidden mic
+  // popover never holds the window open mid-capture. One-directional on
+  // purpose — when the capture stops the mic stays off; turning it back on
+  // is the user's call. AutoSpeechVAD's enableVAD effect handles the actual
+  // VAD pause and clears the live transcript.
+  useEffect(() => {
+    if (capturing && !prevCapturingRef.current) {
+      setEnableVAD(false);
+      setMicOpen(false);
+    }
+    prevCapturingRef.current = capturing;
+  }, [capturing]);
 
   // Auto scroll to bottom when response updates
   useEffect(() => {
@@ -940,10 +957,14 @@ export const useCompletion = () => {
     };
   }, []);
 
+  // The mic popover's open state is `enableVAD || micOpen`; keep the two in
+  // lockstep so the global shortcut and the mic button never strand the
+  // popover open after the mic turns off.
   const toggleRecording = useCallback(() => {
-    setEnableVAD(!enableVAD);
-    setMicOpen(!micOpen);
-  }, [enableVAD, micOpen]);
+    const next = !enableVAD;
+    setEnableVAD(next);
+    setMicOpen(next);
+  }, [enableVAD]);
 
   // Cleanup abort controller on unmount
   useEffect(() => {
@@ -987,6 +1008,8 @@ export const useCompletion = () => {
     setState,
     enableVAD,
     setEnableVAD,
+    micTranscript,
+    setMicTranscript,
     micOpen,
     setMicOpen,
     currentConversationId: state.currentConversationId,
