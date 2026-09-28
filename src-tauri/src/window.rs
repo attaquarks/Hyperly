@@ -19,13 +19,42 @@ pub fn setup_main_window(app: &mut App) -> Result<(), Box<dyn std::error::Error>
 
     position_window_top_center(&window, TOP_OFFSET)?;
 
-    // Set window as non-focusable on Windows
-    // #[cfg(target_os = "windows")]
-    // {
-    //     let _ = window.set_focusable(false);
-    // }
+    // A transparent, skip-taskbar overlay looks like "nothing launched" if it
+    // stays unfocused or off-screen. Force show and log geometry so a boot
+    // failure is visible in the same terminal as Cargo/Vite.
+    if let Err(e) = window.show() {
+        eprintln!("Failed to show main window: {}", e);
+    }
+    if let Err(e) = window.unminimize() {
+        eprintln!("Failed to unminimize main window (non-fatal): {}", e);
+    }
+    if let Err(e) = window.set_focus() {
+        eprintln!("Failed to focus main window (non-fatal): {}", e);
+    }
+
+    let visible = window.is_visible().ok();
+    let size = window.outer_size().ok();
+    let pos = window.outer_position().ok();
+    eprintln!(
+        "Main overlay window label={} visible={:?} size={:?} pos={:?}",
+        window.label(),
+        visible,
+        size,
+        pos
+    );
+
+    // Windows: WebView2 denies getUserMedia unless a PermissionRequested
+    // handler approves it, and Tauri only brokers mic access on macOS. Without
+    // this the voice input in both Ask and Listen captures nothing.
+    crate::mic_permission::allow_microphone(&window);
 
     Ok(())
+}
+
+/// Bridge webview console / boot failures into the same terminal as Cargo.
+#[tauri::command]
+pub fn log_frontend(level: String, message: String) {
+    eprintln!("[webview {}] {}", level, message);
 }
 
 /// Positions a window at the top center of the screen with a specified Y offset
@@ -70,15 +99,50 @@ pub fn center_window_completely(window: &WebviewWindow) -> Result<(), Box<dyn st
     Ok(())
 }
 
+/// Centers the window horizontally on the primary monitor at `TOP_OFFSET`.
+///
+/// Takes the target logical width rather than reading `outer_size()`: the OS
+/// reports the old geometry immediately after `set_size`, so measuring the
+/// window would center the *previous* size and leave a wide preset off-center.
+fn center_window_at_top(
+    window: &WebviewWindow,
+    logical_width: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(monitor) = window.primary_monitor()? {
+        let monitor_size = monitor.size();
+        let monitor_pos = monitor.position();
+        let scale = window.scale_factor()?;
+
+        let width_px = (logical_width * scale).round() as i32;
+        let center_x = monitor_pos.x + (monitor_size.width as i32 - width_px) / 2;
+
+        window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+            x: center_x,
+            y: monitor_pos.y + TOP_OFFSET,
+        }))?;
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
-pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
+pub fn set_window_size(
+    window: tauri::WebviewWindow,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
     use tauri::{LogicalSize, Size};
 
-    // Simply set the window size with fixed width and new height
-    let new_size = LogicalSize::new(600.0, height as f64);
+    // The overlay's only resize path: the footer's size presets. The window is
+    // pinned to the top center of the screen, so every preset re-centers after
+    // resizing — otherwise a wider preset would grow to the right only.
+    let new_size = LogicalSize::new(width as f64, height as f64);
     window
         .set_size(Size::Logical(new_size))
         .map_err(|e| format!("Failed to resize window: {}", e))?;
+
+    center_window_at_top(&window, width as f64)
+        .map_err(|e| format!("Failed to recenter window: {}", e))?;
 
     Ok(())
 }
@@ -179,6 +243,11 @@ pub fn create_dashboard_window<R: Runtime>(
         .visible(false);
 
     let window = base_builder.build()?;
+
+    // Windows: the dashboard can open the mic too (the Audio Settings page has
+    // a voice-sensitivity control, and the Listen panel lives here as well), so
+    // it needs the same grant as the overlay.
+    crate::mic_permission::allow_microphone(&window);
 
     // Set up close event handler - hide window instead of destroying it
     setup_dashboard_close_handler(&window);

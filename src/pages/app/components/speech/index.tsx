@@ -1,156 +1,129 @@
-import { useState, useCallback, useEffect } from "react";
-import {
-  Button,
-  Popover,
-  PopoverTrigger,
-  PopoverContent,
-  ScrollArea,
-} from "@/components";
-import {
-  HeadphonesIcon,
-  AlertCircleIcon,
-  LoaderIcon,
-  AudioLinesIcon,
-  CameraIcon,
-  PlusIcon,
-  XIcon,
-  SunIcon,
-  MoonIcon,
-} from "lucide-react";
+import { lazy, Suspense, useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ModeSwitcher } from "./ModeSwitcher";
-import { RecordingPanel } from "./RecordingPanel";
+import { listen } from "@tauri-apps/api/event";
+import { HistoryIcon, PlusIcon, XIcon } from "lucide-react";
+import { ErrorBoundary } from "react-error-boundary";
 import { ResultsSection } from "./ResultsSection";
 import { PermissionFlow } from "./PermissionFlow";
 import { ConversationHistory } from "./ConversationHistory";
-import { useSystemAudioType } from "@/hooks";
-import { useApp } from "@/contexts";
-import { useTheme } from "@/contexts/theme.context";
-import { cn } from "@/lib/utils";
 import { TranscriptThread } from "./TranscriptThread";
 import { ListenControls } from "./ListenControls";
+import { FollowUps } from "./FollowUps";
+import { ListenActionRow } from "./ListenActionRow";
+import { ListeningBar } from "./ListeningBar";
+import { ListenFooter } from "./ListenFooter";
+import { useSystemAudioType, useVoiceSensitivity } from "@/hooks";
+import { useApp } from "@/contexts";
+import { cn } from "@/lib/utils";
 
-export const SystemAudio = (
-  props: useSystemAudioType & { panelVisible?: boolean }
-) => {
+// Keep onnxruntime / vad-web off the overlay's first-paint graph. A failed
+// VAD module used to take the entire React tree down before the shell painted.
+const ListenUserMic = lazy(() =>
+  import("./ListenUserMic").then((mod) => ({ default: mod.ListenUserMic }))
+);
+
+// The Listen room: a fixed stack of hairline-separated sections, each with
+// its own scroll — mode toolbar, capture control, transcript (with the
+// history overlay), suggested answer, follow-ups, the
+// Capture/Selection/Attach/Library action row, and the footer with the two
+// sizes. No card blocks, no global scroll.
+export const SystemAudio = (props: useSystemAudioType) => {
   const {
     capturing,
     isProcessing,
     isAIProcessing,
-    lastTranscription,
     lastAIResponse,
     error,
     setupRequired,
     startCapture,
-    stopCapture,
-    isPopoverOpen,
-    setIsPopoverOpen,
+    startSessionCapture,
+    manualStopAndSend,
     startNewConversation,
     loadConversation,
     conversation,
-    resizeWindow,
-    vadConfig,
-    updateVadConfiguration,
-    isRecordingInContinuousMode,
-    recordingProgress,
-    manualStopAndSend,
-    startContinuousRecording,
-    ignoreContinuousRecording,
-    scrollAreaRef,
     setPendingScreenshot,
     livePartial,
+    userMicPartial,
+    setUserMicPartial,
+    micWithSystem,
+    setMicWithSystem,
+    // Labels the transcript row AND routes the words to the AI, so this is the
+    // handler the browser mic's `onUtterance` must use.
+    submitUserUtterance,
+    setError,
     transcriptSegments,
     listenMode,
     setListenMode,
+    quickActions,
+    handleQuickActionClick,
+    addQuickAction,
+    captureBehavior,
+    setCaptureBehavior,
+    suggestedFollowUps,
+    knowledgeFolderName,
+    knowledgeFolderFiles,
+    knowledgeFile,
+    isKnowledgeReading,
+    knowledgeReadError,
+    pickKnowledgeFolder,
+    selectKnowledgeFile,
+    clearKnowledgeFile,
   } = props;
 
-  // While the user is on the Ask tab, the listen panel stays mounted (so the
-  // capture, transcript, and scroll position survive the switch) but its
-  // popover content is hidden with CSS. The DOM node remains, which also keeps
-  // the window-resize observer from collapsing the overlay mid-capture.
-  const panelVisible = props.panelVisible ?? true;
+  const { selectedAudioDevices } = useApp();
+  // Drives the mic remount key below, so a sensitivity change made on the Audio
+  // Settings page reaches the VAD (see `useVoiceSensitivity`).
+  const voiceSensitivity = useVoiceSensitivity();
 
-  const { supportsImages } = useApp();
-  const { theme, setTheme } = useTheme();
+  // Chat history overlays the transcript area; the transcript keeps running
+  // behind it and the overlay closes on pick or re-click.
+  const [showHistory, setShowHistory] = useState(false);
+  const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
 
-  // Cycle through light -> dark -> system on each click.
-  const cycleTheme = useCallback(() => {
-    const next = theme === "dark" ? "light" : theme === "light" ? "system" : "dark";
-    setTheme(next);
-  }, [theme, setTheme]);
-
-  // View mode toggle
-  const [conversationMode, setConversationMode] = useState(false);
-
-  // Screenshot state — local copy drives the preview UI; the actual base64 is forwarded to
-  // the hook via setPendingScreenshot so the next AI call can attach it.
+  // Screenshot state — the local preview mirrors into the hook so the next
+  // AI call attaches it.
   const [screenshotImage, setScreenshotImage] = useState<string | null>(null);
   const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
-  // Conversation-history sidebar visibility. Defaults off so the panel stays compact.
-  const [showHistory, setShowHistory] = useState(false);
+  // One-shot listener for region captures, so a cancelled selection can't
+  // swallow a later Ask-side capture.
+  const regionUnlistenRef = useRef<(() => void) | null>(null);
 
-  const isVadMode = vadConfig.enabled;
-
-  // Keyboard shortcut for Cmd+K to toggle view mode
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!isPopoverOpen) return;
-
-      // Cmd+K or Ctrl+K to toggle view mode
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        setConversationMode((prev) => !prev);
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isPopoverOpen]);
-
-  // Mirror the local preview into the hook so the next AI call can attach it.
   useEffect(() => {
     setPendingScreenshot(screenshotImage);
   }, [screenshotImage, setPendingScreenshot]);
 
-  // Reset local preview when the hook consumed the pending screenshot (processing started).
+  // Clear the local preview once the hook consumed the shot.
   useEffect(() => {
     if (isProcessing && screenshotImage) {
       setScreenshotImage(null);
     }
   }, [isProcessing, screenshotImage]);
 
+  useEffect(
+    () => () => {
+      regionUnlistenRef.current?.();
+    },
+    []
+  );
+
+  // Start/Stop toggle. Deliberately the same two calls the spacebar listener
+  // makes, so the button and the key are interchangeable and neither wipes the
+  // session: `startSessionCapture` joins the conversation already on screen and
+  // `manualStopAndSend` stops without tearing down. The full reset lives behind
+  // the separate "New" button in the toolbar.
   const handleToggleCapture = async () => {
-    if (capturing) {
-      await stopCapture();
-    } else {
-      await startCapture();
+    if (!capturing) {
+      await startSessionCapture();
+      return;
     }
+    await manualStopAndSend();
   };
 
-  const handleModeChange = (vadEnabled: boolean) => {
-    updateVadConfiguration({
-      ...vadConfig,
-      enabled: vadEnabled,
-    });
-
-    // Switching to Auto-detect engages listening immediately. Switching back to
-    // Manual leaves any in-flight capture alone so the user keeps control.
-    if (vadEnabled && !capturing) {
-      void startCapture();
-    }
-  };
-
-  // Capture screenshot functionality
-  const handleCaptureScreenshot = useCallback(async () => {
+  const handleCapture = useCallback(async () => {
     if (isCapturingScreenshot) return;
-
     setIsCapturingScreenshot(true);
     try {
-      
-
-      // Capture full-screen screenshot. The Rust command is `capture_to_base64`.
       const base64: string = await invoke("capture_to_base64");
-
       setScreenshotImage(base64);
     } catch (err) {
       console.error("Failed to capture screenshot:", err);
@@ -159,306 +132,231 @@ export const SystemAudio = (
     }
   }, [isCapturingScreenshot]);
 
-  const handleRemoveScreenshot = useCallback(() => {
-    setScreenshotImage(null);
+  const handleCaptureRegion = useCallback(async () => {
+    try {
+      const unlisten = await listen<string>("captured-selection", (event) => {
+        setScreenshotImage(event.payload);
+        regionUnlistenRef.current?.();
+        regionUnlistenRef.current = null;
+      });
+      regionUnlistenRef.current = unlisten;
+      // A cancelled selection never fires the event — expire the listener so
+      // it can't consume a later capture from the Ask room.
+      setTimeout(() => {
+        if (regionUnlistenRef.current === unlisten) {
+          unlisten();
+          regionUnlistenRef.current = null;
+        }
+      }, 60000);
+      await invoke("start_screen_capture");
+    } catch (err) {
+      console.error("Failed to start region capture:", err);
+      regionUnlistenRef.current?.();
+      regionUnlistenRef.current = null;
+    }
   }, []);
 
-  const getButtonIcon = () => {
-    if (setupRequired) return <AlertCircleIcon className="text-orange-500" />;
-    if (error && !setupRequired)
-      return <AlertCircleIcon className="text-red-500" />;
-    if (isProcessing) return <LoaderIcon className="animate-spin" />;
-    if (capturing)
-      return <AudioLinesIcon className="text-green-500 animate-pulse" />;
-    return <HeadphonesIcon />;
-  };
-
-  const getButtonTitle = () => {
-    if (setupRequired) return "Setup required - Click for instructions";
-    if (error && !setupRequired) return `Error: ${error}`;
-    if (isProcessing) return "Transcribing audio...";
-    if (capturing) return "Stop system audio capture";
-    return "Start system audio capture";
-  };
+  // Listen-side Attach: the first picked image rides the pending-screenshot
+  // path, same as a capture.
+  const handleAttach = useCallback((files: FileList | null) => {
+    const file = files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      setScreenshotImage(result.split(",")[1] ?? "");
+    };
+    reader.readAsDataURL(file);
+  }, []);
 
   return (
-    <Popover
-      open={isPopoverOpen}
-      onOpenChange={(open) => {
-        if (capturing && !open) {
-          return;
-        }
-        setIsPopoverOpen(open);
-      }}
-    >
-      <PopoverTrigger asChild>
-        <Button
-          size="icon"
-          title={getButtonTitle()}
-          onClick={handleToggleCapture}
-          className={cn(
-            capturing && "bg-green-50 hover:bg-green-100",
-            error && "bg-red-100 hover:bg-red-200"
-          )}
-        >
-          {getButtonIcon()}
-        </Button>
-      </PopoverTrigger>
-
-      {(capturing || setupRequired || error) && (
-        <PopoverContent
-          align="end"
-          side="bottom"
-          className={cn(
-            "select-none w-full max-w-[calc(100vw-2rem)] p-0 border shadow-lg overflow-hidden border-input/50",
-            !panelVisible && "hidden"
-          )}
-          sideOffset={8}
-        >
-          <div className="flex flex-col max-h-[calc(100vh-6rem)] overflow-hidden">
-            {/* Header - Mode Switcher + Actions */}
-            <div className="flex-shrink-0 p-3 border-b border-border/50">
-              <div className="flex items-center justify-between gap-2">
-                {/* Mode Switcher */}
-                {!setupRequired && (
-                  <ModeSwitcher
-                    isVadMode={isVadMode}
-                    onModeChange={handleModeChange}
-                    disabled={
-                      isRecordingInContinuousMode ||
-                      isProcessing ||
-                      isAIProcessing
-                    }
-                  />
-                )}
-                {setupRequired && (
-                  <h2 className="font-semibold text-sm">Setup Required</h2>
-                )}
-
-                {/* Action Buttons */}
-                <div className="flex items-center gap-1.5 flex-shrink-0">
-                  {/* Screenshot Button */}
-                  {!setupRequired && supportsImages && (
-                    <Button
-                      size="sm"
-                      variant={screenshotImage ? "default" : "outline"}
-                      onClick={handleCaptureScreenshot}
-                      disabled={isCapturingScreenshot}
-                      className={cn(
-                        "h-6 text-[10px] gap-1 px-2",
-                        screenshotImage && "bg-primary text-primary-foreground"
-                      )}
-                      title="Capture screenshot to include with transcription"
-                    >
-                      {isCapturingScreenshot ? (
-                        <LoaderIcon className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <CameraIcon className="w-3 h-3" />
-                      )}
-                      Screenshot
-                    </Button>
+    <div className="hyperly-listen-body">
+      <ErrorBoundary
+        fallbackRender={() => null}
+        onError={(micError) => {
+          const message =
+            micError instanceof Error ? micError.message : String(micError);
+          console.error("[hyperly] listen mic failed to load", micError);
+          void invoke("log_frontend", {
+            level: "error",
+            message: `listen mic failed to load: ${message}`,
+          }).catch(() => {});
+        }}
+      >
+        <Suspense fallback={null}>
+          <ListenUserMic
+            key={`${selectedAudioDevices.input?.id ?? "default"}:${voiceSensitivity}`}
+            capturing={capturing && micWithSystem}
+            onPartial={setUserMicPartial}
+            onUtterance={submitUserUtterance}
+            onError={setError}
+          />
+        </Suspense>
+      </ErrorBoundary>
+      {setupRequired ? (
+        <div className="hyperly-section">
+          <PermissionFlow
+            onPermissionGranted={() => {
+              startCapture();
+            }}
+            onPermissionDenied={() => {
+              // Keep showing setup instructions
+            }}
+          />
+        </div>
+      ) : (
+        <>
+          {/* Mode toolbar: prompt pills + history/new chat on the right */}
+          <div className="hyperly-section">
+            <div className="hyperly-listen-toolbar">
+              <div className="flex-1 min-w-0">
+                <ListenControls mode={listenMode} onModeChange={setListenMode} />
+              </div>
+              <div className="hyperly-listen-toolbar-actions">
+                <button
+                  type="button"
+                  className={cn(
+                    "hyperly-action",
+                    showHistory && "hyperly-action-active"
                   )}
-
-                  {/* Theme Switcher */}
-                  {!setupRequired && (
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6"
-                      title={`Theme: ${theme} (click to change)`}
-                      onClick={cycleTheme}
-                    >
-                      {theme === "dark" ? (
-                        <MoonIcon className="h-3.5 w-3.5" />
-                      ) : theme === "light" ? (
-                        <SunIcon className="h-3.5 w-3.5" />
-                      ) : (
-                        <SunIcon className="h-3.5 w-3.5 opacity-60" />
-                      )}
-                    </Button>
-                  )}
-
-                  {/* History Sidebar Toggle */}
-                  {!setupRequired && (
-                    <Button
-                      size="icon"
-                      variant={showHistory ? "default" : "ghost"}
-                      className="h-6 w-6"
-                      title={
-                        showHistory
-                          ? "Hide conversation history"
-                          : "Show conversation history"
-                      }
-                      onClick={() => setShowHistory((v) => !v)}
-                    >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M3 12h18M3 6h18M3 18h12" />
-                      </svg>
-                    </Button>
-                  )}
-
-                  {/* New Conversation Button */}
-                  {!setupRequired && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={startNewConversation}
-                      className="h-6 text-[10px] gap-1 px-2"
-                      title="Start a new conversation"
-                    >
-                      <PlusIcon className="w-3 h-3" />
-                      New
-                    </Button>
-                  )}
-
-                  {/* Close Button */}
-                  {!capturing && (
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6"
-                      title="Close"
-                      onClick={() => {
-                        setIsPopoverOpen(false);
-                        resizeWindow(false);
-                      }}
-                    >
-                      <XIcon className="h-3.5 w-3.5" />
-                    </Button>
-                  )}
-                </div>
+                  title={
+                    showHistory
+                      ? "Hide conversation history"
+                      : "Show conversation history"
+                  }
+                  onClick={() => {
+                    setTranscriptCollapsed(false);
+                    setShowHistory((v) => !v);
+                  }}
+                >
+                  <HistoryIcon className="h-3 w-3" />
+                </button>
+                <button
+                  type="button"
+                  className="hyperly-action"
+                  onClick={startNewConversation}
+                  title="Start a new conversation"
+                >
+                  <PlusIcon className="h-3 w-3" />
+                  New
+                </button>
               </div>
             </div>
+          </div>
 
-            <div className="flex flex-1 min-h-0">
-              {showHistory && (
+          <ListeningBar
+            capturing={capturing}
+            isProcessing={isProcessing}
+            behavior={captureBehavior}
+            onBehaviorChange={setCaptureBehavior}
+            onToggleCapture={() => void handleToggleCapture()}
+          />
+
+          {/* Transcript, with chat history overlaid on top */}
+          <TranscriptThread
+            segments={transcriptSegments}
+            livePartial={livePartial}
+            userPartial={userMicPartial}
+            micWithSystem={micWithSystem}
+            onToggleMic={() => setMicWithSystem(!micWithSystem)}
+            collapsed={transcriptCollapsed}
+            onToggleCollapsed={() => setTranscriptCollapsed((v) => !v)}
+          >
+            {showHistory && (
+              <div className="hyperly-history-overlay">
                 <ConversationHistory
                   loadConversation={loadConversation}
                   activeConversationId={conversation.id}
+                  onClose={() => setShowHistory(false)}
+                  className="w-full flex-1 border-r-0 bg-transparent"
                 />
-              )}
-
-              <ScrollArea className="flex-1 min-h-0" ref={scrollAreaRef}>
-              <div className="p-2 space-y-2">
-                <ListenControls
-                  mode={listenMode}
-                  onModeChange={setListenMode}
-                />
-                {/* Screenshot Preview */}
-                {screenshotImage && (
-                  <div className="flex items-center gap-2 p-2 rounded-lg bg-primary/5 border border-primary/20">
-                    <img
-                      src={`data:image/png;base64,${screenshotImage}`}
-                      alt="Screenshot"
-                      className="h-12 w-20 object-cover rounded"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[10px] font-medium">
-                        Screenshot attached
-                      </p>
-                      <p className="text-[9px] text-muted-foreground">
-                        Will be sent with next transcription
-                      </p>
-                    </div>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-5 w-5"
-                      onClick={handleRemoveScreenshot}
-                    >
-                      <XIcon className="h-3 w-3" />
-                    </Button>
-                  </div>
-                )}
-
-                <TranscriptThread segments={transcriptSegments} livePartial={livePartial} />
-
-                {/* Error Display */}
-                {error && !setupRequired && (
-                  <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-50 border border-red-200">
-                    <AlertCircleIcon className="w-3.5 h-3.5 text-red-500 flex-shrink-0 mt-0.5" />
-                    <div>
-                      <p className="text-[10px] font-medium text-red-800">
-                        Error
-                      </p>
-                      <p className="text-[10px] text-red-700">{error}</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Setup Required - Permission Flow */}
-                {setupRequired ? (
-                  <PermissionFlow
-                    onPermissionGranted={() => {
-                      startCapture();
-                    }}
-                    onPermissionDenied={() => {
-                      // Keep showing setup instructions
-                    }}
-                  />
-                ) : (
-                  <>
-                    {/* Recording Panel */}
-                    <RecordingPanel
-                      isVadMode={isVadMode}
-                      isRecording={isRecordingInContinuousMode}
-                      isProcessing={isProcessing}
-                      isAIProcessing={isAIProcessing}
-                      recordingProgress={recordingProgress}
-                      maxDuration={vadConfig.max_recording_duration_secs}
-                      onStartRecording={startContinuousRecording}
-                      onStopAndSend={manualStopAndSend}
-                      onIgnore={ignoreContinuousRecording}
-                    />
-
-                    {/* Live running transcript (shown while audio is still being captured
-                        and no final transcript has arrived yet). */}
-                    {capturing && livePartial && !lastTranscription && (
-                      <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 space-y-2">
-                        <div className="flex items-center gap-1.5">
-                          <HeadphonesIcon className="w-3.5 h-3.5 text-primary" />
-                          <h4 className="text-xs font-medium text-primary">
-                            Listening...
-                          </h4>
-                          <span className="inline-block w-2 h-2 rounded-full bg-primary animate-pulse ml-1" />
-                        </div>
-                        <p className="text-xs text-foreground/90 whitespace-pre-wrap leading-relaxed">
-                          {livePartial}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* AI Response */}
-                    <ResultsSection
-                      lastTranscription={lastTranscription}
-                      lastAIResponse={lastAIResponse}
-                      isAIProcessing={isAIProcessing}
-                      conversation={conversation}
-                      conversationMode={conversationMode}
-                      setConversationMode={setConversationMode}
-                    />
-
-                  </>
-                )}
               </div>
-              </ScrollArea>
+            )}
+          </TranscriptThread>
+
+          {error && (
+            <div className="hyperly-section">
+              <div className="hyperly-error">
+                <strong>Error:</strong> {error}
+              </div>
             </div>
+          )}
 
+          <ResultsSection
+            lastAIResponse={lastAIResponse}
+            isAIProcessing={isAIProcessing}
+            conversation={conversation}
+          />
 
+          <FollowUps
+            quickActions={quickActions}
+            suggestions={suggestedFollowUps}
+            disabled={isProcessing || isAIProcessing}
+            onAction={(action) => void handleQuickActionClick(action)}
+            onAddCustom={addQuickAction}
+          />
+
+          {/* Action row: Capture / Selection / Attach / Library + file dropdown */}
+          <div className="hyperly-section">
+            <ListenActionRow
+              isCapturing={isCapturingScreenshot}
+              onCapture={() => void handleCapture()}
+              onCaptureRegion={() => void handleCaptureRegion()}
+              onAttach={handleAttach}
+              folderName={knowledgeFolderName}
+              folderFiles={knowledgeFolderFiles}
+              selectedFileName={knowledgeFile?.name}
+              isReading={isKnowledgeReading}
+              onPickFolder={pickKnowledgeFolder}
+              onSelectFile={(name) => void selectKnowledgeFile(name)}
+            />
+            {screenshotImage && (
+              <div className="hyperly-thumb-strip mt-2">
+                <span className="relative">
+                  <img
+                    src={`data:image/png;base64,${screenshotImage}`}
+                    alt="Screenshot"
+                    className="hyperly-thumb"
+                  />
+                  <button
+                    type="button"
+                    className="hyperly-thumb-remove"
+                    onClick={() => setScreenshotImage(null)}
+                    title="Remove screenshot"
+                  >
+                    <XIcon className="h-2.5 w-2.5" />
+                  </button>
+                </span>
+                <span className="text-[9px] text-muted-foreground">
+                  Sent with the next prompt
+                </span>
+              </div>
+            )}
+            {knowledgeFile && (
+              <p className="hyperly-knowledge-note flex items-center gap-1 px-0">
+                <span className="truncate">
+                  {knowledgeFile.name} · knowledge in this prompt
+                  {knowledgeFile.truncated ? " (truncated)" : ""}
+                </span>
+                <button
+                  type="button"
+                  className="hyperly-icon-btn"
+                  onClick={clearKnowledgeFile}
+                  title="Remove knowledge file"
+                >
+                  <XIcon className="size-3" />
+                </button>
+              </p>
+            )}
+            {knowledgeReadError && (
+              <p className="hyperly-knowledge-note px-0">{knowledgeReadError}</p>
+            )}
           </div>
-        </PopoverContent>
+
+          <ListenFooter />
+        </>
       )}
-    </Popover>
+    </div>
   );
 };
 export * from "./TranscriptThread";

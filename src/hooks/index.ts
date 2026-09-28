@@ -8,6 +8,9 @@ export * from "./useSettings";
 export * from "./useGlobalShortcuts";
 export * from "./useShortcuts";
 export * from "./useSystemAudio";
+// Not `useVoiceInput`: that module imports @ricky0123/vad-web, which has to
+// stay behind the lazy() boundary in AutoSpeechVAD / ListenUserMic.
+export * from "./useVoiceSensitivity";
 export * from "./useHistory";
 export * from "./useCopyToClipboard";
 export * from "./useTitles";

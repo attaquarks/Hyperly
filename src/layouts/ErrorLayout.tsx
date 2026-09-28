@@ -1,14 +1,27 @@
 import { Button, Card, DragButton } from "@/components";
 import { RefreshCcwIcon, SparklesIcon } from "lucide-react";
 
-export const ErrorLayout = ({ isCompact }: { isCompact?: boolean }) => {
+export const ErrorLayout = ({
+  isCompact,
+  error,
+}: {
+  isCompact?: boolean;
+  error?: unknown;
+}) => {
+  const detail =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+
   return isCompact ? (
-    <Card className="flex flex-row w-screen h-screen items-center justify-between p-4">
+    <Card className="flex flex-row w-screen h-screen items-center justify-between p-4 gap-3">
       <div className="flex size-8 items-center justify-center rounded-xl bg-foreground">
         <SparklesIcon className="size-5 text-background" />
       </div>
-      <p className="text-sm md:text-xl">
-        Oops! Something went wrong. Click reload to restart the app.
+      <p className="text-sm md:text-base min-w-0 truncate" title={detail || undefined}>
+        {detail || "Oops! Something went wrong. Click reload to restart the app."}
       </p>
 
       <div className="flex flex-row items-center gap-2">

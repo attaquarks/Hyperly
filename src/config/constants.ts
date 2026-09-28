@@ -15,8 +15,13 @@ export const STORAGE_KEYS = {
   SYSTEM_AUDIO_CONTEXT: "system_audio_context",
   SYSTEM_AUDIO_QUICK_ACTIONS: "system_audio_quick_actions",
   SYSTEM_AUDIO_LISTEN_MODE: "system_audio_listen_mode",
+  SYSTEM_AUDIO_CAPTURE_BEHAVIOR: "system_audio_capture_behavior",
   CUSTOMIZABLE: "customizable",
   SHORTCUTS: "shortcuts",
+
+  // Overlay window size preset (see ListenFooter). Persisted so the chosen
+  // geometry survives restarts; applied once on mount.
+  OVERLAY_SIZE: "overlay_size",
 
   SELECTED_AUDIO_DEVICES: "selected_audio_devices",
   RESPONSE_SETTINGS: "response_settings",

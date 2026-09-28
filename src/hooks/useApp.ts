@@ -5,8 +5,10 @@ import { safeLocalStorage, migrateLocalStorageToSQLite } from "@/lib";
 import { getShortcutsConfig } from "@/lib/storage";
 import { invoke } from "@tauri-apps/api/core";
 
-export const useApp = () => {
-  const systemAudio = useSystemAudio();
+/// `listenActive` is threaded down to `useSystemAudio`, whose Space binding
+/// must not fire while the Ask panel is the visible one.
+export const useApp = ({ listenActive = true }: { listenActive?: boolean } = {}) => {
+  const systemAudio = useSystemAudio({ active: listenActive });
   const [isHidden, setIsHidden] = useState(false);
   // Initialize title management
   useTitles();

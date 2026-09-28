@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { useWindowResize, useGlobalShortcuts } from ".";
+import { useGlobalShortcuts } from "./useGlobalShortcuts";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
@@ -21,44 +21,47 @@ import {
 } from "@/lib";
 import { Message } from "@/types/completion";
 import {
+  CaptureBehavior,
+  KnowledgeFile,
   ListenMode,
   TranscriptSegment,
 } from "@/types/system-audio";
+import { useKnowledge } from "./useKnowledge";
+import { planUtterance } from "@/lib/response-policy";
+import {
+  DEFAULT_VAD_CONFIG,
+  persistVadConfig,
+  readStoredVadConfig,
+  type VadConfig,
+} from "@/lib/vad-config";
 
-// VAD Configuration interface matching Rust
-export interface VadConfig {
-  enabled: boolean;
-  hop_size: number;
-  sensitivity_rms: number;
-  peak_threshold: number;
-  silence_chunks: number;
-  min_speech_chunks: number;
-  pre_speech_chunks: number;
-  noise_gate_threshold: number;
-  max_recording_duration_secs: number;
-}
+// VAD configuration lives in @/lib/vad-config so the Audio Settings page and
+// this hook share one definition instead of two that drift apart.
+// Re-exported here because the Listen settings panel imports `VadConfig` from
+// this module.
+export type { VadConfig };
 
-// OPTIMIZED VAD defaults - matches backend exactly for perfect performance
-const DEFAULT_VAD_CONFIG: VadConfig = {
-  // Manual mode is the default: the user explicitly starts / stops a recording
-  // and the AI only fires when they hit "Stop & Send". Users can flip to VAD
-  // (auto) mode in the listen panel if they want per-utterance auto-transcription.
-  enabled: false,
-  hop_size: 1024,
-  sensitivity_rms: 0.012, // Much less sensitive - only real speech
-  peak_threshold: 0.035, // Higher threshold - filters clicks/noise
-  silence_chunks: 45, // ~1.0s of required silence
-  min_speech_chunks: 7, // ~0.16s - captures short answers
-  pre_speech_chunks: 12, // ~0.27s - enough to catch word start
-  noise_gate_threshold: 0.003, // Stronger noise filtering
-  max_recording_duration_secs: 180, // 3 minutes default
-};
+/// Persisted preference for Listen's "Mic + system audio" toggle.
+const MIC_WITH_SYSTEM_KEY = "listen_mic_with_system";
 
 // Compose the system prompt for listen-panel AI calls: the active mode's
 // preset (when it has one) rides on top of the user's configured prompt.
 const composeListenPrompt = (base: string, mode: ListenMode): string => {
   const preset = LISTEN_MODE_PROMPTS[mode];
-  return preset ? `${base}\n\n${preset}` : base;
+  // Every message reaching the model is tagged with where the words came from:
+  // "User (microphone)" is what the person wearing the headset said, and an
+  // untagged message is audio picked up out of the room by the system. Without
+  // this the model cannot tell the user's own words from someone else's, and
+  // answers the room instead of the user.
+  const legend =
+    'Each incoming message is prefixed with its source. ' +
+    '"User (microphone): ..." is the user speaking directly to you. ' +
+    'Anything without that prefix is audio captured from the system/room, ' +
+    'which is someone else talking. Address the user directly and treat the ' +
+    "user's own words as the request.";
+  return preset
+    ? `${base}\n\n${legend}\n\n${preset}`
+    : `${base}\n\n${legend}`;
 };
 
 // Chat message interface (reusing from useCompletion)
@@ -80,8 +83,22 @@ export interface ChatConversation {
 
 export type useSystemAudioType = ReturnType<typeof useSystemAudio>;
 
-export function useSystemAudio() {
-  const { resizeWindow } = useWindowResize();
+/// The capture engine reads its VAD settings from the spawn payload, not from
+/// `get_vad_config`, so every start has to carry the current config. Reading
+/// storage here instead of closing over React state is what lets a change made
+/// on the Audio Settings page — a separate component tree — reach the engine.
+const currentSpawnVadConfig = (): VadConfig => ({
+  ...readStoredVadConfig(),
+  // The engine is always the Rust VAD loop; the stored flag only seeds the
+  // numeric fields below.
+  enabled: true,
+});
+
+/// `active` scopes this hook's keyboard shortcuts to the panel that is on
+/// screen. Both panels stay mounted and are hidden with CSS, so a global
+/// listener would let Space start a system-audio capture while the user is
+/// looking at Ask.
+export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   const globalShortcuts = useGlobalShortcuts();
   const [isPopoverOpen, setIsPopoverOpen] = useState(false);
   const [capturing, setCapturing] = useState(false);
@@ -94,7 +111,6 @@ export function useSystemAudio() {
   const [quickActions, setQuickActions] = useState<string[]>([]);
   const [isManagingQuickActions, setIsManagingQuickActions] =
     useState<boolean>(false);
-  const [showQuickActions, setShowQuickActions] = useState<boolean>(true);
   const [vadConfig, setVadConfig] = useState<VadConfig>(DEFAULT_VAD_CONFIG);
   const [recordingProgress, setRecordingProgress] = useState<number>(0); // For continuous mode
   // Live, growing transcript shown while audio is still being captured. Each "speech-partial"
@@ -106,6 +122,72 @@ export function useSystemAudio() {
   // Ref mirror so the speech-detected listener — whose effect deps don't
   // include listenMode — always reads the current mode.
   const listenModeRef = useRef<ListenMode>("auto");
+  // Listening-bar behavior. All three modes run the same VAD capture engine;
+  // they differ only in when an utterance reaches the AI: "auto" sends every
+  // pause, "manual" holds everything until the user stops, and "questions"
+  // sends question-shaped utterances immediately and holds the rest.
+  const [captureBehavior, setCaptureBehaviorState] = useState<CaptureBehavior>(
+    () => {
+      try {
+        const saved = safeLocalStorage.getItem(
+          STORAGE_KEYS.SYSTEM_AUDIO_CAPTURE_BEHAVIOR
+        );
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (["auto", "manual", "questions"].includes(parsed)) return parsed;
+        }
+      } catch {
+        // fall through to the default
+      }
+      return "auto";
+    }
+  );
+  const captureBehaviorRef = useRef<CaptureBehavior>(captureBehavior);
+  // Mirrors `capturing` for callbacks that must not act on a stale closure — a
+  // mode switch that read `false` while the engine was live would try to start
+  // a second capture and hit "Capture already running".
+  const capturingRef = useRef<boolean>(false);
+  // Mirrors the `active` option for the same reason `capturingRef` exists: the
+  // Space listener is registered once and must not read a stale panel state.
+  const panelActiveRef = useRef<boolean>(active);
+  // Text transcribed under Manual / "Auto · On questions" that has not been
+  // sent yet. Switching to Auto folds it into the next send; a stop sends it
+  // immediately.
+  const pendingTranscriptRef = useRef<string>("");
+  // Mirrors `livePartial` so a stop can include the in-progress utterance that
+  // React state has not committed yet.
+  const livePartialRef = useRef<string>("");
+  // True while a `speech-detected` utterance is being transcribed, and set when
+  // a stop arrives during that window so the stop is applied once the
+  // transcript lands instead of dropping it.
+  const sttInFlightRef = useRef<boolean>(false);
+  const stopRequestedRef = useRef<boolean>(false);
+  // Auto is the mode that listens on its own, so something has to start the
+  // engine for it. Set when the user stops on purpose (Stop, spacebar, the
+  // deferred stop) so an explicit stop is never undone by the Auto autostart,
+  // and cleared whenever they start or change mode.
+  const autoListenSuppressedRef = useRef<boolean>(false);
+  // Guards the async spawn against a concurrent start.
+  const startingRef = useRef<boolean>(false);
+
+  // AI-suggested follow-ups, regenerated after each answer.
+  const [suggestedFollowUps, setSuggestedFollowUps] = useState<string[]>([]);
+  // Library knowledge: the folder's file list plus the selected file's text,
+  // injected into the next AI call's system prompt.
+  const {
+    folderName: knowledgeFolderName,
+    folderFiles: knowledgeFolderFiles,
+    knowledgeFile,
+    isReading: isKnowledgeReading,
+    readError: knowledgeReadError,
+    pickFolder: pickKnowledgeFolder,
+    selectFile: selectKnowledgeFile,
+    clearKnowledge: clearKnowledgeFile,
+  } = useKnowledge();
+  const knowledgeFileRef = useRef<KnowledgeFile | null>(null);
+  useEffect(() => {
+    knowledgeFileRef.current = knowledgeFile;
+  }, [knowledgeFile]);
   const sessionStartRef = useRef<number>(Date.now());
   // Screenshot captured via the listen panel — attached to the next AI call when manual stop fires.
   const [pendingScreenshot, setPendingScreenshot] = useState<string | null>(null);
@@ -114,9 +196,35 @@ export function useSystemAudio() {
   useEffect(() => {
     pendingScreenshotRef.current = pendingScreenshot;
   }, [pendingScreenshot]);
-  // Accumulates the running partial transcript across "speech-partial" events. Hoisted to the
-  // outer hook scope so callers (startCapture / stopCapture) can reset it.
-  const partialAccumulatorRef = useRef<string>("");
+  // Monotonic counter for transcript segment ids. `Date.now()` collides when a
+  // partial and a final land in the same millisecond, which produced duplicate
+  // React keys; a counter can never repeat.
+  const segmentIdRef = useRef(0);
+  const nextSegmentId = () => `segment-${++segmentIdRef.current}`;
+  // Live partial from the Listen "User" mic. The VAD itself runs in
+  // ListenUserMic, lazy-loaded so the VAD runtime stays off the overlay's
+  // first-paint graph. Rust still owns system audio.
+  const [userMicPartial, setUserMicPartial] = useState<string>("");
+  // Listen's "Mic + system audio" toggle. Off by default: system audio alone is
+  // the mode that needs no browser microphone at all, and turning the mic on is
+  // a deliberate choice. The two sources are captured and labelled separately —
+  // system audio as "Speaker", the browser mic as "User" — so this adds a
+  // stream, it never merges one. Persisted so the choice survives a restart.
+  const [micWithSystem, setMicWithSystemState] = useState<boolean>(() => {
+    try {
+      return safeLocalStorage.getItem(MIC_WITH_SYSTEM_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const setMicWithSystem = useCallback((next: boolean) => {
+    setMicWithSystemState(next);
+    try {
+      safeLocalStorage.setItem(MIC_WITH_SYSTEM_KEY, String(next));
+    } catch {
+      // A storage failure only costs the persisted preference.
+    }
+  }, []);
   const [isContinuousMode, setIsContinuousMode] = useState<boolean>(false);
   const [isRecordingInContinuousMode, setIsRecordingInContinuousMode] =
     useState<boolean>(false);
@@ -161,16 +269,11 @@ export function useSystemAudio() {
       }
     }
 
-    // Load VAD config
-    const savedVadConfig = safeLocalStorage.getItem("vad_config");
-    if (savedVadConfig) {
-      try {
-        const parsed = JSON.parse(savedVadConfig);
-        setVadConfig(parsed);
-      } catch (error) {
-        console.error("Failed to load VAD config:", error);
-      }
-    }
+    // Load VAD config. `readStoredVadConfig` merges what is stored over the
+    // defaults, so a config written before a field existed — everyone
+    // upgrading past `peak_threshold` becoming `voice_sensitivity` — cannot
+    // load with that field undefined and bind a slider to NaN.
+    setVadConfig(readStoredVadConfig());
 
     // Load listen mode
     const savedListenMode = safeLocalStorage.getItem(
@@ -196,7 +299,18 @@ export function useSystemAudio() {
         console.error("Failed to load listen mode:", error);
       }
     }
+
+    // Nothing else sets the capture behavior: the dropdown is its only author,
+    // and the state initializer above has already read what it stored. Deriving
+    // a mode from the legacy `vad_config.enabled` flag used to drop anyone with
+    // an old `enabled: false` into Manual without them ever choosing it — the
+    // bar showed Auto while every utterance was held.
   }, []);
+
+  // Keep the capture-state ref in step with the React state.
+  useEffect(() => {
+    capturingRef.current = capturing;
+  }, [capturing]);
 
   // Load quick actions from localStorage on mount
   useEffect(() => {
@@ -292,9 +406,9 @@ export function useSystemAudio() {
       return [
         ...segments,
         {
-          id: `segment-${Date.now()}`,
+          id: nextSegmentId(),
           timestamp,
-          speaker: "Speaker 1",
+          speaker: "Speaker",
           text,
           isPartial: true,
         },
@@ -315,14 +429,30 @@ export function useSystemAudio() {
       return [
         ...segments,
         {
-          id: `segment-${Date.now()}`,
+          id: nextSegmentId(),
           timestamp,
-          speaker: "Speaker 1",
+          speaker: "Speaker",
           text,
           isPartial: false,
         },
       ];
     });
+  };
+
+  // Typed input (quick actions, custom follow-ups) joins the transcript as
+  // "User" so the thread reads as one conversation.
+  const pushUserSegment = (text: string) => {
+    const timestamp = elapsedSeconds();
+    setTranscriptSegments((segments) => [
+      ...segments,
+      {
+        id: nextSegmentId(),
+        timestamp,
+        speaker: "User",
+        text,
+        isPartial: false,
+      },
+    ]);
   };
 
   // Handle single speech detection event (both VAD and continuous modes)
@@ -359,8 +489,8 @@ export function useSystemAudio() {
               });
 
               if (partial && partial.trim()) {
-                partialAccumulatorRef.current = partial;
                 setLivePartial(partial);
+                livePartialRef.current = partial;
                 upsertPartialSegment(partial);
               }
             } catch (err) {
@@ -372,7 +502,9 @@ export function useSystemAudio() {
 
         speechUnlisten = await listen("speech-detected", async (event) => {
           try {
-            if (!capturing) return;
+            if (!capturing) {
+              return;
+            }
 
             const base64Audio = event.payload as string;
             // Convert to blob
@@ -398,6 +530,7 @@ export function useSystemAudio() {
             }
 
             setIsProcessing(true);
+            sttInFlightRef.current = true;
 
             // Add timeout wrapper for STT request (30 seconds)
             const sttPromise = fetchSTT({
@@ -425,8 +558,27 @@ export function useSystemAudio() {
                 // The full transcript just arrived — clear the live running one so the UI
                 // shows the canonical final text and the AI response.
                 setLivePartial("");
-                partialAccumulatorRef.current = "";
+                livePartialRef.current = "";
                 setError("");
+
+                // One call decides the outcome for every mode — send now, hold,
+                // or apply a stop pressed while this utterance was transcribing
+                // — so Auto cannot drift into the Manual/Questions path.
+                const plan = planUtterance(
+                  captureBehaviorRef.current,
+                  transcription,
+                  pendingTranscriptRef.current,
+                  stopRequestedRef.current
+                );
+                stopRequestedRef.current = false;
+                pendingTranscriptRef.current = plan.pending;
+
+                if (plan.kind === "hold") return;
+
+                if (plan.kind === "stop-and-send") {
+                  await stopAndSend(plan.text);
+                  return;
+                }
 
                 const baseSystemPrompt = useSystemPrompt
                   ? systemPrompt || DEFAULT_SYSTEM_PROMPT
@@ -436,12 +588,12 @@ export function useSystemAudio() {
                   listenModeRef.current
                 );
 
-                const previousMessages = conversation.messages.map((msg) => {
+                const previousMessages = (conversation.messages ?? []).map((msg) => {
                   return { role: msg.role, content: msg.content };
                 });
 
                 await processWithAI(
-                  transcription,
+                  plan.text,
                   effectiveSystemPrompt,
                   previousMessages
                 );
@@ -456,6 +608,12 @@ export function useSystemAudio() {
           } catch (err) {
             setError("Failed to process speech");
           } finally {
+            // A deferred stop is consumed by the utterance it was waiting on,
+            // or not at all. It must never stay latched: a latched flag turns
+            // every later utterance into a stop, which kills the engine and
+            // makes capture look frozen until the next spacebar press.
+            stopRequestedRef.current = false;
+            sttInFlightRef.current = false;
             setIsProcessing(false);
           }
         });
@@ -474,7 +632,7 @@ export function useSystemAudio() {
     capturing,
     selectedSttProvider,
     allSttProviders,
-    conversation.messages.length,
+    conversation.messages?.length ?? 0,
   ]);
 
   // Context management functions
@@ -546,6 +704,8 @@ export function useSystemAudio() {
 
   const handleQuickActionClick = async (action: string) => {
     setError("");
+    // Typed input joins the transcript labeled "User".
+    pushUserSegment(action);
 
     const baseSystemPrompt = useSystemPrompt
       ? systemPrompt || DEFAULT_SYSTEM_PROMPT
@@ -553,7 +713,7 @@ export function useSystemAudio() {
     const effectiveSystemPrompt = composeListenPrompt(baseSystemPrompt, listenMode);
 
     // Include the most recent transcription in conversation history if it exists
-    let updatedMessages = [...conversation.messages];
+    let updatedMessages = [...(conversation.messages ?? [])];
 
     if (lastTranscription && lastTranscription.trim()) {
       const lastMessage = updatedMessages[updatedMessages.length - 1];
@@ -571,7 +731,7 @@ export function useSystemAudio() {
         // Update conversation state with the latest transcription
         setConversation((prev) => ({
           ...prev,
-          messages: [userMessage, ...prev.messages],
+          messages: [userMessage, ...(prev.messages ?? [])],
           updatedAt: timestamp,
           title: prev.title || generateConversationTitle(lastTranscription),
         }));
@@ -592,26 +752,29 @@ export function useSystemAudio() {
       setError("");
 
       const deviceId =
+        selectedAudioDevices.output?.id &&
         selectedAudioDevices.output.id !== "default"
           ? selectedAudioDevices.output.id
           : null;
 
       // Start a new continuous recording session
       await invoke<string>("start_system_audio_capture", {
-        vadConfig: vadConfig,
+        vadConfig: currentSpawnVadConfig(),
         deviceId: deviceId,
       });
     } catch (err) {
       console.error("Failed to start continuous recording:", err);
       setError(`Failed to start recording: ${err}`);
     }
-  }, [vadConfig, selectedAudioDevices.output.id]);
+  }, [vadConfig, selectedAudioDevices.output?.id]);
 
-  // Ignore current recording (stop without transcription)
+  // Ignore current recording (stop without transcription). Gated on `capturing`
+  // for the same reason as the Escape shortcut: the Rust-driven
+  // `isRecordingInContinuousMode` can lag the actual capture state.
   const ignoreContinuousRecording = useCallback(async () => {
-    try {
-      if (!isContinuousMode || !isRecordingInContinuousMode) return;
+    if (!isContinuousMode || !capturing) return;
 
+    try {
       // Stop the capture without processing
       await invoke<string>("stop_system_audio_capture");
 
@@ -623,7 +786,42 @@ export function useSystemAudio() {
       console.error("Failed to ignore recording:", err);
       setError(`Failed to ignore recording: ${err}`);
     }
-  }, [isContinuousMode, isRecordingInContinuousMode]);
+  }, [isContinuousMode, capturing]);
+
+  // After each answer, ask the provider for a few conversation-specific
+  // follow-ups. Failures are silent — the four fixed chips always remain.
+  const generateFollowUps = useCallback(
+    async (userText: string, assistantText: string) => {
+      if (!selectedAIProvider.provider) return;
+      const provider = allAiProviders.find(
+        (p) => p.id === selectedAIProvider.provider
+      );
+      if (!provider) return;
+
+      try {
+        let out = "";
+        for await (const chunk of fetchAIResponse({
+          provider,
+          selectedProvider: selectedAIProvider,
+          systemPrompt:
+            "You suggest short follow-up prompts for an ongoing conversation. Reply with one suggestion per line, no numbering, no bullets, at most 8 words each.",
+          history: [],
+          userMessage: `Conversation excerpt:\nThem: ${userText}\nYou: ${assistantText}\n\nSuggest 3 follow-ups the user might ask next.`,
+        })) {
+          out += chunk;
+        }
+        const suggestions = out
+          .split("\n")
+          .map((line) => line.replace(/^[-*•\d.)\s]+/, "").trim())
+          .filter((line) => line.length > 0 && line.length <= 60)
+          .slice(0, 3);
+        setSuggestedFollowUps(suggestions);
+      } catch (err) {
+        console.warn("Follow-up suggestions failed:", err);
+      }
+    },
+    [selectedAIProvider, allAiProviders]
+  );
 
   // AI Processing function
   const processWithAI = useCallback(
@@ -664,11 +862,17 @@ export function useSystemAudio() {
         pendingScreenshotRef.current = null;
         setPendingScreenshot(null);
 
+        // Library knowledge rides on top of the system prompt for this call only.
+        const knowledge = knowledgeFileRef.current;
+        const promptWithKnowledge = knowledge
+          ? `${prompt}\n\nKnowledge from "${knowledge.name}":\n${knowledge.text}`
+          : prompt;
+
         try {
           for await (const chunk of fetchAIResponse({
             provider,
             selectedProvider: selectedAIProvider,
-            systemPrompt: prompt,
+            systemPrompt: promptWithKnowledge,
             history: previousMessages,
             userMessage: transcription,
             imagesBase64: screenshotForThisCall ? [screenshotForThisCall] : [],
@@ -702,6 +906,7 @@ export function useSystemAudio() {
             updatedAt: timestamp,
             title: prev.title || generateConversationTitle(transcription),
           }));
+          void generateFollowUps(transcription, fullResponse);
         }
       } catch (err) {
         setError("Failed to get AI response");
@@ -710,7 +915,125 @@ export function useSystemAudio() {
         // No auto-restart - user manually controls when to start next recording
       }
     },
-    [selectedAIProvider, allAiProviders, conversation.messages]
+    [
+      selectedAIProvider,
+      allAiProviders,
+      conversation.messages,
+      generateFollowUps,
+    ]
+  );
+
+  // Stop the capture engine without tearing the session down, then send what
+  // was collected. Used by the spacebar / Stop button in Manual and
+  // "Auto · On questions", and by the deferred in-flight stop. It never closes
+  // the popover and never clears the conversation — that full teardown is
+  // `stopCapture`, which belongs to Auto's Stop button.
+  const stopAndSend = useCallback(
+    async (text: string) => {
+      try {
+        await invoke<string>("stop_system_audio_capture");
+      } catch (err) {
+        console.error("Failed to stop capture:", err);
+      }
+
+      // The user asked to stop, so the Auto autostart must not immediately
+      // start the engine back up under them.
+      autoListenSuppressedRef.current = true;
+
+      setCapturing(false);
+      setIsProcessing(false);
+      setIsContinuousMode(false);
+      setIsRecordingInContinuousMode(false);
+      setRecordingProgress(0);
+      setLivePartial("");
+      livePartialRef.current = "";
+
+      const outbound = text.trim();
+      if (!outbound) return;
+
+      const baseSystemPrompt = useSystemPrompt
+        ? systemPrompt || DEFAULT_SYSTEM_PROMPT
+        : contextContent || DEFAULT_SYSTEM_PROMPT;
+      const effectiveSystemPrompt = composeListenPrompt(
+        baseSystemPrompt,
+        listenModeRef.current
+      );
+
+      const previousMessages = (conversation.messages ?? []).map((msg) => {
+        return { role: msg.role, content: msg.content };
+      });
+
+      await processWithAI(outbound, effectiveSystemPrompt, previousMessages);
+    },
+    [systemPrompt, contextContent, conversation.messages, processWithAI]
+  );
+
+  // A finalized microphone utterance. It is shown in the transcript under the
+  // "User" label and then sent to the AI through exactly the same policy the
+  // system-audio path uses, so all three capture behaviours behave identically
+  // whichever source the words came from.
+  //
+  // This used to be `pushUserSegment` on its own, which only appended the label
+  // to the transcript. The mic audio was captured, transcribed and displayed,
+  // but never reached the model — and because the transcript is React state that
+  // is not persisted, the words vanished when capture stopped.
+  //
+  // Declared after `processWithAI` and `stopAndSend` on purpose: the dependency
+  // array below is evaluated during render, so referencing them any earlier would
+  // hit the temporal dead zone.
+  const submitUserUtterance = useCallback(
+    async (text: string) => {
+      const transcript = text.trim();
+      if (!transcript) return;
+
+      pushUserSegment(transcript);
+
+      const plan = planUtterance(
+        captureBehaviorRef.current,
+        transcript,
+        pendingTranscriptRef.current,
+        stopRequestedRef.current
+      );
+      stopRequestedRef.current = false;
+      pendingTranscriptRef.current = plan.pending;
+
+      if (plan.kind === "hold") return;
+
+      if (plan.kind === "stop-and-send") {
+        await stopAndSend(plan.text);
+        return;
+      }
+
+      // The speaker tag is part of the message the model receives, so it can tell
+      // the user's own words apart from the room. It is deliberately not part of
+      // the transcript row, which already renders its own "User" label.
+      const baseSystemPrompt = useSystemPrompt
+        ? systemPrompt || DEFAULT_SYSTEM_PROMPT
+        : contextContent || DEFAULT_SYSTEM_PROMPT;
+      const effectiveSystemPrompt = composeListenPrompt(
+        baseSystemPrompt,
+        listenModeRef.current
+      );
+
+      const previousMessages = (conversation.messages ?? []).map((msg) => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+
+      await processWithAI(
+        `User (microphone): ${plan.text}`,
+        effectiveSystemPrompt,
+        previousMessages
+      );
+    },
+    [
+      contextContent,
+      conversation.messages,
+      processWithAI,
+      stopAndSend,
+      systemPrompt,
+      useSystemPrompt,
+    ]
   );
 
   const startCapture = useCallback(async () => {
@@ -724,8 +1047,6 @@ export function useSystemAudio() {
         return;
       }
 
-      const isContinuous = !vadConfig.enabled;
-
       // Set up conversation
       const conversationId = generateConversationId("sysaudio");
       setConversation({
@@ -736,14 +1057,19 @@ export function useSystemAudio() {
         updatedAt: 0,
       });
 
+      // An explicit start always wins over a previous explicit stop.
+      autoListenSuppressedRef.current = false;
+
       setCapturing(true);
       setIsPopoverOpen(true);
-      setIsContinuousMode(isContinuous);
+      setIsContinuousMode(false);
       setRecordingProgress(0);
       setLivePartial("");
+      livePartialRef.current = "";
       setTranscriptSegments([]);
+      pendingTranscriptRef.current = "";
+      stopRequestedRef.current = false;
       sessionStartRef.current = Date.now();
-      partialAccumulatorRef.current = "";
 
       // Manual and Auto both start capturing audio immediately. Manual used
       // to arm first and wait for a separate Space/button press, which read
@@ -755,13 +1081,17 @@ export function useSystemAudio() {
       await invoke<string>("stop_system_audio_capture");
 
       const deviceId =
+        selectedAudioDevices.output?.id &&
         selectedAudioDevices.output.id !== "default"
           ? selectedAudioDevices.output.id
           : null;
 
-      // Start capture with VAD config
+      // Start capture with the VAD config. `enabled` is forced on: the loop
+      // type is fixed when the Rust task spawns, and every session runs the
+      // VAD loop so the listening-bar behavior can change mid-session without
+      // restarting capture.
       await invoke<string>("start_system_audio_capture", {
-        vadConfig: vadConfig,
+        vadConfig: currentSpawnVadConfig(),
         deviceId: deviceId,
       });
     } catch (err) {
@@ -769,7 +1099,55 @@ export function useSystemAudio() {
       setError(errorMessage);
       setIsPopoverOpen(true);
     }
-  }, [vadConfig, selectedAudioDevices.output.id]);
+  }, [vadConfig, selectedAudioDevices.output?.id]);
+
+  // Start the VAD engine inside a session that is already on screen: no
+  // conversation reset, no transcript wipe, no stop-then-start. Used by the
+  // Auto autostart, by the spacebar Start in Manual and "Auto · On questions",
+  // and by the Start button.
+  const startSessionCapture = useCallback(async () => {
+    if (startingRef.current) return;
+    startingRef.current = true;
+    try {
+      setError("");
+
+      const hasAccess = await invoke<boolean>("check_system_audio_access");
+      if (!hasAccess) {
+        setSetupRequired(true);
+        setIsPopoverOpen(true);
+        return;
+      }
+
+      // An explicit start always wins over a previous explicit stop.
+      autoListenSuppressedRef.current = false;
+
+      setCapturing(true);
+      setIsPopoverOpen(true);
+      setIsContinuousMode(false);
+      setRecordingProgress(0);
+      setLivePartial("");
+      livePartialRef.current = "";
+      setIsRecordingInContinuousMode(false);
+      sessionStartRef.current = Date.now();
+
+      const deviceId =
+        selectedAudioDevices.output?.id &&
+        selectedAudioDevices.output.id !== "default"
+          ? selectedAudioDevices.output.id
+          : null;
+
+      await invoke<string>("start_system_audio_capture", {
+        vadConfig: currentSpawnVadConfig(),
+        deviceId: deviceId,
+      });
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      setError(errorMessage);
+      setIsPopoverOpen(true);
+    } finally {
+      startingRef.current = false;
+    }
+  }, [vadConfig, selectedAudioDevices.output?.id]);
 
   const stopCapture = useCallback(async () => {
     try {
@@ -781,6 +1159,11 @@ export function useSystemAudio() {
 
       // Stop the audio capture
       await invoke<string>("stop_system_audio_capture");
+
+      // A stop the user asked for must survive the Auto autostart, which would
+      // otherwise see `capturing` go false and start the engine straight back
+      // up. Only `startCapture`/`startSessionCapture` clear this again.
+      autoListenSuppressedRef.current = true;
 
       // Reset ALL states
       setCapturing(false);
@@ -794,7 +1177,9 @@ export function useSystemAudio() {
       setError("");
       setIsPopoverOpen(false);
       setLivePartial("");
-      partialAccumulatorRef.current = "";
+      livePartialRef.current = "";
+      pendingTranscriptRef.current = "";
+      stopRequestedRef.current = false;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(`Failed to stop capture: ${errorMessage}`);
@@ -802,30 +1187,37 @@ export function useSystemAudio() {
     }
   }, []);
 
-  // Manual stop for continuous recording
+  // Spacebar / Stop in Manual and "Auto · On questions": stop the engine and
+  // send what was collected — held utterances plus the live partial, unless
+  // that partial is already the tail of the held text. When a transcript is
+  // mid-flight the stop is remembered and applied once it lands, so a fast
+  // press still sends the utterance instead of dropping it; a second press
+  // during that window is ignored.
   const manualStopAndSend = useCallback(async () => {
-    try {
-      if (!isContinuousMode) {
-        console.warn("Not in continuous mode");
-        return;
-      }
+    if (!capturingRef.current) return;
 
-      // Show processing state immediately
-      setIsProcessing(true);
-
-      // Trigger manual stop event
-      await invoke("manual_stop_continuous");
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      setError(`Failed to manually stop: ${errorMessage}`);
-      setIsProcessing(false); // Clear processing state on error
-      console.error("Manual stop error:", err);
+    if (sttInFlightRef.current) {
+      stopRequestedRef.current = true;
+      return;
     }
-  }, [isContinuousMode]);
+
+    const held = pendingTranscriptRef.current;
+    const partial = livePartialRef.current.trim();
+    pendingTranscriptRef.current = "";
+
+    const combined =
+      partial && !held.endsWith(partial)
+        ? held
+          ? `${held} ${partial}`
+          : partial
+        : held;
+
+    await stopAndSend(combined);
+  }, [stopAndSend]);
 
   const handleSetup = useCallback(async () => {
     try {
-      const platform = navigator.platform.toLowerCase();
+      const platform = (navigator.platform || navigator.userAgent || "").toLowerCase();
 
       if (platform.includes("mac") || platform.includes("win")) {
         await invoke("request_system_audio_access");
@@ -848,37 +1240,31 @@ export function useSystemAudio() {
     }
   }, [startCapture]);
 
+  // The panel is always expanded, so "popover open" is only a UI hint now —
+  // it drives the answer/error sections, never the window geometry. The
+  // auto-resize that used to live here is gone: the footer's size presets are
+  // the single authority over window size.
   useEffect(() => {
-    const shouldOpenPopover =
-      capturing ||
-      setupRequired ||
-      isAIProcessing ||
-      !!lastAIResponse ||
-      !!error;
-    setIsPopoverOpen(shouldOpenPopover);
-    resizeWindow(shouldOpenPopover);
-  }, [
-    capturing,
-    setupRequired,
-    isAIProcessing,
-    lastAIResponse,
-    error,
-    resizeWindow,
-  ]);
+    setIsPopoverOpen(
+      capturing || setupRequired || isAIProcessing || !!lastAIResponse || !!error
+    );
+  }, [capturing, setupRequired, isAIProcessing, lastAIResponse, error]);
 
-  // `capturing` is a dependency on purpose: the registered callback closes
-  // over it, and startCapture/stopCapture are both stable across capture
-  // state changes — without it the global shortcut kept a stale `capturing`
-  // and could start a capture but never stop one.
+  // The global hotkey is the same Start/Stop toggle as the button and the
+  // spacebar — the non-wiping start and the stop-and-send — so the hotkey no
+  // longer throws away the conversation on screen. The full reset stays behind
+  // the separately labelled "New" button. Reading `capturingRef` instead of
+  // the closed-over `capturing` is what keeps a start from being unreachable
+  // without `capturing` in the dependency list.
   useEffect(() => {
     globalShortcuts.registerSystemAudioCallback(async () => {
-      if (capturing) {
-        await stopCapture();
+      if (capturingRef.current) {
+        await manualStopAndSend();
       } else {
-        await startCapture();
+        await startSessionCapture();
       }
     });
-  }, [capturing, startCapture, stopCapture]);
+  }, [manualStopAndSend, startSessionCapture]);
 
   useEffect(() => {
     return () => {
@@ -900,7 +1286,7 @@ export function useSystemAudio() {
     if (
       !conversation.id ||
       conversation.updatedAt === 0 ||
-      conversation.messages.length === 0
+      (conversation.messages?.length ?? 0) === 0
     ) {
       return;
     }
@@ -929,7 +1315,7 @@ export function useSystemAudio() {
       }
     };
   }, [
-    conversation.messages.length,
+    conversation.messages?.length ?? 0,
     conversation.title,
     conversation.id,
     conversation.updatedAt,
@@ -951,8 +1337,7 @@ export function useSystemAudio() {
     setIsAIProcessing(false);
     setIsPopoverOpen(false);
     setUseSystemPrompt(true);
-    setLivePartial("");
-    partialAccumulatorRef.current = "";
+    setLivePartial("");    setSuggestedFollowUps([]);
   }, []);
 
   // Load an existing conversation from history into the listen panel. Used by the
@@ -962,18 +1347,17 @@ export function useSystemAudio() {
       const parsed = await getConversationById(conversationId);
       if (!parsed || !parsed.id) return;
 
-      setConversation(parsed);
+      const messages = parsed.messages ?? [];
+      setConversation({ ...parsed, messages });
       // Restore the last visible user message and assistant response so the panel
       // immediately shows context without requiring a new recording.
-      const lastUser = parsed.messages.find((m) => m.role === "user");
-      const lastAssistant = [...parsed.messages]
+      const lastUser = messages.find((m) => m.role === "user");
+      const lastAssistant = [...messages]
         .reverse()
         .find((m) => m.role === "assistant");
       setLastTranscription(lastUser?.content ?? "");
       setLastAIResponse(lastAssistant?.content ?? "");
-      setLivePartial("");
-      partialAccumulatorRef.current = "";
-      setError("");
+      setLivePartial("");      setError("");
     } catch (err) {
       console.error("Failed to load conversation:", err);
     }
@@ -992,22 +1376,51 @@ export function useSystemAudio() {
   const updateVadConfiguration = useCallback(async (config: VadConfig) => {
     try {
       setVadConfig(config);
-      safeLocalStorage.setItem("vad_config", JSON.stringify(config));
-      await invoke("update_vad_config", { config });
+      // Writes localStorage and the Rust engine together — see the module for
+      // why both are needed.
+      await persistVadConfig(config);
     } catch (error) {
       console.error("Failed to update VAD config:", error);
     }
   }, []);
 
-  useEffect(() => {
-    if (capturing) {
-      setIsContinuousMode(!vadConfig.enabled);
+  // The listening bar's three-way mode. The capture engine is deliberately
+  // never touched here: a session that is already capturing keeps capturing,
+  // uninterrupted, and the mode only changes how its utterances reach the AI.
+  // Whether Auto should be listening is decided in one place — the autostart
+  // effect below — so an idle switch into Auto is not a special case.
+  const setCaptureBehavior = useCallback(
+    (behavior: CaptureBehavior) => {
+      setCaptureBehaviorState(behavior);
+      captureBehaviorRef.current = behavior;
+      safeLocalStorage.setItem(
+        STORAGE_KEYS.SYSTEM_AUDIO_CAPTURE_BEHAVIOR,
+        JSON.stringify(behavior)
+      );
 
-      if (!vadConfig.enabled) {
-        setIsRecordingInContinuousMode(false);
-      }
-    }
-  }, [vadConfig.enabled, capturing]);
+      // Changing mode is an explicit act, so it lifts a previous explicit stop
+      // and lets Auto pick the engine back up if that is where we landed.
+      autoListenSuppressedRef.current = false;
+    },
+    []
+  );
+
+  // Auto is the mode that listens on its own, so its engine has to be started
+  // for it. This used to happen only on an idle switch from Manual into Auto,
+  // which meant an app that booted in Auto — the default — never captured
+  // anything at all: no audio, no silence gap, so `speech-detected` never
+  // fired and nothing was ever sent to the model. Looked exactly like Auto
+  // being broken, because it was: there was no listener.
+  //
+  // An explicit stop latches `autoListenSuppressedRef`, so pressing Stop in
+  // Auto is not immediately undone; starting again or changing mode clears it.
+  useEffect(() => {
+    if (captureBehavior !== "auto") return;
+    if (capturing) return;
+    if (setupRequired) return;
+    if (autoListenSuppressedRef.current) return;
+    void startSessionCapture();
+  }, [captureBehavior, capturing, setupRequired, startSessionCapture]);
 
   // Keyboard arrow key support for scrolling (local shortcut)
   useEffect(() => {
@@ -1035,49 +1448,64 @@ export function useSystemAudio() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isPopoverOpen]);
 
-  // Keyboard shortcuts for continuous mode recording (local shortcuts)
+  // Spacebar owns capture start/stop in Manual and "Auto · On questions".
+  //
+  // Registered in the capture phase on purpose: a focused button — the mode
+  // trigger in the listening bar, the history button, the quick-action chips,
+  // the size and hide controls — activates on Space natively, and no bubble
+  // phase React handler can pre-empt that. Swallowing the key here stops it
+  // doubling as a click without taking any of those controls out of the tab
+  // order. Typing is untouched: text fields return before the event is
+  // modified, so the Ask composer and every other input keep Space. Enter and
+  // Escape are not bound.
   useEffect(() => {
-    const handleRecordingShortcuts = (e: KeyboardEvent) => {
-      if (!isPopoverOpen || !isContinuousMode) return;
-      if (isProcessing || isAIProcessing) return;
+    panelActiveRef.current = active;
+  }, [active]);
 
-      // Escape: Ignore recording (when recording)
-      if (e.key === "Escape" && isRecordingInContinuousMode) {
-        e.preventDefault();
-        ignoreContinuousRecording();
-      }
+  useEffect(() => {
+    const TEXT_FIELD_TAGS = ["INPUT", "TEXTAREA", "SELECT"];
 
-      // Space or Enter: Start recording, or Stop & Send when a recording is
-      // in progress. Ignored while the user is typing in an input or textarea.
-      if (
-        (e.key === " " || e.key === "Enter") &&
-        !e.metaKey &&
-        !e.ctrlKey &&
-        !(e.target instanceof HTMLInputElement) &&
-        !(e.target instanceof HTMLTextAreaElement)
-      ) {
-        e.preventDefault();
-        if (!isRecordingInContinuousMode) {
-          startContinuousRecording();
-        } else {
-          manualStopAndSend();
-        }
+    const isTextTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      if (TEXT_FIELD_TAGS.includes(target.tagName)) return true;
+      const role = target.getAttribute("role");
+      return (
+        target.isContentEditable ||
+        role === "textbox" ||
+        role === "searchbox"
+      );
+    };
+
+    const handleCaptureSpace = (e: KeyboardEvent) => {
+      if (e.key !== " ") return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (isTextTarget(e.target)) return;
+
+      // Space is scoped to the Listen panel. The Ask panel binds the same key
+      // for push-to-talk, so returning before preventDefault leaves it for that
+      // handler instead of starting a system-audio capture from the Ask tab.
+      if (!panelActiveRef.current) return;
+
+      // Swallow the key for whatever has focus, then act.
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (e.repeat) return;
+
+      const behavior = captureBehaviorRef.current;
+      if (behavior !== "manual" && behavior !== "questions") return;
+
+      if (capturingRef.current) {
+        void manualStopAndSend();
+      } else {
+        void startSessionCapture();
       }
     };
 
-    window.addEventListener("keydown", handleRecordingShortcuts);
+    window.addEventListener("keydown", handleCaptureSpace, true);
     return () =>
-      window.removeEventListener("keydown", handleRecordingShortcuts);
-  }, [
-    isPopoverOpen,
-    isContinuousMode,
-    isRecordingInContinuousMode,
-    isProcessing,
-    isAIProcessing,
-    startContinuousRecording,
-    manualStopAndSend,
-    ignoreContinuousRecording,
-  ]);
+      window.removeEventListener("keydown", handleCaptureSpace, true);
+  }, [manualStopAndSend, startSessionCapture]);
 
   return {
     capturing,
@@ -1089,6 +1517,8 @@ export function useSystemAudio() {
     setupRequired,
     startCapture,
     stopCapture,
+    // Non-wiping start used by the spacebar and the Start button
+    startSessionCapture,
     handleSetup,
     isPopoverOpen,
     setIsPopoverOpen,
@@ -1104,15 +1534,11 @@ export function useSystemAudio() {
     setContextContent: updateContextContent,
     startNewConversation,
     loadConversation,
-    // Window resize
-    resizeWindow,
     quickActions,
     addQuickAction,
     removeQuickAction,
     isManagingQuickActions,
     setIsManagingQuickActions,
-    showQuickActions,
-    setShowQuickActions,
     handleQuickActionClick,
     // VAD configuration
     vadConfig,
@@ -1132,6 +1558,33 @@ export function useSystemAudio() {
     transcriptSegments,
     listenMode,
     setListenMode: setListenModeValue,
+    // Listening-bar behavior (Auto / Manual / Auto · On questions)
+    captureBehavior,
+    setCaptureBehavior,
+    // AI-generated follow-ups for the latest answer
+    suggestedFollowUps,
+    // Library knowledge (folder → file → prompt context)
+    knowledgeFolderName,
+    knowledgeFolderFiles,
+    knowledgeFile,
+    isKnowledgeReading,
+    knowledgeReadError,
+    pickKnowledgeFolder,
+    selectKnowledgeFile,
+    clearKnowledgeFile,
+    // Typed input and the browser-side mic both join the transcript as "User".
+    // `pushUserSegment` only labels the row; `submitUserUtterance` is the one to
+    // wire to a mic's `onUtterance`, because it also routes the words to the AI.
+    pushUserSegment,
+    submitUserUtterance,
+    // Live in-progress text from the browser-side "User" mic.
+    // ListenUserMic writes these; the transcript thread only reads the partial.
+    userMicPartial,
+    setUserMicPartial,
+    // Listen's "Mic + system audio" toggle — see the state declaration.
+    micWithSystem,
+    setMicWithSystem,
+    setError,
     // Scroll area ref for keyboard navigation
     scrollAreaRef,
   };

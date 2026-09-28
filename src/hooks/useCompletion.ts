@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
+import { useKnowledge } from "./useKnowledge";
+import { KnowledgeFile } from "@/types/system-audio";
 import { MAX_FILES } from "@/config";
 import { useApp } from "@/contexts";
 import {
@@ -61,6 +62,26 @@ export const useCompletion = (capturing: boolean = false) => {
   } = useApp();
   const globalShortcuts = useGlobalShortcuts();
 
+  // Library knowledge: the user points Hyperly at a folder, picks one file
+  // inside the overlay, and that file's text rides on top of the system prompt
+  // for the next AI call. Same hook the Listen room uses.
+  const {
+    folderName: knowledgeFolderName,
+    folderFiles: knowledgeFolderFiles,
+    knowledgeFile,
+    isReading: isKnowledgeReading,
+    readError: knowledgeReadError,
+    pickFolder: pickKnowledgeFolder,
+    selectFile: selectKnowledgeFile,
+    clearKnowledge: clearKnowledgeFile,
+  } = useKnowledge();
+  // Mirror in a ref so submit/handleScreenshotSubmit read the latest picked
+  // file without being rebuilt on every selection.
+  const knowledgeFileRef = useRef<KnowledgeFile | null>(null);
+  useEffect(() => {
+    knowledgeFileRef.current = knowledgeFile;
+  }, [knowledgeFile]);
+
   const [state, setState] = useState<CompletionState>({
     input: "",
     response: "",
@@ -86,8 +107,6 @@ export const useCompletion = (capturing: boolean = false) => {
   // false→true transition, not on every render while a capture runs.
   const prevCapturingRef = useRef(false);
   const screenshotInitiatedByThisContext = useRef(false);
-
-  const { resizeWindow } = useWindowResize();
 
   useEffect(() => {
     screenshotConfigRef.current = screenshotConfiguration;
@@ -138,7 +157,7 @@ export const useCompletion = (capturing: boolean = false) => {
   }, []);
 
   const submit = useCallback(
-    async (speechText?: string) => {
+    async (speechText?: string, extraImagesBase64: string[] = []) => {
       const input = speechText || state.input;
 
       if (!input.trim()) {
@@ -171,8 +190,9 @@ export const useCompletion = (capturing: boolean = false) => {
           content: msg.content,
         }));
 
-        // Handle image attachments
-        const imagesBase64: string[] = [];
+        // Handle image attachments (plus any fresh captures passed by the
+        // caller, e.g. the Ask panel's "Use image" toggle)
+        const imagesBase64: string[] = [...extraImagesBase64];
         if (state.attachedFiles.length > 0) {
           state.attachedFiles.forEach((file) => {
             if (file.type.startsWith("image/")) {
@@ -211,12 +231,18 @@ export const useCompletion = (capturing: boolean = false) => {
           response: "",
         }));
 
+        // Library knowledge rides on top of the system prompt for this call only.
+        const knowledge = knowledgeFileRef.current;
+        const promptWithKnowledge = knowledge
+          ? `${systemPrompt ?? ""}\n\nKnowledge from "${knowledge.name}":\n${knowledge.text}`
+          : systemPrompt || undefined;
+
         try {
           // Use the fetchAIResponse function with signal
           for await (const chunk of fetchAIResponse({
             provider,
             selectedProvider: selectedAIProvider,
-            systemPrompt: systemPrompt || undefined,
+            systemPrompt: promptWithKnowledge,
             history: messageHistory,
             userMessage: input,
             imagesBase64,
@@ -341,7 +367,7 @@ export const useCompletion = (capturing: boolean = false) => {
     setState((prev) => ({
       ...prev,
       currentConversationId: conversation.id,
-      conversationHistory: conversation.messages,
+      conversationHistory: conversation.messages ?? [],
       input: "",
       response: "",
       error: null,
@@ -614,11 +640,17 @@ export const useCompletion = (capturing: boolean = false) => {
               response: "",
             }));
 
+            // Library knowledge rides on top of the system prompt for this call only.
+            const knowledge = knowledgeFileRef.current;
+            const promptWithKnowledge = knowledge
+              ? `${systemPrompt ?? ""}\n\nKnowledge from "${knowledge.name}":\n${knowledge.text}`
+              : systemPrompt || undefined;
+
             // Use the fetchAIResponse function with image and signal
             for await (const chunk of fetchAIResponse({
               provider,
               selectedProvider: selectedAIProvider,
-              systemPrompt: systemPrompt || undefined,
+              systemPrompt: promptWithKnowledge,
               history: messageHistory,
               userMessage: prompt,
               imagesBase64: [base64],
@@ -766,18 +798,6 @@ export const useCompletion = (capturing: boolean = false) => {
     state.error !== null ||
     keepEngaged;
 
-  useEffect(() => {
-    resizeWindow(
-      isPopoverOpen || micOpen || messageHistoryOpen || isFilesPopoverOpen
-    );
-  }, [
-    isPopoverOpen,
-    micOpen,
-    messageHistoryOpen,
-    resizeWindow,
-    isFilesPopoverOpen,
-  ]);
-
   // Ask↔Listen coordination: starting a system-audio capture pauses the Ask
   // mic, so the two never run parallel STT pipelines and the hidden mic
   // popover never holds the window open mid-capture. One-directional on
@@ -792,6 +812,41 @@ export const useCompletion = (capturing: boolean = false) => {
     prevCapturingRef.current = capturing;
   }, [capturing]);
 
+  // The global Voice Input shortcut toggles this mic from anywhere — whichever
+  // room is on screen, and whatever the overlay is doing.
+  //
+  // Rust routes the "audio_recording" binding to `handle_audio_shortcut`, which
+  // emits "start-audio-recording". That is a different event from
+  // "toggle-system-audio", which belongs to the separate "system_audio" binding
+  // and drives Listen's capture — so listening here cannot disturb Listen.
+  //
+  // The pair is deliberately not keyed the same way: Space is contextual (mic in
+  // Ask, system-audio capture in Listen), while this shortcut always means
+  // "toggle the microphone".
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    const subscribe = async () => {
+      const off = await listen("start-audio-recording", () => {
+        setEnableVAD((prev) => !prev);
+        setMicOpen((prev) => !prev);
+      });
+      if (cancelled) {
+        off();
+        return;
+      }
+      unlisten = off;
+    };
+
+    void subscribe();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   // Auto scroll to bottom when response updates
   useEffect(() => {
     const responseSettings = getResponseSettings();
@@ -801,15 +856,14 @@ export const useCompletion = (capturing: boolean = false) => {
       scrollAreaRef.current &&
       responseSettings.autoScroll
     ) {
-      const scrollElement = scrollAreaRef.current.querySelector(
-        "[data-radix-scroll-area-viewport]"
-      );
-      if (scrollElement) {
-        scrollElement.scrollTo({
-          top: scrollElement.scrollHeight,
-          behavior: "smooth",
-        });
-      }
+      // scrollAreaRef is the Ask room's single scroller (.hyperly-overlay-body)
+      // itself, not a wrapper around a nested Radix viewport, so scroll it
+      // directly.
+      const scrollElement = scrollAreaRef.current;
+      scrollElement.scrollTo({
+        top: scrollElement.scrollHeight,
+        behavior: "smooth",
+      });
     }
   }, [state.response, keepEngaged]);
 
@@ -818,11 +872,7 @@ export const useCompletion = (capturing: boolean = false) => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isPopoverOpen) return;
 
-      const activeScrollRef = scrollAreaRef.current || scrollAreaRef.current;
-      const scrollElement = activeScrollRef?.querySelector(
-        "[data-radix-scroll-area-viewport]"
-      ) as HTMLElement;
-
+      const scrollElement = scrollAreaRef.current;
       if (!scrollElement) return;
 
       const scrollAmount = 100; // pixels to scroll
@@ -861,30 +911,23 @@ export const useCompletion = (capturing: boolean = false) => {
     return () => window.removeEventListener("keydown", handleToggleShortcut);
   }, [isPopoverOpen]);
 
-  const captureScreenshot = useCallback(async () => {
-    if (!handleScreenshotSubmit) return;
-
+  // Full-screen capture, explicit. Respects the configured processing mode:
+  // "auto" submits straight to the AI with the configured prompt, "manual"
+  // attaches the shot to the pending message.
+  const captureFullScreen = useCallback(async () => {
     const config = screenshotConfigRef.current;
     screenshotInitiatedByThisContext.current = true;
     setIsScreenshotLoading(true);
 
     try {
-      if (config.enabled) {
-        const base64 = await invoke("capture_to_base64");
+      const base64 = await invoke("capture_to_base64");
 
-        if (config.mode === "auto") {
-          // Auto mode: Submit directly to AI with the configured prompt
-          await handleScreenshotSubmit(base64 as string, config.autoPrompt);
-        } else if (config.mode === "manual") {
-          // Manual mode: Add to attached files without prompt
-          await handleScreenshotSubmit(base64 as string);
-        }
-        screenshotInitiatedByThisContext.current = false;
+      if (config.mode === "auto") {
+        await handleScreenshotSubmit(base64 as string, config.autoPrompt);
       } else {
-        // Selection Mode: Open overlay to select an area
-        isProcessingScreenshotRef.current = false;
-        await invoke("start_screen_capture");
+        await handleScreenshotSubmit(base64 as string);
       }
+      screenshotInitiatedByThisContext.current = false;
     } catch (error) {
       setState((prev) => ({
         ...prev,
@@ -893,11 +936,41 @@ export const useCompletion = (capturing: boolean = false) => {
       isProcessingScreenshotRef.current = false;
       screenshotInitiatedByThisContext.current = false;
     } finally {
-      if (config.enabled) {
-        setIsScreenshotLoading(false);
-      }
+      setIsScreenshotLoading(false);
     }
   }, [handleScreenshotSubmit]);
+
+  // Region capture, explicit. Opens the selection overlay; the
+  // "captured-selection" listener below picks the result up (gated on
+  // screenshotInitiatedByThisContext) and routes it per the configured mode.
+  const captureRegion = useCallback(async () => {
+    isProcessingScreenshotRef.current = false;
+    screenshotInitiatedByThisContext.current = true;
+    setIsScreenshotLoading(true);
+
+    try {
+      await invoke("start_screen_capture");
+    } catch (error) {
+      setState((prev) => ({
+        ...prev,
+        error: "Failed to capture screenshot. Please try again.",
+      }));
+      isProcessingScreenshotRef.current = false;
+      screenshotInitiatedByThisContext.current = false;
+      setIsScreenshotLoading(false);
+    }
+  }, []);
+
+  // Global-shortcut entry point: full screen when enabled in settings,
+  // region selection otherwise.
+  const captureScreenshot = useCallback(async () => {
+    const config = screenshotConfigRef.current;
+    if (config.enabled) {
+      await captureFullScreen();
+    } else {
+      await captureRegion();
+    }
+  }, [captureFullScreen, captureRegion]);
 
   useEffect(() => {
     let unlisten: any;
@@ -1026,14 +1099,23 @@ export const useCompletion = (capturing: boolean = false) => {
     handlePaste,
     isPopoverOpen,
     scrollAreaRef,
-    resizeWindow,
     isFilesPopoverOpen,
     setIsFilesPopoverOpen,
     onRemoveAllFiles,
     inputRef,
     captureScreenshot,
+    captureFullScreen,
+    captureRegion,
     isScreenshotLoading,
     keepEngaged,
     setKeepEngaged,
+    knowledgeFolderName,
+    knowledgeFolderFiles,
+    knowledgeFile,
+    isKnowledgeReading,
+    knowledgeReadError,
+    pickKnowledgeFolder,
+    selectKnowledgeFile,
+    clearKnowledgeFile,
   };
 };

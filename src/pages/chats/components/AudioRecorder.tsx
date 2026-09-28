@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components";
 import { AudioVisualizer } from "@/pages/app/components/speech/audio-visualizer";
 import { fetchSTT } from "@/lib";
+import { getMicrophoneStream } from "@/lib/microphone";
 import { useApp } from "@/contexts";
 import { StopCircle, Send } from "lucide-react";
 
@@ -82,16 +83,13 @@ export const AudioRecorder = ({
 
   const startRecording = async () => {
     try {
-      const deviceId = selectedAudioDevices?.input?.id;
-
-      const audioConstraints: MediaTrackConstraints =
-        deviceId && deviceId !== "default"
-          ? { deviceId: { exact: deviceId } }
-          : {};
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints,
-      });
+      // Same native-id/WebView-id mismatch the overlay mic hit: the stored
+      // device id comes from the Rust backend, so it has to go through the
+      // resolver rather than straight into `deviceId: { exact }`.
+      const stream = await getMicrophoneStream(
+        selectedAudioDevices?.input?.id,
+        selectedAudioDevices?.input?.name
+      );
 
       // Store in both ref and state
       streamRef.current = stream;

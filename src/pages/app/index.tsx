@@ -2,8 +2,6 @@ import { Card, Updater, CustomCursor } from "@/components";
 import {
   SystemAudio,
   Completion,
-  AudioVisualizer,
-  StatusIndicator,
   OverlayChrome,
   OverlayMode,
 } from "./components";
@@ -14,12 +12,16 @@ import { ErrorBoundary } from "react-error-boundary";
 import { ErrorLayout } from "@/layouts";
 import { getPlatform } from "@/lib";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
 const App = () => {
-  const { isHidden, systemAudio } = useApp();
+  // Declared before `useApp` so the active panel can be passed into it: Listen
+  // binds Space for capture, Ask binds it for push-to-talk, and the two must
+  // not cross-trigger.
+  const [mode, setMode] = useState<OverlayMode>("ask");
+  const { isHidden, systemAudio } = useApp({ listenActive: mode === "listen" });
   const { customizable } = useAppContext();
   const platform = getPlatform();
-  const [mode, setMode] = useState<OverlayMode>("ask");
 
   // Mode is user-controlled via the header tabs. The only automatic switch is
   // INTO listen mode the moment a capture starts (e.g. via the global
@@ -73,10 +75,18 @@ const App = () => {
 
   return (
     <ErrorBoundary
-      fallbackRender={() => {
-        return <ErrorLayout isCompact />;
+      fallbackRender={({ error }) => {
+        return <ErrorLayout isCompact error={error} />;
       }}
-      resetKeys={["app-error"]}
+      resetKeys={["app-error", mode]}
+      onError={(error, info) => {
+        const message = `${error?.message || error}\n${error?.stack || ""}\n${info?.componentStack || ""}`;
+        console.error("[hyperly] overlay render failed", error, info);
+        void invoke("log_frontend", {
+          level: "error",
+          message: `overlay render failed: ${message}`,
+        }).catch(() => {});
+      }}
       onReset={() => {
         // no-op
       }}
@@ -105,47 +115,62 @@ const App = () => {
                 : "ready"
             }
           >
-            <div className="flex flex-row items-start gap-2 p-2 min-h-0 flex-1 overflow-hidden">
+            <div className="flex flex-col min-h-0 flex-1 overflow-hidden">
               {/* Both panels stay MOUNTED in every mode — tab switches only hide
-                  them with CSS. Unmounting the listen panel on a tab switch used
-                  to destroy its popover, which the window-resize observer read as
-                  "nothing open" and snapped the overlay back to the top bar while
-                  the capture kept running invisibly. */}
-              <div className={mode === "listen" ? "" : "hidden"}>
-                <SystemAudio {...systemAudio} panelVisible={mode === "listen"} />
-              </div>
-              {systemAudio?.capturing ? (
-                <div className="flex flex-row items-center gap-2 justify-between w-full">
-                  <div className="flex flex-1 items-center gap-2">
-                    <AudioVisualizer isRecording={systemAudio?.capturing} />
-                  </div>
-                  <div className="flex !w-fit items-center gap-2">
-                    <StatusIndicator
-                      setupRequired={systemAudio.setupRequired}
-                      error={systemAudio.error}
-                      isProcessing={systemAudio.isProcessing}
-                      isAIProcessing={systemAudio.isAIProcessing}
-                      capturing={systemAudio.capturing}
-                    />
-                  </div>
-                </div>
-              ) : null}
-
+                  them with CSS, so switching tabs mid-capture neither unmounts
+                  the listen panel nor interrupts the capture. Capture status
+                  lives in the header status dot, so no separate visualizer row
+                  is needed in the body. */}
               <div
-                className={`w-full flex flex-row gap-2 items-center transition-opacity duration-200 ${
-                  mode !== "ask" ? "hidden" : ""
-                }`}
+                className={
+                  mode === "listen"
+                    ? "flex flex-col min-h-0 flex-1 overflow-hidden"
+                    : "hidden"
+                }
               >
-                <Completion
-                  isHidden={isHidden || mode !== "ask"}
-                  capturing={!!systemAudio?.capturing}
-                />
+                <ErrorBoundary
+                  fallbackRender={({ error }) => (
+                    <ErrorLayout isCompact error={error} />
+                  )}
+                  onError={(error, info) => {
+                    void invoke("log_frontend", {
+                      level: "error",
+                      message: `listen panel failed: ${error?.message || error}\n${info?.componentStack || ""}`,
+                    }).catch(() => {});
+                  }}
+                >
+                  <SystemAudio {...systemAudio} />
+                </ErrorBoundary>
+              </div>
+              <div
+                className={
+                  mode === "ask"
+                    ? "flex flex-col min-h-0 flex-1 overflow-hidden"
+                    : "hidden"
+                }
+              >
+                <ErrorBoundary
+                  fallbackRender={({ error }) => (
+                    <ErrorLayout isCompact error={error} />
+                  )}
+                  onError={(error, info) => {
+                    void invoke("log_frontend", {
+                      level: "error",
+                      message: `ask panel failed: ${error?.message || error}\n${info?.componentStack || ""}`,
+                    }).catch(() => {});
+                  }}
+                >
+                  <Completion
+                    isHidden={isHidden || mode !== "ask"}
+                    capturing={!!systemAudio?.capturing}
+                  />
+                </ErrorBoundary>
               </div>
             </div>
           </OverlayChrome>
           <Updater />
         </Card>
-        {customizable.cursor.type === "invisible" && platform !== "linux" ? (
+        {customizable?.cursor?.type === "invisible" && platform !== "linux" ? (
           <CustomCursor />
         ) : null}
       </div>

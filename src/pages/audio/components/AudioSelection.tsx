@@ -12,6 +12,10 @@ import { useApp } from "@/contexts";
 import { STORAGE_KEYS } from "@/config/constants";
 import { safeLocalStorage } from "@/lib/storage";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  enumerateMicrophoneInputs,
+  primeMicrophoneLabels,
+} from "@/lib/microphone";
 
 export const AudioSelection = () => {
   const { selectedAudioDevices, setSelectedAudioDevices } = useApp();
@@ -44,22 +48,28 @@ export const AudioSelection = () => {
   const loadAudioDevices = async () => {
     setIsLoadingDevices(true);
     try {
-      const [inputDevices, outputDevices] = await Promise.all([
-        invoke<{ id: string; name: string; is_default: boolean }[]>(
-          "get_input_devices"
-        ),
-        invoke<{ id: string; name: string; is_default: boolean }[]>(
-          "get_output_devices"
-        ),
-      ]);
+      // Inputs and outputs are enumerated through different id spaces, because
+      // they are consumed by different runtimes:
+      //
+      //   * Inputs are opened by the WebView through `getUserMedia`, which only
+      //     understands `MediaDeviceInfo.deviceId`. Asking Rust for them returns
+      //     native WASAPI endpoint ids (`{0.0.0.00000000}.{guid}`) that the
+      //     WebView cannot match, so the microphone silently never recorded.
+      //   * Outputs are opened by the Rust loopback code, which needs exactly
+      //     those native ids, so that list is left untouched.
+      //
+      // Labels are hidden until microphone access has been granted once, so a
+      // throwaway stream is opened first to unlock them.
+      await primeMicrophoneLabels();
+      const webInputs = await enumerateMicrophoneInputs();
+
+      // Only the output list needs the backend.
+      const outputDevices = await invoke<
+        { id: string; name: string; is_default: boolean }[]
+      >("get_output_devices");
 
       setDevices({
-        input:
-          inputDevices.map((input) => ({
-            id: input?.id,
-            name: input?.name,
-            is_default: input?.is_default,
-          })) || [],
+        input: webInputs,
         output:
           outputDevices.map((output) => ({
             id: output?.id,
@@ -69,7 +79,7 @@ export const AudioSelection = () => {
       });
 
       // Only update if no device is currently selected or if the selected device doesn't exist
-      const currentInputExists = inputDevices.some(
+      const currentInputExists = webInputs.some(
         (d) => d.id === selectedAudioDevices.input.id
       );
       const currentOutputExists = outputDevices.some(
@@ -77,15 +87,16 @@ export const AudioSelection = () => {
       );
 
       if (!currentInputExists || !currentOutputExists) {
-        const defaultInput = inputDevices?.find((d) => d?.is_default);
+        const defaultInput =
+          webInputs.find((d) => d.is_default) ?? webInputs[0];
         const defaultOutput = outputDevices?.find((d) => d?.is_default);
 
         const newDevices = {
           input: currentInputExists
             ? selectedAudioDevices.input
             : {
-                id: defaultInput?.id || inputDevices[0]?.id || "",
-                name: defaultInput?.name || inputDevices[0]?.name || "",
+                id: defaultInput?.id || "",
+                name: defaultInput?.name || "",
               },
           output: currentOutputExists
             ? selectedAudioDevices.output

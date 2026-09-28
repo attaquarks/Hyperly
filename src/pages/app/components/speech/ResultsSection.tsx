@@ -1,167 +1,117 @@
+import { useState } from "react";
 import { ChatConversation } from "@/types";
-import { Markdown, Switch, CopyButton } from "@/components";
-import { BotIcon, HeadphonesIcon, Loader2, SparklesIcon } from "lucide-react";
+import { Markdown, CopyButton } from "@/components";
+import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type Props = {
-  lastTranscription: string;
   lastAIResponse: string;
   isAIProcessing: boolean;
   conversation: ChatConversation;
-  conversationMode: boolean;
-  setConversationMode: (mode: boolean) => void;
 };
 
+// The suggested-answer window. "Latest" shows only the newest answer; "All"
+// shows the full prompt/answer thread. Scrolling is manual only — the view
+// never yanks the user back down while a new answer streams in.
 export const ResultsSection = ({
-  lastTranscription,
   lastAIResponse,
   isAIProcessing,
   conversation,
-  conversationMode,
-  setConversationMode,
 }: Props) => {
-  const hasResponse = lastAIResponse || isAIProcessing;
-  const hasHistory = conversation.messages.length > 2;
+  const [showAll, setShowAll] = useState(false);
 
-  if (!hasResponse && !lastTranscription) {
-    return null;
-  }
+  // Messages arrive newest-first; the All view reads oldest-first.
+  const messages = [...(conversation?.messages ?? [])].sort(
+    (a, b) => a.timestamp - b.timestamp
+  );
+  const hasResponse = !!lastAIResponse || isAIProcessing;
 
-  const isMac = navigator.platform.toLowerCase().includes("mac");
-  const modKey = isMac ? "⌘" : "Ctrl";
+  const copyContent = showAll
+    ? messages
+        .map(
+          (m) => `${m.role === "user" ? "Prompt" : "Answer"}:\n${m.content}`
+        )
+        .join("\n\n")
+    : lastAIResponse;
+
+  const emptyHint = (
+    <p className="hyperly-empty-hint">
+      Answers appear here as the conversation unfolds.
+    </p>
+  );
 
   return (
-    <div className="rounded-lg border border-border/50 bg-muted/20 p-3 space-y-3">
-      {/* Header with toggle */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <SparklesIcon className="w-3.5 h-3.5 text-primary" />
-          <h4 className="text-xs font-medium">
-            {conversationMode ? "Conversation" : "AI Response"}
-          </h4>
-        </div>
-        <div className="flex items-center gap-2 select-none">
-          <span className="text-[9px] text-muted-foreground/50 bg-muted/50 px-1 rounded">
-            {modKey}+K
-          </span>
-          <Switch
-            checked={conversationMode}
-            onCheckedChange={setConversationMode}
-            className="scale-75"
-          />
-          {lastAIResponse && <CopyButton content={lastAIResponse} />}
+    <section
+      className="hyperly-section hyperly-answer-section"
+      aria-label="Suggested answer"
+    >
+      <div className="hyperly-section-heading">
+        <span>Suggested answer</span>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            className={cn("hyperly-icon-btn", !showAll && "text-emerald-300")}
+            onClick={() => setShowAll(false)}
+          >
+            Latest
+          </button>
+          <button
+            type="button"
+            className={cn("hyperly-icon-btn", showAll && "text-emerald-300")}
+            onClick={() => setShowAll(true)}
+          >
+            All
+          </button>
+          {(hasResponse || (showAll && messages.length > 0)) && (
+            <CopyButton content={copyContent} />
+          )}
         </div>
       </div>
-
-      {/* RESPONSE MODE: System as text, then AI response */}
-      {!conversationMode && (
-        <div className="space-y-2">
-          {/* System Input - Just text with bold label */}
-          {lastTranscription && (
-            <p className="text-[11px] text-muted-foreground">
-              <span className="font-semibold">System:</span> {lastTranscription}
-            </p>
-          )}
-
-          {/* AI Response */}
-          {hasResponse && (
-            <div>
-              {isAIProcessing && !lastAIResponse ? (
-                <div className="flex items-center gap-2 py-2">
-                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                  <span className="text-xs text-muted-foreground">
-                    Generating response...
+      <div className="hyperly-section-scroll">
+        {showAll ? (
+          messages.length === 0 && !hasResponse ? (
+            emptyHint
+          ) : (
+            <div className="flex flex-col gap-2 pb-1">
+              {messages.map((message, index) => (
+                <div key={message.id || index}>
+                  <span className="hyperly-answer-title">
+                    {message.role === "user" ? "Prompt" : "Answer"}
                   </span>
+                  <div className="hyperly-answer-body prose prose-sm max-w-none dark:prose-invert">
+                    <Markdown>{message.content}</Markdown>
+                  </div>
                 </div>
-              ) : (
-                <div className="prose prose-sm max-w-none dark:prose-invert">
-                  <Markdown>{lastAIResponse}</Markdown>
-                  {isAIProcessing && (
-                    <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 align-middle" />
-                  )}
+              ))}
+              {isAIProcessing && lastAIResponse && (
+                <div>
+                  <span className="hyperly-answer-title">Answer</span>
+                  <div className="hyperly-answer-body prose prose-sm max-w-none dark:prose-invert">
+                    <Markdown>{lastAIResponse}</Markdown>
+                    <span className="inline-block w-1.5 h-3.5 bg-emerald-300 animate-pulse ml-1 align-middle" />
+                  </div>
                 </div>
               )}
             </div>
-          )}
-        </div>
-      )}
-
-      {/* CONVERSATION MODE: AI on top, then System, then history */}
-      {conversationMode && (
-        <div className="space-y-2">
-          {/* AI Response - First (on top) */}
-          {hasResponse && (
-            <div className="rounded-md bg-background/50 p-2.5">
-              <div className="flex items-center gap-1.5 mb-1">
-                <BotIcon className="h-3 w-3 text-muted-foreground" />
-                <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wide">
-                  AI
-                </span>
-              </div>
-              {isAIProcessing && !lastAIResponse ? (
-                <div className="flex items-center gap-2">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                  <span className="text-[10px] text-muted-foreground">
-                    Generating...
-                  </span>
-                </div>
-              ) : (
-                <div className="prose prose-sm max-w-none dark:prose-invert text-sm">
-                  <Markdown>{lastAIResponse}</Markdown>
-                  {isAIProcessing && (
-                    <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 align-middle" />
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* System Input - Second */}
-          {lastTranscription && (
-            <div className="rounded-md border-l-2 border-primary/50 bg-primary/5 p-2.5">
-              <div className="flex items-center gap-1.5 mb-1">
-                <HeadphonesIcon className="h-3 w-3 text-primary" />
-                <span className="text-[9px] font-medium text-primary uppercase tracking-wide">
-                  System
-                </span>
-              </div>
-              <p className="text-sm">{lastTranscription}</p>
-            </div>
-          )}
-
-          {/* Previous Messages */}
-          {hasHistory && (
-            <div className="space-y-2 pt-2 border-t border-border/50">
-              <p className="text-[9px] text-muted-foreground uppercase tracking-wide">
-                Previous
-              </p>
-              <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                {conversation.messages
-                  .slice(2)
-                  .sort((a, b) => b.timestamp - a.timestamp)
-                  .map((message, index) => (
-                    <div
-                      key={message.id || index}
-                      className={cn(
-                        "p-2 rounded-md text-[11px]",
-                        message.role === "user"
-                          ? "bg-primary/5 border-l-2 border-primary/30"
-                          : "bg-background/50"
-                      )}
-                    >
-                      <span className="text-[8px] font-medium text-muted-foreground uppercase">
-                        {message.role === "user" ? "System" : "AI"}
-                      </span>
-                      <div className="text-muted-foreground leading-relaxed mt-0.5">
-                        <Markdown>{message.content}</Markdown>
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+          )
+        ) : !hasResponse ? (
+          emptyHint
+        ) : isAIProcessing && !lastAIResponse ? (
+          <div className="flex items-center gap-2 py-1">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span className="text-[11px] text-muted-foreground">
+              Generating answer…
+            </span>
+          </div>
+        ) : (
+          <div className="hyperly-answer-body prose prose-sm max-w-none dark:prose-invert pb-1">
+            <Markdown>{lastAIResponse}</Markdown>
+            {isAIProcessing && (
+              <span className="inline-block w-1.5 h-3.5 bg-emerald-300 animate-pulse ml-1 align-middle" />
+            )}
+          </div>
+        )}
+      </div>
+    </section>
   );
 };

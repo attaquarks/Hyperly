@@ -2255,6 +2255,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wasapi",
+ "webview2-com",
  "winreg",
  "xcap",
 ]

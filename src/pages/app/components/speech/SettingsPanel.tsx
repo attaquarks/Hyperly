@@ -27,22 +27,25 @@ import {
 } from "@/lib/platform-instructions";
 import { cn } from "@/lib/utils";
 
-// Sensitivity presets for simpler UX
+// Sensitivity presets for simpler UX. These drive `voice_sensitivity` — the
+// same value the Voice Sensitivity slider in Advanced edits — so choosing a
+// preset moves that slider and the two never disagree. The noise gate rides
+// along because each level was tuned against a different amount of background.
 const SENSITIVITY_PRESETS = {
   low: {
-    sensitivity_rms: 0.015,
+    voice_sensitivity: 0.25,
     noise_gate_threshold: 0.005,
     label: "Low",
     description: "Only picks up clear, loud speech",
   },
   normal: {
-    sensitivity_rms: 0.012,
+    voice_sensitivity: 0.5,
     noise_gate_threshold: 0.003,
     label: "Normal",
     description: "Balanced for typical conversations",
   },
   high: {
-    sensitivity_rms: 0.008,
+    voice_sensitivity: 0.75,
     noise_gate_threshold: 0.002,
     label: "High",
     description: "Picks up quieter speech",
@@ -78,7 +81,8 @@ export const SettingsPanel = ({
   const getCurrentPreset = (): SensitivityPreset | "custom" => {
     for (const [key, preset] of Object.entries(SENSITIVITY_PRESETS)) {
       if (
-        Math.abs(vadConfig.sensitivity_rms - preset.sensitivity_rms) < 0.001 &&
+        Math.abs(vadConfig.voice_sensitivity - preset.voice_sensitivity) <
+          0.001 &&
         Math.abs(vadConfig.noise_gate_threshold - preset.noise_gate_threshold) <
           0.001
       ) {
@@ -94,7 +98,7 @@ export const SettingsPanel = ({
     const presetValues = SENSITIVITY_PRESETS[preset];
     onUpdateVadConfig({
       ...vadConfig,
-      sensitivity_rms: presetValues.sensitivity_rms,
+      voice_sensitivity: presetValues.voice_sensitivity,
       noise_gate_threshold: presetValues.noise_gate_threshold,
     });
   };
@@ -112,7 +116,7 @@ export const SettingsPanel = ({
       enabled: vadConfig.enabled, // Keep current mode
       hop_size: 1024,
       sensitivity_rms: 0.012,
-      peak_threshold: 0.035,
+      voice_sensitivity: 0.5,
       silence_chunks: 45,
       min_speech_chunks: 7,
       pre_speech_chunks: 12,
@@ -155,7 +159,7 @@ export const SettingsPanel = ({
             {vadConfig.enabled && (
               <div className="space-y-2">
                 <Label className="text-xs font-medium">
-                  Speech Sensitivity
+                  Voice Sensitivity
                 </Label>
                 <div className="flex gap-2">
                   {(
@@ -181,7 +185,7 @@ export const SettingsPanel = ({
                 </div>
                 <p className="text-[10px] text-muted-foreground">
                   {currentPreset === "custom"
-                    ? "Custom sensitivity values"
+                    ? "Custom voice sensitivity"
                     : SENSITIVITY_PRESETS[currentPreset as SensitivityPreset]
                         .description}
                 </p>
@@ -297,7 +301,34 @@ export const SettingsPanel = ({
                   <>
                     <div className="space-y-2">
                       <Label className="text-xs font-medium flex items-center justify-between">
-                        <span>Speech Sensitivity (Raw)</span>
+                        <span>Voice Sensitivity</span>
+                        <span className="text-muted-foreground font-normal">
+                          {Math.round(vadConfig.voice_sensitivity * 100)}%
+                        </span>
+                      </Label>
+                      <Slider
+                        value={[vadConfig.voice_sensitivity * 100]}
+                        onValueChange={([value]) =>
+                          onUpdateVadConfig({
+                            ...vadConfig,
+                            voice_sensitivity: value / 100,
+                          })
+                        }
+                        min={0}
+                        max={100}
+                        step={5}
+                        className="w-full"
+                      />
+                      <p className="text-[10px] text-muted-foreground">
+                        How quiet speech can get before it stops counting. Lower
+                        needs louder, clearer speech; higher picks up softer
+                        voices and more background.
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label className="text-xs font-medium flex items-center justify-between">
+                        <span>Noise Floor (Raw)</span>
                         <span className="text-muted-foreground font-normal">
                           {(vadConfig.sensitivity_rms * 1000).toFixed(1)}
                         </span>
@@ -315,6 +346,10 @@ export const SettingsPanel = ({
                         step={0.5}
                         className="w-full"
                       />
+                      <p className="text-[10px] text-muted-foreground">
+                        Level a quiet room has to exceed. Voice Sensitivity
+                        scales this.
+                      </p>
                     </div>
 
                     <div className="space-y-2">

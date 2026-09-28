@@ -1,7 +1,5 @@
 import {
   LayoutDashboardIcon,
-  Maximize2Icon,
-  Minimize2Icon,
   MinusIcon,
   MoonIcon,
   SunIcon,
@@ -9,13 +7,8 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useState } from "react";
 import { Button, DragButton } from "@/components";
 import { useTheme } from "@/contexts/theme.context";
-import {
-  setOverlayPinnedOpen,
-  useWindowResize,
-} from "@/hooks/useWindow";
 import { cn } from "@/lib/utils";
 
 export type OverlayMode = "ask" | "listen";
@@ -42,24 +35,12 @@ export const OverlayChrome = ({
   children,
 }: OverlayChromeProps) => {
   const { theme, setTheme } = useTheme();
-  const { resizeWindow } = useWindowResize();
-  const [expanded, setExpanded] = useState(false);
   const isDark = theme === "dark";
 
   const openDashboard = () => {
     void invoke("open_dashboard").catch((error) =>
       console.error("Failed to open dashboard:", error)
     );
-  };
-
-  // Restore/collapse toggle. This is deliberately NOT an OS maximize: the
-  // overlay is transparent and undecorated, so a real maximize would cover the
-  // whole screen and swallow clicks. We only grow the height.
-  const toggleExpanded = async () => {
-    const next = !expanded;
-    setExpanded(next);
-    setOverlayPinnedOpen(next);
-    await resizeWindow(next);
   };
 
   const minimizeWindow = async () => {
@@ -72,7 +53,9 @@ export const OverlayChrome = ({
 
   const closeWindow = async () => {
     try {
-      await getCurrentWindow().hide();
+      // Route through the shortcut handler so the Rust-side hidden flag stays
+      // in sync — hiding the window directly turns the next Ctrl+\ into a no-op.
+      await invoke("toggle_main_window");
     } catch (error) {
       console.error("Failed to hide window:", error);
     }
@@ -146,20 +129,6 @@ export const OverlayChrome = ({
             size="icon"
             variant="ghost"
             className="hyperly-header-icon"
-            onClick={toggleExpanded}
-            title={expanded ? "Collapse overlay" : "Expand overlay"}
-          >
-            {expanded ? (
-              <Minimize2Icon className="size-3.5" />
-            ) : (
-              <Maximize2Icon className="size-3.5" />
-            )}
-          </Button>
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            className="hyperly-header-icon"
             onClick={closeWindow}
             title="Hide window (Ctrl+\)"
           >
@@ -168,7 +137,7 @@ export const OverlayChrome = ({
           <DragButton />
         </div>
       </header>
-      <div className="hyperly-overlay-content overflow-y-auto max-h-[calc(100vh-3.5rem)]">{children}</div>
+      <div className="hyperly-overlay-content">{children}</div>
     </div>
   );
 };
