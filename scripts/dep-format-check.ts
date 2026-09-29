@@ -14,7 +14,9 @@
 // which is exactly what happened to `@ricky0123/vad-web` (dist/index.js begins
 // with `Object.defineProperty(exports, "__esModule", ...)`). It took down the
 // lazy `ListenUserMic` chunk in the Listen room and the Ask panel's
-// `AutoSpeechVad`, both of which import it through `@ricky0123/vad-react`.
+// `AutoSpeechVad`, both of which import it. (It is a direct dependency now —
+// Phase 4 R10 removed the unused `@ricky0123/vad-react` wrapper it used to
+// arrive through.)
 //
 // So: an excluded dependency must be ESM. Anything else is the bug above.
 //
