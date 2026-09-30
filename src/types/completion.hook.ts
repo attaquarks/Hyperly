@@ -6,6 +6,8 @@ import {
   ChangeEvent,
   ClipboardEvent,
 } from "react";
+import type { KnowledgeFile } from "./system-audio";
+import type { LibraryEntry } from "@/hooks/useKnowledge";
 // import {
 //   AttachedFile,
 //   ChatMessage,
@@ -48,8 +50,8 @@ export interface UseCompletionReturn {
   clearFiles: () => void;
 
   // Completion actions
-  /** Function to submit the completion request, optionally with speech text */
-  submit: (speechText?: string) => Promise<void>;
+  /** Function to submit the completion request, optionally with speech text and/or freshly captured images */
+  submit: (speechText?: string, extraImagesBase64?: string[]) => Promise<void>;
   /** Function to cancel the current completion request */
   cancel: () => void;
   /** Function to reset the completion state (clears input, response, error, files) */
@@ -92,6 +94,23 @@ export interface UseCompletionReturn {
   keepEngaged: boolean;
   /** Function to toggle keep engaged mode */
   setKeepEngaged: Dispatch<SetStateAction<boolean>>;
+  // Library knowledge (file knowledge, not chat history)
+  /** Name of the folder picked as the Library, empty when none */
+  knowledgeFolderName: string;
+  /** Files found in the picked folder */
+  knowledgeFolderFiles: LibraryEntry[];
+  /** The one file whose text rides on the next prompt, null when none */
+  knowledgeFile: KnowledgeFile | null;
+  /** Whether a knowledge file is currently being read */
+  isKnowledgeReading: boolean;
+  /** Error from the last knowledge-file read, empty when none */
+  knowledgeReadError: string;
+  /** Point the Library at a folder the user picked */
+  pickKnowledgeFolder: (files: FileList | null) => void;
+  /** Select one file from the picked folder as prompt knowledge */
+  selectKnowledgeFile: (name: string) => Promise<void>;
+  /** Drop the current knowledge file */
+  clearKnowledgeFile: () => void;
 
   // Screenshot functionality
   /** Current screenshot configuration settings */
@@ -114,8 +133,6 @@ export interface UseCompletionReturn {
   isPopoverOpen: boolean;
   /** Ref for the scroll area container (for auto-scrolling) */
   scrollAreaRef: RefObject<HTMLDivElement | null>;
-  /** Function to resize the application window based on UI state */
-  resizeWindow: (expanded: boolean) => Promise<void>;
 
   // Files popover management
   /** Whether the files attachment popover is open */
@@ -127,8 +144,12 @@ export interface UseCompletionReturn {
 
   /** Ref for the input element */
   inputRef: RefObject<HTMLInputElement | null>;
-  /** Function to capture a screenshot */
+  /** Function to capture a screenshot (follows the configured capture mode) */
   captureScreenshot: () => Promise<void>;
+  /** Function to capture the full screen explicitly */
+  captureFullScreen: () => Promise<void>;
+  /** Function to capture a dragged screen region explicitly */
+  captureRegion: () => Promise<void>;
   /** Whether a screenshot is currently loading */
   isScreenshotLoading: boolean;
 }

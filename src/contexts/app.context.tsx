@@ -208,7 +208,17 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       STORAGE_KEYS.SELECTED_AI_PROVIDER
     );
     if (savedSelectedAi) {
-      setSelectedAIProvider(JSON.parse(savedSelectedAi));
+      try {
+        const parsed = JSON.parse(savedSelectedAi);
+        if (parsed && typeof parsed === "object") {
+          setSelectedAIProvider({
+            provider: parsed.provider ?? "",
+            variables: parsed.variables ?? {},
+          });
+        }
+      } catch {
+        console.warn("Failed to parse selected AI provider");
+      }
     }
 
     // Load selected STT provider
@@ -216,7 +226,17 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       STORAGE_KEYS.SELECTED_STT_PROVIDER
     );
     if (savedSelectedStt) {
-      setSelectedSttProvider(JSON.parse(savedSelectedStt));
+      try {
+        const parsed = JSON.parse(savedSelectedStt);
+        if (parsed && typeof parsed === "object") {
+          setSelectedSttProvider({
+            provider: parsed.provider ?? "",
+            variables: parsed.variables ?? {},
+          });
+        }
+      } catch {
+        console.warn("Failed to parse selected STT provider");
+      }
     }
 
     // Load customizable state

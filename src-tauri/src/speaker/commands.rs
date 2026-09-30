@@ -20,12 +20,24 @@ pub struct VadConfig {
     pub enabled: bool,
     pub hop_size: usize,
     pub sensitivity_rms: f32,
-    pub peak_threshold: f32,
+    /// Voice sensitivity, 0.0-1.0. Scales both terms of the adaptive threshold
+    /// — see the comment on it in `run_vad_capture`. 0.5 is the tuned default.
+    /// `#[serde(default)]` so a payload saved before this field existed (under
+    /// its old name `peak_threshold`, which was never a real control) still
+    /// deserializes instead of failing the command.
+    #[serde(default = "default_voice_sensitivity")]
+    pub voice_sensitivity: f32,
     pub silence_chunks: usize,
     pub min_speech_chunks: usize,
     pub pre_speech_chunks: usize,
     pub noise_gate_threshold: f32,
     pub max_recording_duration_secs: u64,
+}
+
+/// Midpoint of the Voice Sensitivity range: the value at which the adaptive
+/// threshold reproduces the constants this VAD was tuned with.
+fn default_voice_sensitivity() -> f32 {
+    0.5
 }
 
 impl Default for VadConfig {
@@ -34,7 +46,7 @@ impl Default for VadConfig {
             enabled: true,
             hop_size: 1024,
             sensitivity_rms: 0.012, // Much less sensitive - only real speech
-            peak_threshold: 0.035,  // Higher threshold - filters clicks/noise
+            voice_sensitivity: default_voice_sensitivity(),
             silence_chunks: 45,     // ~1.0s of silence before stopping
             min_speech_chunks: 7,   // ~0.16s - captures short answers
             pre_speech_chunks: 12,  // ~0.27s - enough to catch word start
@@ -132,6 +144,19 @@ pub async fn start_system_audio_capture(
 }
 
 // VAD-enabled capture - OPTIMIZED for real-time speech detection
+// Adaptive VAD tuning. See the threshold comment inside `run_vad_capture`.
+/// How far energy must fall from the recent speech level toward the noise
+/// floor before the utterance is treated as paused — at the default Voice
+/// Sensitivity (0.5). The slider scales this: see `run_vad_capture`. The
+/// lowest value that still found a pause under a music bed in simulation, so
+/// the least likely to chop continuous speech into fragments.
+const DROP_RATIO: f32 = 0.35;
+/// Noise floor chase rates (per chunk). Fast downward, very slow upward.
+const FLOOR_FALL: f32 = 0.05;
+const FLOOR_RISE: f32 = 0.0005;
+/// Decay of the recent-speech reference, so old loud passages are forgotten.
+const REF_DECAY: f32 = 0.997;
+
 async fn run_vad_capture(
     app: AppHandle,
     stream: impl StreamExt<Item = f32> + Unpin,
@@ -148,6 +173,13 @@ async fn run_vad_capture(
     let mut in_speech = false;
     let mut silence_chunks = 0;
     let mut speech_chunks = 0;
+    // Adaptive VAD state: a slow estimate of this room's noise floor, and a
+    // decaying reference of the recent speech level. Together they give a
+    // speech/silence threshold that tracks the actual signal instead of
+    // comparing against fixed constants.
+    let mut noise_floor = 0.0f32;
+    let mut speech_ref = 0.0f32;
+    let mut energy_init = false;
     let max_samples = sr as usize * 30; // 30s safety cap per utterance
 
     while let Some(sample) = stream.next().await {
@@ -166,7 +198,69 @@ async fn run_vad_capture(
             let mono = apply_noise_gate(&mono, config.noise_gate_threshold);
 
             let (rms, peak) = calculate_audio_metrics(&mono);
-            let is_speech = rms > config.sensitivity_rms || peak > config.peak_threshold;
+
+            // Speech/silence decision, relative to what is actually playing.
+            //
+            // This used to be `rms > sensitivity_rms || peak > peak_threshold`,
+            // and that `||` was why Auto never sent anything. `peak` is the
+            // loudest single sample in a 21ms chunk, so any bed under the
+            // speech — background music, a game, a fan — clears 0.035 in
+            // nearly every chunk. `is_speech` was therefore true continuously,
+            // `silence_chunks` was reset before it could ever reach
+            // `config.silence_chunks`, and a gap was never reported. Speech was
+            // still transcribed (the 2s partials kept coming), but
+            // `speech-detected` never fired, so Auto never called the model —
+            // only a hard mute, or the 30s safety cap, got anything through.
+            let energy = rms;
+            if !energy_init {
+                noise_floor = energy;
+                speech_ref = energy;
+                energy_init = true;
+            }
+            // The floor chases quiet quickly and loud only very slowly, so
+            // sustained speech cannot inflate it into the threshold.
+            if energy < noise_floor {
+                noise_floor += (energy - noise_floor) * FLOOR_FALL;
+            } else {
+                noise_floor += (energy - noise_floor) * FLOOR_RISE;
+            }
+            // The reference adopts a louder level instantly and forgets loud
+            // passages gradually, so an old shout does not lock the threshold.
+            if energy > speech_ref {
+                speech_ref = energy;
+            } else {
+                speech_ref *= REF_DECAY;
+            }
+
+            let span = (speech_ref - noise_floor).max(0.0);
+
+            // Voice sensitivity (0.0-1.0) bends both terms of the decision, so
+            // one slider spans the whole useful range:
+            //
+            //   drop   — how far energy must fall from the speech reference
+            //            before the utterance counts as paused. A sensitive
+            //            setting accepts a smaller drop, so it pauses sooner.
+            //   floor  — the threshold a quiet room sits on, derived from
+            //            `sensitivity_rms` rather than a second constant.
+            //
+            // At 0.5 both land exactly on the tuned values (DROP_RATIO and
+            // `sensitivity_rms * 0.5`), so the default is unchanged and the
+            // ends of the range merely halve and roughly double it. The clamps
+            // keep the extremes usable: below ~0.10 the drop is inside the
+            // noise floor's own wobble, and above ~0.90 ordinary speech never
+            // recedes far enough to end.
+            let sensitivity = config.voice_sensitivity.clamp(0.0, 1.0);
+            let drop_ratio = (DROP_RATIO * (1.5 - sensitivity)).clamp(0.10, 0.90);
+            let rms_floor = config.sensitivity_rms * (1.0 - sensitivity).max(0.15);
+
+            let threshold = (noise_floor + span * drop_ratio)
+                .max(noise_floor * 1.6) // never trip on the floor's own wobble
+                .max(rms_floor); // floor for a quiet room
+
+            // The peak term only ever *ends* a stretch: a digitally silent
+            // buffer (a paused video renders exact zeros) is silence whatever
+            // the floor estimate is doing. It no longer keeps speech alive.
+            let is_speech = energy > threshold && peak > config.noise_gate_threshold;
 
             if is_speech {
                 if !in_speech {
@@ -528,9 +622,33 @@ pub async fn stop_system_audio_capture(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Manual stop for continuous recording
+/// Manual stop for continuous recording.
+///
+/// The only listener for `manual-stop-continuous` lives inside
+/// `run_continuous_capture`, so emitting it while no capture is running used to
+/// silently "succeed" and leave the UI stuck in its processing state. Confirm
+/// the capture first: it must be running AND in continuous (non-VAD) mode.
 #[tauri::command]
 pub async fn manual_stop_continuous(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<crate::AudioState>();
+
+    let is_capturing = *state
+        .is_capturing
+        .lock()
+        .map_err(|e| format!("Failed to read capturing state: {}", e))?;
+    if !is_capturing {
+        return Err("No capture is running".to_string());
+    }
+
+    let vad_enabled = state
+        .vad_config
+        .lock()
+        .map_err(|e| format!("Failed to read VAD config: {}", e))?
+        .enabled;
+    if vad_enabled {
+        return Err("Capture is in VAD mode, not continuous".to_string());
+    }
+
     let _ = app.emit("manual-stop-continuous", ());
 
     tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
@@ -609,6 +727,9 @@ pub async fn update_vad_config(app: AppHandle, config: VadConfig) -> Result<(), 
     // Validate config
     if config.sensitivity_rms < 0.0 || config.sensitivity_rms > 1.0 {
         return Err("Invalid sensitivity_rms: must be 0.0-1.0".to_string());
+    }
+    if !(0.0..=1.0).contains(&config.voice_sensitivity) {
+        return Err("Invalid voice_sensitivity: must be 0.0-1.0".to_string());
     }
     if config.max_recording_duration_secs > 3600 {
         return Err("Invalid max_recording_duration_secs: must be <= 3600 (1 hour)".to_string());

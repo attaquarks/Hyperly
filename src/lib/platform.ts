@@ -10,8 +10,8 @@ export const getPlatform = (): "macos" | "windows" | "linux" => {
     return "linux";
   }
 
-  // Fallback to deprecated API
-  const platform = navigator.platform.toLowerCase();
+  // Fallback to deprecated API — some WebViews omit navigator.platform.
+  const platform = (navigator.platform || navigator.userAgent || "").toLowerCase();
   if (platform.includes("mac")) return "macos";
   if (platform.includes("win")) return "windows";
   return "linux";

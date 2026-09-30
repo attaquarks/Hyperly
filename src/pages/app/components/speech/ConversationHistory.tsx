@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useHistory } from "@/hooks";
 import { ChatConversation } from "@/types";
 import { Input } from "@/components";
 import { cn } from "@/lib/utils";
-import { ChevronLeftIcon, ChevronRightIcon, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import moment from "moment";
 
 interface ConversationHistoryProps {
@@ -14,8 +14,9 @@ interface ConversationHistoryProps {
 }
 
 /**
- * Collapsible sidebar that lists past listen-mode conversations. When a conversation is
- * selected, the listen panel loads it via the hook's `loadConversation` callback.
+ * Past listen-mode conversations. In the Listen window it renders as an
+ * overlay on top of the transcript area — picking a conversation loads it and
+ * closes the overlay, while the transcript keeps capturing behind it.
  */
 export const ConversationHistory = ({
   loadConversation,
@@ -24,31 +25,14 @@ export const ConversationHistory = ({
   className,
 }: ConversationHistoryProps) => {
   const history = useHistory();
-  const [collapsed, setCollapsed] = useState(false);
 
-  // Refresh whenever the sidebar opens.
+  // Refresh whenever the panel opens.
   useEffect(() => {
     history.refreshConversations();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (collapsed) {
-    return (
-      <button
-        type="button"
-        onClick={() => setCollapsed(false)}
-        title="Show conversation history"
-        className={cn(
-          "flex items-center justify-center w-7 h-7 rounded-md border border-border/50 bg-background/60 hover:bg-background text-muted-foreground hover:text-foreground transition-colors",
-          className
-        )}
-      >
-        <ChevronRightIcon className="w-3.5 h-3.5" />
-      </button>
-    );
-  }
-
-  const filtered = history.conversations.filter((doc: ChatConversation) =>
+  const filtered = (history.conversations ?? []).filter((doc: ChatConversation) =>
     history.search
       ? doc.title?.toLowerCase().includes(history.search.toLowerCase())
       : true
@@ -63,26 +47,16 @@ export const ConversationHistory = ({
     >
       <div className="flex items-center justify-between p-2 border-b border-border/50">
         <p className="text-xs font-medium select-none">History</p>
-        <div className="flex items-center gap-1">
+        {onClose && (
           <button
             type="button"
-            onClick={() => setCollapsed(true)}
-            title="Hide conversation history"
+            onClick={onClose}
+            title="Close"
             className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
           >
-            <ChevronLeftIcon className="w-3.5 h-3.5" />
+            ×
           </button>
-          {onClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              title="Close"
-              className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
-            >
-              ×
-            </button>
-          )}
-        </div>
+        )}
       </div>
 
       <div className="relative p-2 border-b border-border/50">
@@ -101,7 +75,7 @@ export const ConversationHistory = ({
           <p className="text-[10px] text-muted-foreground p-3">Loading...</p>
         ) : filtered.length === 0 ? (
           <p className="text-[10px] text-muted-foreground p-3 select-none">
-            {history.conversations.length === 0
+            {(history.conversations?.length ?? 0) === 0
               ? "No conversations yet"
               : "No matches"}
           </p>
@@ -113,6 +87,7 @@ export const ConversationHistory = ({
                   type="button"
                   onClick={() => {
                     void loadConversation(doc.id);
+                    onClose?.();
                   }}
                   className={cn(
                     "w-full text-left px-2 py-1.5 hover:bg-muted/70 transition-colors border-b border-border/30",
@@ -122,7 +97,7 @@ export const ConversationHistory = ({
                   <p className="text-xs line-clamp-1">{doc.title}</p>
                   <p className="text-[9px] text-muted-foreground mt-0.5">
                     {moment(doc.updatedAt).format("MMM D · hh:mm A")} ·{" "}
-                    {doc.messages.length} msgs
+                    {(doc.messages?.length ?? 0)} msgs
                   </p>
                 </button>
               </li>

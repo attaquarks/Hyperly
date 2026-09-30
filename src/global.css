@@ -217,7 +217,14 @@ body {
   --hyperly-line: rgb(255 255 255 / 0.1);
   --hyperly-text: rgb(248 248 248);
   --hyperly-text-muted: rgb(248 248 248 / 0.58);
+  /* The shell owns the window height. It is a fixed-size panel — the window
+     never grows or shrinks in response to content, so every room below has to
+     fit inside this box rather than pushing it taller. */
+  display: flex;
+  flex-direction: column;
   width: 100%;
+  height: 100vh;
+  min-height: 0;
   color: var(--hyperly-text);
   background: var(--hyperly-surface);
   border: 1px solid var(--hyperly-line);
@@ -312,11 +319,18 @@ body {
   border-radius: 7px !important;
 }
 
+/* The shell's content area no longer scrolls: it takes whatever height the
+   header leaves and each room manages its own section scrolls (Ask scrolls
+   its body, Listen scrolls per section). flex:1 + min-height:0 is what makes
+   that work — without min-height:0 a flex child refuses to shrink below its
+   content and the overflow escapes the window. */
 .hyperly-overlay-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
   min-width: 0;
-
-  overflow-y: auto;
-  max-height: calc(100vh - 3.5rem);
+  min-height: 0;
+  overflow: hidden;
 }
 
 
@@ -349,6 +363,25 @@ body {
   font-weight: 450;
   letter-spacing: 0;
   white-space: nowrap;
+  /* It is a toggle button, but it should read as the eyebrow label it replaced
+     until it is switched on or pointed at. */
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 2px 5px;
+  margin: -2px -5px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.hyperly-thread-source:hover {
+  color: var(--hyperly-text);
+  background: rgb(255 255 255 / 0.06);
+}
+
+.hyperly-thread-source-on {
+  color: var(--hyperly-text);
+  background: rgb(255 255 255 / 0.1);
 }
 
 .hyperly-thread-list {
@@ -416,5 +449,456 @@ body {
   color: var(--hyperly-text);
   background: rgb(52 211 153 / 0.12);
   border-color: rgb(52 211 153 / 0.28);
+}
+
+/* Always-expanded overlay bodies (Ask + Listen). One surface, two rooms:
+   the header is wayfinding, the body below swaps per tab. */
+.hyperly-overlay-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+}
+
+.hyperly-composer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 12px;
+  background: var(--hyperly-surface-muted);
+  border: 1px solid var(--hyperly-line);
+  border-radius: 10px;
+}
+
+.hyperly-composer:focus-within {
+  border-color: rgb(255 255 255 / 0.22);
+}
+
+.hyperly-composer-input {
+  flex: 1 1 0%;
+  min-width: 0;
+  height: 30px;
+  padding: 0;
+  color: var(--hyperly-text);
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+.hyperly-composer-input::placeholder {
+  color: var(--hyperly-text-muted);
+}
+
+.hyperly-action-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.hyperly-action {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  color: var(--hyperly-text-muted);
+  font-size: 10px;
+  font-weight: 540;
+  background: transparent;
+  border: 1px solid var(--hyperly-line);
+  border-radius: 7px;
+  transition: color 140ms ease-out, background-color 140ms ease-out, border-color 140ms ease-out;
+}
+
+.hyperly-action:hover:not(:disabled) {
+  color: var(--hyperly-text);
+  background: var(--hyperly-surface-muted);
+}
+
+.hyperly-action:disabled {
+  opacity: 0.45;
+}
+
+.hyperly-action-active {
+  color: var(--hyperly-text);
+  background: rgb(52 211 153 / 0.12);
+  border-color: rgb(52 211 153 / 0.28);
+}
+
+.hyperly-action-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  font-size: 8px;
+  font-weight: 650;
+  color: var(--hyperly-text);
+  background: rgb(255 255 255 / 0.12);
+  border-radius: 999px;
+}
+
+/* The keybinding chip on Push to talk — reads the user's real shortcut, so it
+   is a label rather than a button and stays visually quieter than one. */
+.hyperly-action-key {
+  display: inline-flex;
+  align-items: center;
+  height: 14px;
+  padding: 0 4px;
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--hyperly-text-muted);
+  background: rgb(255 255 255 / 0.08);
+  border: 1px solid var(--hyperly-line);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* Composer send arrow. Dull at rest, bright once the input has content. */
+.hyperly-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  color: var(--hyperly-text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  transition: color 140ms ease-out, background-color 140ms ease-out;
+}
+
+.hyperly-send:disabled {
+  opacity: 0.45;
+}
+
+.hyperly-send-ready {
+  color: var(--hyperly-text);
+  background: rgb(255 255 255 / 0.1);
+}
+
+.hyperly-send-ready:hover {
+  background: rgb(255 255 255 / 0.16);
+}
+
+.hyperly-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--hyperly-text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.hyperly-mic-live {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--hyperly-text-muted);
+}
+
+.hyperly-mic-live-label {
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  color: rgb(110 231 183 / 0.92);
+}
+
+.hyperly-answer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgb(255 255 255 / 0.035);
+  border: 1px solid var(--hyperly-line);
+  border-radius: 10px;
+}
+
+.hyperly-answer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hyperly-answer-title {
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hyperly-text-muted);
+}
+
+.hyperly-answer-body {
+  font-size: 12px;
+  line-height: 1.55;
+  color: rgb(248 248 248 / 0.9);
+}
+
+.hyperly-error {
+  padding: 8px 10px;
+  font-size: 11px;
+  color: rgb(252 165 165);
+  background: rgb(248 113 113 / 0.08);
+  border: 1px solid rgb(248 113 113 / 0.3);
+  border-radius: 8px;
+}
+
+.hyperly-thumb-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.hyperly-thumb {
+  height: 44px;
+  width: 72px;
+  object-fit: cover;
+  border: 1px solid var(--hyperly-line);
+  border-radius: 6px;
+}
+
+.hyperly-thumb-remove {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 14px;
+  width: 14px;
+  color: var(--hyperly-text-muted);
+  background: rgb(16 16 18);
+  border: 1px solid var(--hyperly-line);
+  border-radius: 999px;
+}
+
+.hyperly-thumb-remove:hover {
+  color: var(--hyperly-text);
+}
+
+.hyperly-listen-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.hyperly-listen-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.hyperly-empty-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--hyperly-text-muted);
+}
+
+/* Sectioned Listen window: hairline-separated sections, each scrolling
+   independently. No card blocks, no single whole-panel scroll. */
+.hyperly-listen-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.hyperly-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 6px 12px;
+}
+
+.hyperly-section + .hyperly-section {
+  border-top: 1px solid var(--hyperly-line);
+}
+
+.hyperly-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  gap: 12px;
+  padding: 2px 0 6px;
+  color: var(--hyperly-text-muted);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hyperly-section-scroll {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.hyperly-transcript-section {
+  position: relative;
+  flex: 1 1 0%;
+  min-height: 72px;
+}
+
+/* The suggested answer takes only the height its content needs and never a
+   fixed share of the panel: a one-line answer shouldn't reserve 38% of the
+   window, and a long one shouldn't be clipped to it. flex-shrink lets it give
+   room back to the transcript when the panel is short. */
+.hyperly-answer-section {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.hyperly-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 4px;
+  color: var(--hyperly-text-muted);
+  border-radius: 5px;
+  transition: color 140ms ease-out, background-color 140ms ease-out;
+}
+
+.hyperly-icon-btn:hover {
+  color: var(--hyperly-text);
+  background: var(--hyperly-surface-muted);
+}
+
+/* Chat history occupies the transcript slot rather than floating above it.
+   It swaps in for the thread list, so there is never a second scrolling
+   surface stacked over the first. */
+.hyperly-history-overlay {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
+  background: var(--hyperly-surface);
+}
+
+/* Between the prompt tabs and the transcript: hairline above and below. */
+.hyperly-listening-bar {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--hyperly-line);
+  border-bottom: 1px solid var(--hyperly-line);
+}
+
+.hyperly-listening-eq {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+}
+
+.hyperly-listening-eq span {
+  width: 2px;
+  height: 4px;
+  background: rgb(110 231 183 / 0.9);
+  border-radius: 1px;
+  animation: hyperly-eq 1.1s ease-in-out infinite;
+}
+
+.hyperly-listening-eq span:nth-child(2) { animation-delay: 0.15s; }
+.hyperly-listening-eq span:nth-child(3) { animation-delay: 0.3s; }
+.hyperly-listening-eq span:nth-child(4) { animation-delay: 0.45s; }
+
+.hyperly-listening-eq-idle span {
+  animation: none;
+  background: var(--hyperly-text-muted);
+}
+
+@keyframes hyperly-eq {
+  0%, 100% { height: 3px; }
+  50% { height: 12px; }
+}
+
+.hyperly-overlay-footer {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--hyperly-line);
+  color: var(--hyperly-text-muted);
+  font-size: 10px;
+}
+
+.hyperly-knowledge-note {
+  padding: 0 12px 4px;
+  font-size: 10px;
+  color: var(--hyperly-text-muted);
+}
+
+.hyperly-followup-input {
+  height: 22px;
+  padding: 0 8px;
+  color: var(--hyperly-text);
+  font-size: 10px;
+  background: var(--hyperly-surface-muted);
+  border: 1px solid var(--hyperly-line);
+  border-radius: 7px;
+  outline: none;
+}
+
+.hyperly-followup-input:focus {
+  border-color: rgb(255 255 255 / 0.22);
+}
+
+/* One focus edge. Header buttons also carry the shared Button ring;
+   the shell selector clears it so Ask and Listen match. */
+.hyperly-overlay-shell .hyperly-tab:focus-visible,
+.hyperly-overlay-shell .hyperly-mode-pill:focus-visible,
+.hyperly-overlay-shell .hyperly-action:focus-visible,
+.hyperly-overlay-shell .hyperly-icon-btn:focus-visible,
+.hyperly-overlay-shell .hyperly-header-action:focus-visible,
+.hyperly-overlay-shell .hyperly-header-icon:focus-visible,
+.hyperly-overlay-shell .hyperly-header-drag:focus-visible,
+.hyperly-overlay-shell .hyperly-thumb-remove:focus-visible {
+  outline: 1px solid rgb(255 255 255 / 0.22);
+  outline-offset: -1px;
+  box-shadow: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hyperly-overlay-shell,
+  .hyperly-overlay-shell *,
+  .hyperly-overlay-shell *::before,
+  .hyperly-overlay-shell *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .hyperly-listening-eq span {
+    animation: none !important;
+    height: 4px;
+  }
+
+  .hyperly-overlay-shell *::-webkit-scrollbar-thumb {
+    transition: none;
+  }
 }
 

@@ -6,7 +6,7 @@ export const DragButton = () => {
     <Button
       variant="ghost"
       size="icon"
-      className={`-ml-[2px] w-fit cursor-grab active:cursor-grabbing`}
+      className={`hyperly-header-drag -ml-[2px] w-fit cursor-grab active:cursor-grabbing`}
       data-tauri-drag-region={true}
       title="Drag to move"
     >

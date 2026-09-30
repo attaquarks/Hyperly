@@ -1,6 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod capture;
 mod db;
+mod mic_permission;
 mod shortcuts;
 mod startup;
 mod window;
@@ -113,10 +114,11 @@ pub fn run() {
         // PostHog, keychain, and machine_uid plugins removed for the personal build.
         .invoke_handler(tauri::generate_handler![
             get_app_version,
-            window::set_window_height,
+            window::set_window_size,
             window::open_dashboard,
             window::toggle_dashboard,
             window::move_window,
+            window::log_frontend,
             capture::capture_to_base64,
             capture::start_screen_capture,
             capture::capture_selected_area,
@@ -128,6 +130,7 @@ pub fn run() {
             shortcuts::set_app_icon_visibility,
             shortcuts::set_always_on_top,
             shortcuts::exit_app,
+            shortcuts::toggle_main_window,
             speaker::start_system_audio_capture,
             speaker::stop_system_audio_capture,
             speaker::manual_stop_continuous,

@@ -1,21 +1,10 @@
+// Build-time environment values are deliberately NOT forwarded to the compiler.
+//
+// This script used to read PAYMENT_ENDPOINT / API_ACCESS_KEY / APP_ENDPOINT /
+// POSTHOG_API_KEY and emit them as `cargo:rustc-env=...`. That is the arming
+// step for embedding secrets in the shipped binary: the value becomes part of
+// the artifact the moment any source reads it with env!/option_env!. Phase 4
+// R12 removed the mechanism; `scripts/secret-embedding-check.ts` guards it.
 fn main() {
-    dotenv::dotenv().ok();
-
-    if let Ok(payment_endpoint) = std::env::var("PAYMENT_ENDPOINT") {
-        println!("cargo:rustc-env=PAYMENT_ENDPOINT={}", payment_endpoint);
-    }
-
-    if let Ok(api_access_key) = std::env::var("API_ACCESS_KEY") {
-        println!("cargo:rustc-env=API_ACCESS_KEY={}", api_access_key);
-    }
-
-    if let Ok(app_endpoint) = std::env::var("APP_ENDPOINT") {
-        println!("cargo:rustc-env=APP_ENDPOINT={}", app_endpoint);
-    }
-
-    if let Ok(posthog_api_key) = std::env::var("POSTHOG_API_KEY") {
-        println!("cargo:rustc-env=POSTHOG_API_KEY={}", posthog_api_key);
-    }
-
     tauri_build::build()
 }

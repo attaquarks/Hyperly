@@ -60,16 +60,48 @@ pub struct ShortcutsConfig {
 pub fn setup_global_shortcuts<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Let the frontend initialize from localStorage
-    let state = app.state::<RegisteredShortcuts>();
-    let _registered = match state.shortcuts.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            eprintln!("Mutex poisoned in setup, recovering...");
-            poisoned.into_inner()
-        }
+    // Bind hide/show before the webview mounts. If React never reaches
+    // `update_shortcuts`, Ctrl+\ still works and a transparent skip-taskbar
+    // window is not a dead process with no way to surface it.
+    let default_toggle = if cfg!(target_os = "macos") {
+        "cmd+backslash"
+    } else {
+        "ctrl+backslash"
     };
-    eprintln!("Global shortcuts state initialized, waiting for frontend config");
+
+    match default_toggle.parse::<Shortcut>() {
+        Ok(shortcut) => match app.global_shortcut().register(shortcut) {
+            Ok(_) => {
+                let state = app.state::<RegisteredShortcuts>();
+                let mut registered = match state.shortcuts.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        eprintln!("Mutex poisoned in setup, recovering...");
+                        poisoned.into_inner()
+                    }
+                };
+                registered.insert("toggle_window".to_string(), default_toggle.to_string());
+                eprintln!(
+                    "Registered default toggle_window shortcut: {}",
+                    default_toggle
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to register default toggle_window shortcut {}: {}",
+                    default_toggle, e
+                );
+            }
+        },
+        Err(e) => {
+            eprintln!(
+                "Invalid default toggle shortcut '{}': {}",
+                default_toggle, e
+            );
+        }
+    }
+
+    eprintln!("Global shortcuts initialized; frontend config may replace these bindings");
 
     Ok(())
 }
@@ -193,6 +225,16 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Err(e) = window.emit("toggle-window-visibility", false) {
         eprintln!("Failed to emit toggle-window-visibility event: {}", e);
     }
+}
+
+/// Toggle the overlay's visibility through the exact same path as the global
+/// shortcut. In-app Hide buttons must go through here — calling
+/// `window.hide()` directly desyncs the Rust-side hidden flag and turns the
+/// next shortcut press into a no-op.
+#[tauri::command]
+pub fn toggle_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    handle_toggle_window(&app);
+    Ok(())
 }
 
 /// Handle app toggle (hide/show) with input focus and app icon management

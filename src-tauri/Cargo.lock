@@ -1211,12 +1211,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenv"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
-
-[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2231,7 +2225,6 @@ dependencies = [
  "base64 0.22.1",
  "cidre",
  "cpal",
- "dotenv",
  "futures-util",
  "hound",
  "image",
@@ -2255,6 +2248,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wasapi",
+ "webview2-com",
  "winreg",
  "xcap",
 ]
