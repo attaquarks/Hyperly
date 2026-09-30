@@ -59,10 +59,10 @@ No account is needed to start. Updates ship automatically.
 
 ## 🛠 Build from source
 
-See [BUILD.md](./BUILD.md) for prerequisites and step-by-step build instructions. The short version on Windows + WSL is:
+See [BUILD.md](./BUILD.md) for prerequisites and step-by-step build instructions. The short version on Windows + WSL is (from your checkout):
 
 ```powershell
-cd C:\Users\Atta\Documents\Projects\Hyperly
+cd path\to\Hyperly
 npm install
 npm run tauri build
 ```

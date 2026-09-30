@@ -37,7 +37,7 @@ Then open a **fresh** terminal so the change takes effect.
 ## Run in dev mode
 
 ```powershell
-cd C:\Users\Atta\Documents\Projects\Hyperly
+cd <your-Hyperly-checkout>
 npm install
 npm run tauri dev
 ```

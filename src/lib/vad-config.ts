@@ -30,13 +30,16 @@ export interface VadConfig {
 export const VAD_CONFIG_STORAGE_KEY = "vad_config";
 
 /**
- * Tuned defaults — matches the backend exactly. The capture engine is always
- * the Rust VAD loop (every start forces `enabled: true` on the spawn payload),
- * so the stored `enabled` flag no longer picks the loop type; it only seeds the
- * numeric fields.
+ * Tuned defaults — matches the backend (`VadConfig::default()` in
+ * src-tauri/src/speaker/commands.rs) field-for-field, `enabled` included.
+ *
+ * The capture engine is always the Rust VAD loop: every start forces
+ * `enabled: true` onto the spawn payload (see `currentSpawnVadConfig` in
+ * useSystemAudio.ts), so this flag does not pick a loop type. It stays in the
+ * mirror so the two structs cannot drift (Phase 4 R10).
  */
 export const DEFAULT_VAD_CONFIG: VadConfig = {
-  enabled: false,
+  enabled: true,
   hop_size: 1024,
   sensitivity_rms: 0.012, // Much less sensitive - only real speech
   voice_sensitivity: 0.5, // Midpoint - the tuned threshold, unchanged
