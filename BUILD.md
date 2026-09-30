@@ -37,7 +37,7 @@ Then open a **fresh** terminal so the change takes effect.
 ## Run in dev mode
 
 ```powershell
-cd C:\Users\Atta\Documents\Projects\Hyperly
+cd <your-Hyperly-checkout>
 npm install
 npm run tauri dev
 ```
@@ -55,6 +55,30 @@ npm run tauri build
 ```
 
 The output lands in `src-tauri\\target\\release\\bundle\\`.
+
+## Security & asset configuration (read before touching CSP or the /vad runtime)
+
+Three facts that only make sense together:
+
+1. **`csp` vs `devCsp` differ on purpose** (`src-tauri/tauri.conf.json`). The
+   production policy has no `'unsafe-inline'` in `script-src`; `devCsp` adds it
+   because Vite's dev pipeline injects inline scripts. Keep the production
+   string the stricter one — do not "align" them.
+2. **The production CSP allows no remote assets, so the voice-activity runtime
+   ships locally.** `public/vad/` carries the onnxruntime-web wasm/mjs, the
+   Silero models and the audio worklet, copied byte-for-byte from
+   `node_modules` — no CDN. `serveVadRuntime` in `vite.config.ts` serves the
+   `.mjs` correctly under `vite dev`.
+3. **Two guards keep (2) honest:**
+   - `node scripts/vad-asset-serve-check.ts` — boots a real dev server and
+     asserts every `/vad` asset is served intact.
+   - `node scripts/vad-asset-provenance-check.ts` — hashes `public/vad` against
+     `node_modules`, fails on drift, and requires `@ricky0123/vad-web` to be
+     declared exactly as installed.
+
+Also recorded so it is not re-litigated: `optimizeDeps` and `serveVadRuntime`
+in `vite.config.ts` were audited in Phase 3 and their comments are accurate —
+no change needed (P2Cbeta #11).
 
 ## Common issues
 
