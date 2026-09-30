@@ -47,7 +47,7 @@ impl Default for VadConfig {
             hop_size: 1024,
             sensitivity_rms: 0.012, // Much less sensitive - only real speech
             voice_sensitivity: default_voice_sensitivity(),
-            silence_chunks: 45,     // ~1.0s of silence before stopping
+            silence_chunks: 94, // mirror of TURN_HANGOVER_MS @48k; not read (see run_vad_capture)
             min_speech_chunks: 7,   // ~0.16s - captures short answers
             pre_speech_chunks: 12,  // ~0.27s - enough to catch word start
             noise_gate_threshold: 0.003, // Stronger noise filtering
@@ -157,6 +157,130 @@ const FLOOR_RISE: f32 = 0.0005;
 /// Decay of the recent-speech reference, so old loud passages are forgotten.
 const REF_DECAY: f32 = 0.997;
 
+/// Trailing silence that finalizes a turn, in milliseconds. Mirrored by
+/// `TURN_HANGOVER_MS` in src/lib/turn-boundary.ts; `scripts/turn-boundary-check.ts`
+/// fails if the two disagree. The UX contract behind the number: a pause of up
+/// to ~1.5 s must not split a turn, so both sources sit at 2000 ms.
+pub const TURN_HANGOVER_MS: u64 = 2000;
+
+/// The hangover expressed in hop-size chunks for a given sample rate, rounded
+/// **up** so the effective silence never falls short of `TURN_HANGOVER_MS`
+/// (93.75 chunks at 48 kHz would finalize at 1984 ms; 94 lands on 2005 ms).
+pub(crate) fn silence_chunks_for(sample_rate: u32, hop_size: usize) -> usize {
+    let samples = sample_rate as u64 * TURN_HANGOVER_MS / 1000;
+    let hop = (hop_size as u64).max(1);
+    ((samples + hop - 1) / hop).max(1) as usize
+}
+
+/// One step of the resettable hangover: any speech restarts the countdown.
+pub(crate) fn next_silence_count(current: usize, is_speech: bool) -> usize {
+    if is_speech {
+        0
+    } else {
+        current + 1
+    }
+}
+
+#[cfg(test)]
+mod turn_boundary_tests {
+    use super::*;
+
+    /// Chunks a wall-clock pause covers at `sample_rate`/`hop_size`.
+    fn pause_chunks(pause_ms: u64, sample_rate: u32, hop_size: usize) -> u64 {
+        pause_ms * sample_rate as u64 / (1000 * hop_size as u64)
+    }
+
+    /// Drive the exact loop rule over a timeline of (is_speech, chunks)
+    /// stretches and count finalized blocks: silence advances the counter, any
+    /// speech restarts it, a block ends when the counter reaches the threshold.
+    fn blocks_for(timeline: &[(bool, u64)], needed: usize) -> usize {
+        let mut silence_chunks = 0usize;
+        let mut in_speech = false;
+        let mut blocks = 0usize;
+        for &(is_speech, chunks) in timeline {
+            for _ in 0..chunks {
+                silence_chunks = next_silence_count(silence_chunks, is_speech);
+                if is_speech {
+                    in_speech = true;
+                } else if in_speech && silence_chunks >= needed {
+                    blocks += 1;
+                    in_speech = false;
+                    silence_chunks = 0;
+                }
+            }
+        }
+        blocks
+    }
+
+    const SR: u32 = 48000;
+    const HOP: usize = 1024;
+
+    #[test]
+    fn hangover_is_derived_at_48k() {
+        assert_eq!(silence_chunks_for(48000, 1024), 94);
+    }
+
+    #[test]
+    fn hangover_is_derived_at_44_1k() {
+        // 86.13 chunks rounds up to 87 = 2020 ms: never short of 2000 ms.
+        assert_eq!(silence_chunks_for(44100, 1024), 87);
+    }
+
+    #[test]
+    fn a_1200ms_pause_yields_one_block() {
+        let needed = silence_chunks_for(SR, HOP);
+        let timeline = [
+            (true, pause_chunks(2000, SR, HOP)),
+            (false, pause_chunks(1200, SR, HOP)),
+            (true, pause_chunks(2000, SR, HOP)),
+            (false, pause_chunks(30000, SR, HOP)),
+        ];
+        assert_eq!(blocks_for(&timeline, needed), 1);
+    }
+
+    #[test]
+    fn a_2500ms_pause_yields_two_blocks() {
+        let needed = silence_chunks_for(SR, HOP);
+        let timeline = [
+            (true, pause_chunks(2000, SR, HOP)),
+            (false, pause_chunks(2500, SR, HOP)),
+            (true, pause_chunks(2000, SR, HOP)),
+            (false, pause_chunks(30000, SR, HOP)),
+        ];
+        assert_eq!(blocks_for(&timeline, needed), 2);
+    }
+
+    #[test]
+    fn speech_restarts_the_pending_finalize() {
+        // 1.9 s of silence stays below the 2.005 s threshold; resuming speech
+        // must cancel the pending finalize instead of splitting the turn.
+        let needed = silence_chunks_for(SR, HOP);
+        let timeline = [
+            (true, pause_chunks(2000, SR, HOP)),
+            (false, pause_chunks(1900, SR, HOP)),
+            (true, pause_chunks(400, SR, HOP)),
+            (false, pause_chunks(30000, SR, HOP)),
+        ];
+        assert_eq!(blocks_for(&timeline, needed), 1);
+    }
+
+    #[test]
+    fn after_a_cancelled_finalize_a_full_pause_still_splits() {
+        // The 1.9 s pause adds no block (cancelled), the 2.1 s one does, and the
+        // trailing recording closes the second block: two in total.
+        let needed = silence_chunks_for(SR, HOP);
+        let timeline = [
+            (true, pause_chunks(2000, SR, HOP)),
+            (false, pause_chunks(1900, SR, HOP)),
+            (true, pause_chunks(400, SR, HOP)),
+            (false, pause_chunks(2100, SR, HOP)),
+            (true, pause_chunks(2000, SR, HOP)),
+            (false, pause_chunks(30000, SR, HOP)),
+        ];
+        assert_eq!(blocks_for(&timeline, needed), 2);
+    }
+}
+
 async fn run_vad_capture(
     app: AppHandle,
     stream: impl StreamExt<Item = f32> + Unpin,
@@ -173,6 +297,10 @@ async fn run_vad_capture(
     let mut in_speech = false;
     let mut silence_chunks = 0;
     let mut speech_chunks = 0;
+    // Phase 4 R1: the turn-finalization threshold, derived from
+    // TURN_HANGOVER_MS and the live sample rate rather than read from the
+    // config, so 44.1 and 48 kHz hangover is the same wall-clock span.
+    let silence_needed = silence_chunks_for(sr, config.hop_size);
     // Adaptive VAD state: a slow estimate of this room's noise floor, and a
     // decaying reference of the recent speech level. Together they give a
     // speech/silence threshold that tracks the actual signal instead of
@@ -277,7 +405,7 @@ async fn run_vad_capture(
 
                 speech_chunks += 1;
                 speech_buffer.extend_from_slice(&mono);
-                silence_chunks = 0; // Reset silence counter on any speech
+                silence_chunks = next_silence_count(silence_chunks, true); // resettable hangover
 
                 // Emit a live partial roughly every 2s of accumulated speech so
                 // Auto mode shows the same running transcript as Manual. The
@@ -306,13 +434,13 @@ async fn run_vad_capture(
             } else {
                 // Silence detected
                 if in_speech {
-                    silence_chunks += 1;
+                    silence_chunks = next_silence_count(silence_chunks, false);
 
                     // Continue collecting during silence (important for natural speech)
                     speech_buffer.extend_from_slice(&mono);
 
                     // Check if silence duration exceeds threshold
-                    if silence_chunks >= config.silence_chunks {
+                    if silence_chunks >= silence_needed {
                         // Verify minimum speech duration
                         if speech_chunks >= config.min_speech_chunks && !speech_buffer.is_empty() {
                             // Trim trailing silence (keep ~0.15s for natural ending)

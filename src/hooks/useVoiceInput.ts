@@ -4,6 +4,7 @@ import { fetchSTT } from "@/lib";
 import { floatArrayToWav } from "@/lib/utils";
 import { readStoredVadConfig } from "@/lib/vad-config";
 import { getMicrophoneStream } from "@/lib/microphone";
+import { micRedemptionMs } from "@/lib/turn-boundary";
 import { useApp } from "@/contexts";
 
 /**
@@ -277,6 +278,12 @@ export const useVoiceInput = ({
       try {
         vad = await MicVAD.new({
           ...thresholds,
+          // Phase 4 R1: the shared turn-finalization hangover (2000 ms - see
+          // src/lib/turn-boundary.ts). vad-web's default is 1400 ms, which cut
+          // the same sentence at a different pause than the Rust VAD loop used
+          // for system audio. vad-web floors this to whole 96 ms frames and
+          // restarts the countdown on speech, exactly like the Rust side.
+          redemptionMs: micRedemptionMs(),
           // Serve the VAD runtime (worklet, Silero model, onnxruntime wasm) from
           // local assets in public/vad. The library defaults to jsdelivr CDN
           // URLs, which the app's CSP (script-src 'self') blocks — so the VAD
