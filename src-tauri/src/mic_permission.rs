@@ -1,4 +1,4 @@
-//! Grants the webview microphone permission on Windows.
+//! Microphone consent gate for the webview.
 //!
 //! Tauri v2 brokers microphone access only on macOS, through
 //! `tauri-plugin-macos-permissions`. On Windows the request goes straight to
@@ -26,8 +26,34 @@
 //! This module installs the handler the webview is missing. It has to be
 //! registered per window, and before the page asks for the mic; registering
 //! during window setup satisfies both.
+//!
+//! CONSENT (Phase 4 R7, issue #12). The handler used to approve every
+//! microphone request unconditionally, which made Hyperly the strongest
+//! auto-approval path on the machine. It now follows an explicit in-app
+//! decision: requests are **denied** until the UI calls `set_mic_consent(true)`.
+//! `src/lib/mic-consent.ts` prompts on first use, remembers the answer, and
+//! re-asserts it on every boot (the flag below is process state, not storage).
+//! Clipboard-read stays approved: that path belongs to WRY's own handler and
+//! this module must not regress paste.
 
-/// Installs a `PermissionRequested` handler that approves the microphone.
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The user's recorded consent decision. `false` until the UI says otherwise,
+/// so a fresh install cannot capture before the prompt has been answered.
+static MIC_CONSENT: AtomicBool = AtomicBool::new(false);
+
+/// Records the in-app consent answer. Exposed to the frontend as the
+/// `set_mic_consent` Tauri command (see `generate_handler!` in lib.rs).
+#[tauri::command]
+pub fn set_mic_consent(granted: bool) {
+    MIC_CONSENT.store(granted, Ordering::SeqCst);
+    eprintln!(
+        "[mic] consent {}",
+        if granted { "granted" } else { "revoked" }
+    );
+}
+
+/// Installs a `PermissionRequested` handler that follows `MIC_CONSENT`.
 ///
 /// Safe to call from `.setup()`: `with_webview` executes inline when invoked on
 /// the main thread (`tauri_runtime_wry::send_user_message`), so this does not
@@ -37,7 +63,7 @@ pub fn allow_microphone<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2PermissionRequestedEventArgs, COREWEBVIEW2_PERMISSION_KIND,
         COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
-        COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        COREWEBVIEW2_PERMISSION_STATE_ALLOW, COREWEBVIEW2_PERMISSION_STATE_DENY,
     };
     // `PermissionRequestedEventHandler` is generated in the private `callback`
     // module and re-exported at the crate root, not under `Win32`.
@@ -65,12 +91,17 @@ pub fn allow_microphone<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
                 let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
                 unsafe { args.PermissionKind(&mut kind)? };
 
-                // Microphone is what the voice input needs. Clipboard-read is
-                // approved here too so this handler does not regress the paste
-                // path that WRY's own handler covers.
-                if kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
-                    || kind == COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ
-                {
+                // Microphone follows the in-app consent gate; clipboard-read is
+                // approved so this handler does not regress the paste path that
+                // WRY's own handler covers.
+                if kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE {
+                    let state = if MIC_CONSENT.load(Ordering::SeqCst) {
+                        COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                    } else {
+                        COREWEBVIEW2_PERMISSION_STATE_DENY
+                    };
+                    unsafe { args.SetState(state)? };
+                } else if kind == COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ {
                     unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)? };
                 }
 
@@ -92,5 +123,7 @@ pub fn allow_microphone<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
 
 /// No-op on platforms that broker microphone access themselves (macOS via
 /// `tauri-plugin-macos-permissions`), or that have no WebView2 (Linux).
+/// `set_mic_consent` still records the decision so the UI stays consistent.
 #[cfg(not(target_os = "windows"))]
 pub fn allow_microphone<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
+

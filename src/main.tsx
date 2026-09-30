@@ -6,6 +6,8 @@ import "./global.css";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppRoutes from "./routes";
+import { MicConsentDialog } from "./components/mic-consent/MicConsentDialog";
+import { syncMicConsentToBackend } from "./lib/mic-consent";
 
 const logFrontend = (level: string, message: string) => {
   console.log(`[hyperly] ${level}: ${message}`);
@@ -39,6 +41,10 @@ try {
   const windowLabel = currentWindow.label;
   logFrontend("info", `webview boot ${windowLabel}`);
 
+  // The Rust consent gate is process state; re-assert the stored decision so
+  // the WebView2 handler matches what the user chose in a previous run (R7).
+  void syncMicConsentToBackend();
+
   const rootEl = document.getElementById("root");
   if (!rootEl) {
     throw new Error("#root is missing");
@@ -57,6 +63,7 @@ try {
         <ThemeProvider>
           <AppProvider>
             <AppRoutes />
+            <MicConsentDialog />
           </AppProvider>
         </ThemeProvider>
       </React.StrictMode>

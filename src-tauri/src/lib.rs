@@ -142,6 +142,7 @@ pub fn run() {
             speaker::get_audio_sample_rate,
             speaker::get_input_devices,
             speaker::get_output_devices,
+            mic_permission::set_mic_consent,
         ])
         .setup(|app| {
             // Remove registrations left by releases that supported autostart.

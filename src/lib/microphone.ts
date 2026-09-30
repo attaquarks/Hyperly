@@ -20,7 +20,12 @@
  * The two id spaces are bridged by *name*, which both sides do agree on. This
  * module owns that translation, plus the fallbacks that keep voice input alive
  * when even the name is unknown.
+ *
+ * Consent (Phase 4 R7): every path here sits behind the in-app consent gate in
+ * `@/lib/mic-consent`. Nothing reaches `getUserMedia` before an explicit,
+ * remembered decision, and a decline is surfaced as a real refusal.
  */
+import { hasMicConsent, requestMicConsent } from "@/lib/mic-consent";
 
 /** Constraints applied to every capture, so gain/echo handling is consistent. */
 const PROCESSING_CONSTRAINTS: MediaTrackConstraints = {
@@ -49,6 +54,10 @@ const normalizeName = (name?: string | null): string =>
  */
 export const primeMicrophoneLabels = async (): Promise<void> => {
   if (typeof navigator === "undefined" || !navigator.mediaDevices) return;
+  // Phase 4 R7: never probe before consent exists. The WebView gate would deny
+  // the probe and the labels would stay blank anyway; consent is asked for by
+  // `getMicrophoneStream`, on the user's first real capture action.
+  if (!hasMicConsent()) return;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     stream.getTracks().forEach((track) => track.stop());
@@ -143,6 +152,13 @@ export const getMicrophoneStream = async (
 ): Promise<MediaStream> => {
   if (typeof navigator === "undefined" || !navigator.mediaDevices) {
     throw new Error("Microphone capture requires a browser mediaDevices API.");
+  }
+
+  // Phase 4 R7: the single consent door. Nothing reaches `getUserMedia` before
+  // an explicit decision, and a decline is a real refusal — callers treat it
+  // exactly like an OS-level denial instead of retrying another device.
+  if (!(await requestMicConsent())) {
+    throw new DOMException("Microphone access was declined.", "NotAllowedError");
   }
 
   const wantsSpecificDevice = Boolean(

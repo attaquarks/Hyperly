@@ -39,7 +39,7 @@ Type a question, dictate it with push-to-talk, or let Hyperly see your screen: c
 
 <img src="/images/hyperly-v1-listen.gif" alt="Listen mode: live transcript of a meeting, an automatic suggested answer, and one-tap follow-up chips" width="100%" />
 
-Hit **Start** and Hyperly transcribes your mic and system audio live, with speaker labels and language selection. In **manual** mode (the default), you decide when to send a clip for an AI answer. In **auto** mode, automatic responses fire when someone asks a question, after every pause, or only when you tap Suggest. Smart follow-up chips appear under each answer, generated from the actual conversation. Every session is saved as a meeting with its full transcript.
+Hit **Start** and Hyperly transcribes your mic and system audio live, with speaker labels and language selection. The first time Hyperly needs your microphone it asks, and nothing captures until you accept; the engine never starts on its own. In **manual** mode (the default), you decide when to send a clip for an AI answer. In **auto** mode, automatic responses fire when someone asks a question, after every pause, or only when you tap Suggest. Smart follow-up chips appear under each answer, generated from the actual conversation. Every session is saved as a meeting with its full transcript.
 
 ## 🧰 What else is in the box
 

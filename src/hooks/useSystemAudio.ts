@@ -162,11 +162,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // transcript lands instead of dropping it.
   const sttInFlightRef = useRef<boolean>(false);
   const stopRequestedRef = useRef<boolean>(false);
-  // Auto is the mode that listens on its own, so something has to start the
-  // engine for it. Set when the user stops on purpose (Stop, spacebar, the
-  // deferred stop) so an explicit stop is never undone by the Auto autostart,
-  // and cleared whenever they start or change mode.
-  const autoListenSuppressedRef = useRef<boolean>(false);
   // Guards the async spawn against a concurrent start.
   const startingRef = useRef<boolean>(false);
 
@@ -936,10 +931,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         console.error("Failed to stop capture:", err);
       }
 
-      // The user asked to stop, so the Auto autostart must not immediately
-      // start the engine back up under them.
-      autoListenSuppressedRef.current = true;
-
       setCapturing(false);
       setIsProcessing(false);
       setIsContinuousMode(false);
@@ -1057,9 +1048,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         updatedAt: 0,
       });
 
-      // An explicit start always wins over a previous explicit stop.
-      autoListenSuppressedRef.current = false;
-
       setCapturing(true);
       setIsPopoverOpen(true);
       setIsContinuousMode(false);
@@ -1102,9 +1090,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   }, [vadConfig, selectedAudioDevices.output?.id]);
 
   // Start the VAD engine inside a session that is already on screen: no
-  // conversation reset, no transcript wipe, no stop-then-start. Used by the
-  // Auto autostart, by the spacebar Start in Manual and "Auto · On questions",
-  // and by the Start button.
+  // conversation reset, no transcript wipe, no stop-then-start. Called only
+  // from explicit gestures: the Start button, the spacebar in Manual /
+  // "Auto · On questions", and the global hotkey.
   const startSessionCapture = useCallback(async () => {
     if (startingRef.current) return;
     startingRef.current = true;
@@ -1117,9 +1105,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         setIsPopoverOpen(true);
         return;
       }
-
-      // An explicit start always wins over a previous explicit stop.
-      autoListenSuppressedRef.current = false;
 
       setCapturing(true);
       setIsPopoverOpen(true);
@@ -1159,11 +1144,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
 
       // Stop the audio capture
       await invoke<string>("stop_system_audio_capture");
-
-      // A stop the user asked for must survive the Auto autostart, which would
-      // otherwise see `capturing` go false and start the engine straight back
-      // up. Only `startCapture`/`startSessionCapture` clear this again.
-      autoListenSuppressedRef.current = true;
 
       // Reset ALL states
       setCapturing(false);
@@ -1397,30 +1377,16 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         STORAGE_KEYS.SYSTEM_AUDIO_CAPTURE_BEHAVIOR,
         JSON.stringify(behavior)
       );
-
-      // Changing mode is an explicit act, so it lifts a previous explicit stop
-      // and lets Auto pick the engine back up if that is where we landed.
-      autoListenSuppressedRef.current = false;
     },
     []
   );
 
-  // Auto is the mode that listens on its own, so its engine has to be started
-  // for it. This used to happen only on an idle switch from Manual into Auto,
-  // which meant an app that booted in Auto — the default — never captured
-  // anything at all: no audio, no silence gap, so `speech-detected` never
-  // fired and nothing was ever sent to the model. Looked exactly like Auto
-  // being broken, because it was: there was no listener.
-  //
-  // An explicit stop latches `autoListenSuppressedRef`, so pressing Stop in
-  // Auto is not immediately undone; starting again or changing mode clears it.
-  useEffect(() => {
-    if (captureBehavior !== "auto") return;
-    if (capturing) return;
-    if (setupRequired) return;
-    if (autoListenSuppressedRef.current) return;
-    void startSessionCapture();
-  }, [captureBehavior, capturing, setupRequired, startSessionCapture]);
+  // Capture never starts on its own (Phase 4 R7, owner decision 2026-09-30,
+  // issue #12). This used to be an Auto-mode autostart effect; the owner chose
+  // the explicit model, so Listen runs only from the Start button, the
+  // spacebar (Manual / "Auto · On questions"), the global hotkey, or
+  // push-to-talk. `scripts/mic-consent-check.ts` fails if an autostart effect
+  // returns here.
 
   // Keyboard arrow key support for scrolling (local shortcut)
   useEffect(() => {
