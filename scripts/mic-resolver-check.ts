@@ -7,6 +7,30 @@ import {
   enumerateMicrophoneInputs,
   primeMicrophoneLabels,
 } from "../src/lib/microphone.ts";
+import { answerMicConsent } from "../src/lib/mic-consent.ts";
+
+// Phase 4 R7: microphone access sits behind the in-app consent gate, so this
+// check stands in for the webview's localStorage and drives the gate the way
+// the UI does. The declined-consent path is asserted below; everything else
+// runs with consent granted, matching a returning user.
+const consentStorage = new Map<string, string>();
+const consentStorageApi = {
+  getItem: (key: string) => consentStorage.get(key) ?? null,
+  setItem: (key: string, value: string) => void consentStorage.set(key, value),
+  removeItem: (key: string) => void consentStorage.delete(key),
+};
+// `safeLocalStorage` checks `window` but reads the bare `localStorage` global,
+// exactly as a browser exposes it — so the stub must provide both.
+Object.defineProperty(globalThis, "window", {
+  value: { localStorage: consentStorageApi },
+  configurable: true,
+  writable: true,
+});
+Object.defineProperty(globalThis, "localStorage", {
+  value: consentStorageApi,
+  configurable: true,
+  writable: true,
+});
 
 type Call = { exact?: string };
 
@@ -69,6 +93,44 @@ const scenarios: {
 ];
 
 let failures = 0;
+
+// Consent gate, declined first: the request must resolve as a refusal with no
+// device interaction at all.
+{
+  const opened: number[] = [];
+  Object.defineProperty(globalThis, "navigator", {
+    value: {
+      mediaDevices: {
+        enumerateDevices: async () => [],
+        getUserMedia: async () => {
+          opened.push(1);
+          return { getTracks: () => [{ stop() {} }] };
+        },
+      },
+    },
+    configurable: true,
+    writable: true,
+  });
+
+  let outcome = "";
+  let ok = false;
+  const pending = getMicrophoneStream("web-mic-1", "Headset Microphone");
+  await answerMicConsent(false);
+  try {
+    await pending;
+    outcome = "FAIL — resolved despite a declined consent";
+  } catch (error) {
+    ok = (error as Error).name === "NotAllowedError" && opened.length === 0;
+    outcome = ok
+      ? "ok    consent declined -> NotAllowedError, no device opened"
+      : `FAIL — threw ${(error as Error).name}, device calls ${opened.length}`;
+  }
+  if (!ok) failures += 1;
+  console.log(`  ${outcome}  <- consent gate: declined`);
+}
+
+// Grant consent the way the dialog does; the device scenarios below need it.
+await answerMicConsent(true);
 
 for (const s of scenarios) {
   const seen: Call[] = [];

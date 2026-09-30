@@ -58,7 +58,7 @@ The output lands in `src-tauri\\target\\release\\bundle\\`.
 
 ## Security & asset configuration (read before touching CSP or the /vad runtime)
 
-Three facts that only make sense together:
+Four facts that only make sense together:
 
 1. **`csp` vs `devCsp` differ on purpose** (`src-tauri/tauri.conf.json`). The
    production policy has no `'unsafe-inline'` in `script-src`; `devCsp` adds it
@@ -75,6 +75,13 @@ Three facts that only make sense together:
    - `node scripts/vad-asset-provenance-check.ts` — hashes `public/vad` against
      `node_modules`, fails on drift, and requires `@ricky0123/vad-web` to be
      declared exactly as installed.
+4. **Microphone consent is explicit, remembered and never automatic (Phase 4
+   R7).** The WebView2 `PermissionRequested` handler **denies** microphone
+   requests until the user accepts the in-app prompt (`src/lib/mic-consent.ts`
+   → the `set_mic_consent` command); the answer is stored and re-applied on
+   every boot. Listen never starts from a mount effect — only the Start button,
+   the spacebar, the global hotkey or push-to-talk. `node
+   scripts/mic-consent-check.ts` fails if any of those guarantees is removed.
 
 Also recorded so it is not re-litigated: `optimizeDeps` and `serveVadRuntime`
 in `vite.config.ts` were audited in Phase 3 and their comments are accurate —
