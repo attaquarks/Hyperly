@@ -25,7 +25,7 @@
  * `@/lib/mic-consent`. Nothing reaches `getUserMedia` before an explicit,
  * remembered decision, and a decline is surfaced as a real refusal.
  */
-import { hasMicConsent, requestMicConsent } from "@/lib/mic-consent";
+import { hasMicConsent, requestMicConsent } from "./mic-consent.ts";
 
 /** Constraints applied to every capture, so gain/echo handling is consistent. */
 const PROCESSING_CONSTRAINTS: MediaTrackConstraints = {

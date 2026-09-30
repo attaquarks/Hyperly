@@ -14,8 +14,25 @@
  * The Rust flag is process state, not storage, so `syncMicConsentToBackend()`
  * re-asserts the stored decision on every boot (main.tsx).
  */
-import { invoke } from "@tauri-apps/api/core";
-import { safeLocalStorage } from "@/lib/storage";
+// NOTE: this module is loaded directly by node in the check scripts
+// (`mic-consent-check.ts`, `mic-resolver-check.ts`), so it must stay
+// import-light: a relative, extension-qualified import for the storage helper
+// (allowed by `allowImportingTsExtensions` in tsconfig), and the Tauri API only
+// through the lazy dynamic import inside `invokeTauri`.
+import { safeLocalStorage } from "./storage/helper.ts";
+
+/** Best-effort bridge to the Rust consent flag; a no-op outside the app. */
+const invokeTauri = async (
+  command: string,
+  args: Record<string, unknown>
+): Promise<void> => {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke(command, args);
+  } catch {
+    // Non-fatal: capture paths will surface a refusal if the flag is wrong.
+  }
+};
 
 export const MIC_CONSENT_STORAGE_KEY = "mic_consent";
 const GRANTED = "granted";
@@ -53,11 +70,7 @@ export const subscribeMicConsent = (listener: Listener): (() => void) => {
  * the WebView2 handler starts denying again with every process.
  */
 export const syncMicConsentToBackend = async (): Promise<void> => {
-  try {
-    await invoke("set_mic_consent", { granted: hasMicConsent() });
-  } catch {
-    // Non-fatal: capture paths will surface a refusal if the flag is wrong.
-  }
+  await invokeTauri("set_mic_consent", { granted: hasMicConsent() });
 };
 
 /**
@@ -78,11 +91,7 @@ export const requestMicConsent = (): Promise<boolean> => {
 export const answerMicConsent = async (granted: boolean): Promise<void> => {
   promptOpen = false;
   if (granted) safeLocalStorage.setItem(MIC_CONSENT_STORAGE_KEY, GRANTED);
-  try {
-    await invoke("set_mic_consent", { granted });
-  } catch {
-    // Non-fatal, as above.
-  }
+  await invokeTauri("set_mic_consent", { granted });
   const waiters = pending;
   pending = [];
   waiters.forEach((resolve) => resolve(granted));
