@@ -25,7 +25,7 @@ Hyperly is a translucent overlay that floats on top of any application. It has t
 
 |         🪶 **Lightweight**          |             🕶️ **Invisible**             |                ⚡ **Instant**                |
 | :---------------------------------: | :--------------------------------------: | :------------------------------------------: |
-|      **9 to 16 MB** installer       | Hidden from screen shares and recordings |  Launches in under 100ms, answers in a tap   |
+|  **Self-contained** installer (models ship locally)  | Hidden from screen shares and recordings |  Launches in under 100ms, answers in a tap   |
 | A fraction of Electron alternatives | No meeting bot, no participant, no trace | Global hotkeys summon it from inside any app |
 |   Minimal CPU and RAM, even live    |  Can hide from the taskbar too           |    Streaming answers, live transcription     |
 
@@ -33,7 +33,7 @@ Hyperly is a translucent overlay that floats on top of any application. It has t
 
 <img src="/images/hyperly-v1-ask.gif" alt="Ask mode: attach a screenshot, ask a question, get a streamed answer with follow-up suggestions" width="100%" />
 
-Type a question, dictate it with push-to-talk, or let Hyperly see your screen: capture it, drag-select a region, attach files, or turn on **Use image** so every message carries a fresh screenshot. Documents go through built-in OCR and stay in context for follow-up questions. Answers stream in as Markdown, and everything is saved locally where you can search, export, or delete it.
+Type a question, dictate it with push-to-talk, or let Hyperly see your screen: capture it, drag-select a region, attach files, or turn on **Use image** so every message carries a fresh screenshot. Documents (text files and PDFs) are parsed locally and stay in context for follow-up questions. Answers stream in as Markdown, and everything is saved locally where you can search, export, or delete it.
 
 ## 🎧 Listen mode
 
@@ -43,7 +43,7 @@ Hit **Start** and Hyperly transcribes your mic and system audio live, with speak
 
 ## 🧰 What else is in the box
 
-- **Free forever with your own keys**: connect any LLM or speech-to-text provider through a curl template — model lists auto-detect on OpenAI-compatible endpoints — or plug in the AI CLIs you already have (Claude Code, Gemini CLI, Codex, Qwen Code, Ollama). No limits from us; it's your account.
+- **Free forever with your own keys**: connect any LLM or speech-to-text provider through an HTTP (curl) template — model lists auto-detect on OpenAI-compatible endpoints, including local servers like Ollama. No limits from us; it's your account.
 - **Real stealth**: excluded from screen capture, absent from recordings and screenshots, never steals focus from the app you're in, and the icon can disappear from the taskbar.
 - **Keyboard-first**: global hotkeys for summon, capture, and listening; single keys scroll the answer and transcript once the overlay has focus.
 - **Private by architecture**: chats, meetings, transcripts, and files live in a local SQLite database on your machine. Your own provider keys stay local. Your conversations never train anything.
@@ -55,7 +55,7 @@ Pre-built installers are published on the [Releases](https://github.com/attaquar
 
 **Available formats:** `.msi` / `.exe` (Windows)
 
-No account is needed to start. Updates ship automatically.
+No account is needed to start. There's no auto-updater — new builds are published on the Releases page.
 
 ## 🛠 Build from source
 
