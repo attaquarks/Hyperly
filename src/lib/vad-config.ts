@@ -43,7 +43,14 @@ export const DEFAULT_VAD_CONFIG: VadConfig = {
   hop_size: 1024,
   sensitivity_rms: 0.012, // Much less sensitive - only real speech
   voice_sensitivity: 0.5, // Midpoint - the tuned threshold, unchanged
-  silence_chunks: 45, // ~1.0s of required silence
+  /**
+   * Kept for payload/mirror compatibility only (Phase 4 R1). The capture loop
+   * derives its effective threshold from `TURN_HANGOVER_MS` (2000 ms) and the
+   * live sample rate via `silence_chunks_for`, so this field no longer changes
+   * behaviour at any sample rate; 94 is what that derivation yields at 48 kHz.
+   * A stored config with the old 45 is therefore harmless.
+   */
+  silence_chunks: 94,
   min_speech_chunks: 7, // ~0.16s - captures short answers
   pre_speech_chunks: 12, // ~0.27s - enough to catch word start
   noise_gate_threshold: 0.003, // Stronger noise filtering
