@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
+import { SpeechBlockQueue } from "@/lib/speech-block-queue";
 import {
   DEFAULT_QUICK_ACTIONS,
   DEFAULT_SYSTEM_PROMPT,
@@ -450,6 +451,151 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     ]);
   };
 
+  // ---- Phase 4 R2: durable speech blocks (the room's side) ------------------
+  //
+  // The listener effect below re-runs whenever the STT provider changes or the
+  // conversation grows, so a queue created inside it would be rebuilt - and
+  // would drop blocks it was still retrying. The queue therefore lives for the
+  // hook's lifetime and reads state through refs.
+
+  /** Latest STT provider config, so a retry uses what the user has now. */
+  const sttConfigRef = useRef({
+    selected: selectedSttProvider,
+    providers: allSttProviders,
+  });
+  useEffect(() => {
+    sttConfigRef.current = {
+      selected: selectedSttProvider,
+      providers: allSttProviders,
+    };
+  }, [selectedSttProvider, allSttProviders]);
+
+  /** One attempt, with the 30 s ceiling the old inline handler enforced. */
+  const withSttTimeout = <T,>(promise: Promise<T>): Promise<T> =>
+    Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("Speech transcription timed out (30s)")),
+          30000
+        )
+      ),
+    ]);
+
+  /**
+   * Everything that happens once a room utterance has text: persist it to the
+   * transcript, then let `planUtterance` decide send / hold / apply a deferred
+   * stop. Moved here verbatim from the listener so a retried block runs the
+   * same path as one that succeeded first time.
+   */
+  const applyTranscriptionRef = useRef<(text: string) => Promise<void>>(
+    async () => {}
+  );
+  useEffect(() => {
+    applyTranscriptionRef.current = async (text: string) => {
+      setLastTranscription(text);
+      finalizeTranscriptSegment(text);
+      // The full transcript just arrived - clear the live running one so the UI
+      // shows the canonical final text and the AI response.
+      setLivePartial("");
+      livePartialRef.current = "";
+      setError("");
+
+      // One call decides the outcome for every mode - send now, hold, or apply a
+      // stop pressed while this utterance was transcribing - so Auto cannot
+      // drift into the Manual/Questions path.
+      const plan = planUtterance(
+        captureBehaviorRef.current,
+        text,
+        pendingTranscriptRef.current,
+        stopRequestedRef.current
+      );
+      stopRequestedRef.current = false;
+      pendingTranscriptRef.current = plan.pending;
+
+      if (plan.kind === "hold") return;
+
+      if (plan.kind === "stop-and-send") {
+        await stopAndSend(plan.text);
+        return;
+      }
+
+      const baseSystemPrompt = useSystemPrompt
+        ? systemPrompt || DEFAULT_SYSTEM_PROMPT
+        : contextContent || DEFAULT_SYSTEM_PROMPT;
+      const effectiveSystemPrompt = composeListenPrompt(
+        baseSystemPrompt,
+        listenModeRef.current
+      );
+
+      const previousMessages = (conversation.messages ?? []).map((msg) => {
+        return { role: msg.role, content: msg.content };
+      });
+
+      await processWithAI(plan.text, effectiveSystemPrompt, previousMessages);
+    };
+  });
+
+  /** The durable queue. Built once; disposed on unmount. */
+  const speechQueueRef = useRef<SpeechBlockQueue<Blob> | null>(null);
+  const getSpeechQueue = () => {
+    if (!speechQueueRef.current) {
+      speechQueueRef.current = new SpeechBlockQueue<Blob>({
+        transcribe: async (block) => {
+          const { selected, providers } = sttConfigRef.current;
+          if (!selected.provider) {
+            throw new Error("No speech provider selected.");
+          }
+          const providerConfig = providers.find(
+            (p) => p.id === selected.provider
+          );
+          if (!providerConfig) {
+            throw new Error("Speech provider config not found.");
+          }
+          return withSttTimeout(
+            fetchSTT({
+              provider: providerConfig,
+              selectedProvider: selected,
+              audio: block.audio,
+            })
+          );
+        },
+        onText: async (text) => {
+          if (!text.trim()) {
+            setError("Received empty transcription");
+            return;
+          }
+          await applyTranscriptionRef.current(text);
+        },
+        onError: (error) => {
+          console.error("STT Error:", error);
+          setError((error as Error)?.message || "Failed to transcribe audio");
+          setIsPopoverOpen(true);
+        },
+        onDeadLetter: (block, error) => {
+          // The block is retained in the queue's dead letters; the audio is not
+          // silently gone, and the failure is visible.
+          setError(
+            `Audio could not be transcribed after ${block.attempts} attempts: ` +
+              `${(error as Error)?.message ?? String(error)}`
+          );
+          setIsPopoverOpen(true);
+        },
+        onOverflow: () => {
+          setError("Speech queue is full; this utterance was not transcribed.");
+        },
+        onIdle: () => {
+          sttInFlightRef.current = false;
+          stopRequestedRef.current = false;
+          setIsProcessing(false);
+        },
+      });
+    }
+    return speechQueueRef.current;
+  };
+
+  useEffect(() => () => speechQueueRef.current?.dispose(), []);
+
   // Handle single speech detection event (both VAD and continuous modes)
   useEffect(() => {
     let speechUnlisten: (() => void) | undefined;
@@ -496,126 +642,40 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         );
 
         speechUnlisten = await listen("speech-detected", async (event) => {
-          try {
-            if (!capturing) {
-              return;
-            }
+          if (!capturing) {
+            return;
+          }
 
+          let audioBlob: Blob;
+          try {
             const base64Audio = event.payload as string;
-            // Convert to blob
             const binaryString = atob(base64Audio);
             const bytes = new Uint8Array(binaryString.length);
             for (let i = 0; i < binaryString.length; i++) {
               bytes[i] = binaryString.charCodeAt(i);
             }
-            const audioBlob = new Blob([bytes], { type: "audio/wav" });
-
-            if (!selectedSttProvider.provider) {
-              setError("No speech provider selected.");
-              return;
-            }
-
-            const providerConfig = allSttProviders.find(
-              (p) => p.id === selectedSttProvider.provider
-            );
-
-            if (!providerConfig) {
-              setError("Speech provider config not found.");
-              return;
-            }
-
-            setIsProcessing(true);
-            sttInFlightRef.current = true;
-
-            // Add timeout wrapper for STT request (30 seconds)
-            const sttPromise = fetchSTT({
-              provider: providerConfig,
-              selectedProvider: selectedSttProvider,
-              audio: audioBlob,
-            });
-
-            const timeoutPromise = new Promise<string>((_, reject) => {
-              setTimeout(
-                () => reject(new Error("Speech transcription timed out (30s)")),
-                30000
-              );
-            });
-
-            try {
-              const transcription = await Promise.race([
-                sttPromise,
-                timeoutPromise,
-              ]);
-
-              if (transcription.trim()) {
-                setLastTranscription(transcription);
-                finalizeTranscriptSegment(transcription);
-                // The full transcript just arrived — clear the live running one so the UI
-                // shows the canonical final text and the AI response.
-                setLivePartial("");
-                livePartialRef.current = "";
-                setError("");
-
-                // One call decides the outcome for every mode — send now, hold,
-                // or apply a stop pressed while this utterance was transcribing
-                // — so Auto cannot drift into the Manual/Questions path.
-                const plan = planUtterance(
-                  captureBehaviorRef.current,
-                  transcription,
-                  pendingTranscriptRef.current,
-                  stopRequestedRef.current
-                );
-                stopRequestedRef.current = false;
-                pendingTranscriptRef.current = plan.pending;
-
-                if (plan.kind === "hold") return;
-
-                if (plan.kind === "stop-and-send") {
-                  await stopAndSend(plan.text);
-                  return;
-                }
-
-                const baseSystemPrompt = useSystemPrompt
-                  ? systemPrompt || DEFAULT_SYSTEM_PROMPT
-                  : contextContent || DEFAULT_SYSTEM_PROMPT;
-                const effectiveSystemPrompt = composeListenPrompt(
-                  baseSystemPrompt,
-                  listenModeRef.current
-                );
-
-                const previousMessages = (conversation.messages ?? []).map((msg) => {
-                  return { role: msg.role, content: msg.content };
-                });
-
-                await processWithAI(
-                  plan.text,
-                  effectiveSystemPrompt,
-                  previousMessages
-                );
-              } else {
-                setError("Received empty transcription");
-              }
-            } catch (sttError: any) {
-              console.error("STT Error:", sttError);
-              setError(sttError.message || "Failed to transcribe audio");
-              setIsPopoverOpen(true);
-            }
+            audioBlob = new Blob([bytes], { type: "audio/wav" });
           } catch (err) {
-            setError("Failed to process speech");
-          } finally {
-            // A deferred stop is consumed by the utterance it was waiting on,
-            // or not at all. It must never stay latched: a latched flag turns
-            // every later utterance into a stop, which kills the engine and
-            // makes capture look frozen until the next spacebar press.
-            stopRequestedRef.current = false;
-            sttInFlightRef.current = false;
-            setIsProcessing(false);
+            console.warn("Discarding malformed speech payload:", err);
+            return;
           }
+
+          // Durable (Phase 4 R2). The block goes to the queue, which transcribes
+          // it, retries on failure with capped backoff, and dead-letters it with
+          // the audio intact rather than dropping it. The provider lookup and the
+          // 30 s ceiling moved into the queue's transcribe step, so a retry reads
+          // the *current* provider instead of a stale closure. `sttInFlightRef`
+          // keeps a Stop deferred until the block lands, however many attempts
+          // that takes.
+          sttInFlightRef.current = true;
+          setIsProcessing(true);
+          getSpeechQueue().enqueue("system", audioBlob);
         });
       } catch (err) {
         setError("Failed to setup speech listener");
       }
     };
+
 
     setupEventListener();
 
