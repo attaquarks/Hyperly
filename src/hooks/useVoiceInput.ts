@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MicVAD } from "@ricky0123/vad-web";
 import { fetchSTT } from "@/lib";
+import { SpeechBlockQueue } from "@/lib/speech-block-queue";
 import { floatArrayToWav } from "@/lib/utils";
 import { readStoredVadConfig } from "@/lib/vad-config";
 import { getMicrophoneStream } from "@/lib/microphone";
@@ -224,6 +225,57 @@ export const useVoiceInput = ({
     });
   };
 
+  /**
+   * Durable speech blocks (Phase 4 R2, issue #15). The queue owns retry, backoff
+   * and dead-lettering, so a provider failure can no longer destroy captured
+   * audio: the frame accumulator is cleared only *after* the block has been
+   * handed over. Every callback reads a ref, so the queue can be created once
+   * and still see current props.
+   */
+  const queueRef = useRef<SpeechBlockQueue<Float32Array> | null>(null);
+  const getQueue = (): SpeechBlockQueue<Float32Array> => {
+    if (!queueRef.current) {
+      queueRef.current = new SpeechBlockQueue<Float32Array>({
+        transcribe: (block) => transcribe(block.audio),
+        onText: (text) => {
+          const trimmed = text.trim();
+          // Clear the live partial BEFORE handing the final words over. The Ask
+          // room surfaces the final utterance through the same channel it uses
+          // for partials, so clearing afterwards erased the text that had just
+          // arrived and the transcript appeared to vanish.
+          onPartialRef.current?.("");
+          if (trimmed) {
+            onUtteranceRef.current(trimmed);
+            return;
+          }
+          if (!resolveProvider()) {
+            onErrorRef.current?.(
+              "No speech provider selected. Please select one in settings."
+            );
+          }
+        },
+        onError: (error) => {
+          console.error("Mic transcription failed:", error);
+          onPartialRef.current?.("");
+          onErrorRef.current?.(messageOf(error));
+        },
+        onDeadLetter: (block, error) => {
+          // The audio stays in `queueRef.current.deadLetters`.
+          onErrorRef.current?.(
+            `Microphone audio could not be transcribed after ${block.attempts} attempts: ${messageOf(error)}`
+          );
+        },
+        onOverflow: () => {
+          onErrorRef.current?.(
+            "Speech queue is full; this utterance was not transcribed."
+          );
+        },
+      });
+    }
+    return queueRef.current;
+  };
+  useEffect(() => () => queueRef.current?.dispose(), []);
+
   // Build (and rebuild) the VAD. Rebuilt per microphone id, which is also the
   // only input to the capture constraints below.
   useEffect(() => {
@@ -361,32 +413,14 @@ export const useVoiceInput = ({
                 partialInFlightRef.current = false;
               });
           },
-          onSpeechEnd: async (audio) => {
+          onSpeechEnd: (audio) => {
             accumulatingRef.current = false;
+            // Phase 4 R2: the queue takes ownership of the audio here, so
+            // clearing the accumulator can no longer lose the utterance. Its
+            // `transcribe` is the same provider call as before; a failure now
+            // means retry-then-dead-letter instead of silent loss.
             framesRef.current = [];
-            try {
-              const transcription = await transcribe(audio);
-              if (transcription && transcription.trim()) {
-                // Clear the live partial BEFORE handing the final words over.
-                // The Ask room surfaces the final utterance through the same
-                // channel it uses for partials, so clearing afterwards erased the
-                // text that had just arrived and the transcript appeared to
-                // vanish instead of turning into an answer.
-                onPartialRef.current?.("");
-                onUtteranceRef.current(transcription.trim());
-                return;
-              }
-              onPartialRef.current?.("");
-              if (!resolveProvider()) {
-                onErrorRef.current?.(
-                  "No speech provider selected. Please select one in settings."
-                );
-              }
-            } catch (err) {
-              console.error("Mic transcription failed:", err);
-              onPartialRef.current?.("");
-              onErrorRef.current?.(messageOf(err));
-            }
+            getQueue().enqueue("microphone", audio);
           },
         });
       } catch (error) {
