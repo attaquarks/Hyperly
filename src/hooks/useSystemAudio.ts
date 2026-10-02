@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
 import { SpeechBlockQueue } from "@/lib/speech-block-queue";
+import { getTranscriptStore } from "@/lib/database/transcript-adapter";
 import {
   DEFAULT_QUICK_ACTIONS,
   DEFAULT_SYSTEM_PROMPT,
@@ -501,6 +502,21 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       livePartialRef.current = "";
       setError("");
 
+      // Phase 4 R3: the event is durable BEFORE any AI step runs, so a provider
+      // failure - or the app dying - can never lose the utterance. A persistence
+      // error is reported but must not stop the answer.
+      try {
+        const store = await getTranscriptStore();
+        await store.addEvent({
+          source: "system",
+          kind: "final",
+          text,
+          conversationId: conversation.id || null,
+        });
+      } catch (persistError) {
+        console.warn("Could not persist transcript event:", persistError);
+      }
+
       // One call decides the outcome for every mode - send now, hold, or apply a
       // stop pressed while this utterance was transcribing - so Auto cannot
       // drift into the Manual/Questions path.
@@ -573,8 +589,24 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           setIsPopoverOpen(true);
         },
         onDeadLetter: (block, error) => {
-          // The block is retained in the queue's dead letters; the audio is not
-          // silently gone, and the failure is visible.
+          // The block is retained in the queue's dead letters, and R3 gives that
+          // audio somewhere durable: transcription can fail, the speech cannot
+          // be lost.
+          void (async () => {
+            try {
+              const store = await getTranscriptStore();
+              const audio = new Uint8Array(await block.audio.arrayBuffer());
+              await store.addDeadLetter({
+                source: "system",
+                audio,
+                attempts: block.attempts,
+                error: (error as Error)?.message ?? String(error),
+                conversationId: conversation.id || null,
+              });
+            } catch (persistError) {
+              console.warn("Could not persist dead-letter audio:", persistError);
+            }
+          })();
           setError(
             `Audio could not be transcribed after ${block.attempts} attempts: ` +
               `${(error as Error)?.message ?? String(error)}`
@@ -689,6 +721,40 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     allSttProviders,
     conversation.messages?.length ?? 0,
   ]);
+
+  // Phase 4 R3: bring back the transcript of the session the app was killed in.
+  //
+  // Events are written as they happen and only become a saved conversation at
+  // the end, so an interrupted session leaves ORPHANS - and they are the last
+  // thing the user saw. They are restored oldest-first on mount, and the same
+  // call runs retention, so nothing accumulates.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const store = await getTranscriptStore();
+        await store.pruneOrphans();
+        const orphans = await store.listRecentOrphans();
+        if (cancelled || orphans.length === 0) return;
+        setTranscriptSegments((segments) => {
+          // Never clobber a transcript that is already on screen.
+          if (segments.length > 0) return segments;
+          return orphans.map((event) => ({
+            id: `restored-${event.id}`,
+            timestamp: 0,
+            speaker: event.source === "microphone" ? "User" : "Speaker",
+            text: event.text,
+            isPartial: false,
+          }));
+        });
+      } catch (error) {
+        console.warn("Could not restore the previous transcript:", error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Context management functions
   const saveContextSettings = useCallback(
@@ -962,6 +1028,22 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             title: prev.title || generateConversationTitle(transcription),
           }));
           void generateFollowUps(transcription, fullResponse);
+          // Phase 4 R3: the answer is an event too - the conversation list is a
+          // projection of the event log, and this is what makes a reloaded
+          // session show its answers even before the conversation is saved.
+          void (async () => {
+            try {
+              const store = await getTranscriptStore();
+              await store.addEvent({
+                source: "system",
+                kind: "ai_response",
+                text: fullResponse,
+                conversationId: conversation.id || null,
+              });
+            } catch (persistError) {
+              console.warn("Could not persist AI response event:", persistError);
+            }
+          })();
         }
       } catch (err) {
         setError("Failed to get AI response");
@@ -974,6 +1056,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       selectedAIProvider,
       allAiProviders,
       conversation.messages,
+      conversation.id,
       generateFollowUps,
     ]
   );

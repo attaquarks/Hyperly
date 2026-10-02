@@ -19,6 +19,22 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/chat-history.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 3: durable transcript events + dead-letter audio (Phase 4 R3).
+        // Non-destructive: it creates two new tables and their indexes and never
+        // touches conversations, messages or system_prompts. The paired Down
+        // entry drops exactly those two objects, so sqlx has a real reversal.
+        Migration {
+            version: 3,
+            description: "create_transcript_events",
+            sql: include_str!("migrations/transcript-events.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 3,
+            description: "drop_transcript_events",
+            sql: include_str!("migrations/transcript-events.down.sql"),
+            kind: MigrationKind::Down,
+        },
     ]
 }
 
