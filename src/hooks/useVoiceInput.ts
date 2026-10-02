@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { MicVAD } from "@ricky0123/vad-web";
 import { fetchSTT } from "@/lib";
 import { SpeechBlockQueue } from "@/lib/speech-block-queue";
+import { getTranscriptStore } from "@/lib/database/transcript-adapter";
 import { floatArrayToWav } from "@/lib/utils";
 import { readStoredVadConfig } from "@/lib/vad-config";
 import { getMicrophoneStream } from "@/lib/microphone";
@@ -237,22 +238,35 @@ export const useVoiceInput = ({
     if (!queueRef.current) {
       queueRef.current = new SpeechBlockQueue<Float32Array>({
         transcribe: (block) => transcribe(block.audio),
-        onText: (text) => {
+        onText: async (text) => {
           const trimmed = text.trim();
           // Clear the live partial BEFORE handing the final words over. The Ask
           // room surfaces the final utterance through the same channel it uses
           // for partials, so clearing afterwards erased the text that had just
           // arrived and the transcript appeared to vanish.
           onPartialRef.current?.("");
-          if (trimmed) {
-            onUtteranceRef.current(trimmed);
+          if (!trimmed) {
+            if (!resolveProvider()) {
+              onErrorRef.current?.(
+                "No speech provider selected. Please select one in settings."
+              );
+            }
             return;
           }
-          if (!resolveProvider()) {
-            onErrorRef.current?.(
-              "No speech provider selected. Please select one in settings."
-            );
+          // Phase 4 R3: durable BEFORE the caller can hand this to the AI, and
+          // the queue awaits this callback, so the write really has completed
+          // first. A persistence failure is reported, never fatal.
+          try {
+            const store = await getTranscriptStore();
+            await store.addEvent({
+              source: "microphone",
+              kind: "final",
+              text: trimmed,
+            });
+          } catch (persistError) {
+            console.warn("Could not persist mic transcript event:", persistError);
           }
+          onUtteranceRef.current(trimmed);
         },
         onError: (error) => {
           console.error("Mic transcription failed:", error);
@@ -260,7 +274,28 @@ export const useVoiceInput = ({
           onErrorRef.current?.(messageOf(error));
         },
         onDeadLetter: (block, error) => {
-          // The audio stays in `queueRef.current.deadLetters`.
+          // The audio stays in `queueRef.current.deadLetters`, and R3 gives it a
+          // durable home: the raw f32 bytes go to `transcript_dead_letter_audio`
+          // so a provider outage costs a retry, not the speech.
+          void (async () => {
+            try {
+              const store = await getTranscriptStore();
+              const raw = new Uint8Array(
+                block.audio.buffer.slice(
+                  block.audio.byteOffset,
+                  block.audio.byteOffset + block.audio.byteLength
+                )
+              );
+              await store.addDeadLetter({
+                source: "microphone",
+                audio: raw,
+                attempts: block.attempts,
+                error: messageOf(error),
+              });
+            } catch (persistError) {
+              console.warn("Could not persist dead-letter audio:", persistError);
+            }
+          })();
           onErrorRef.current?.(
             `Microphone audio could not be transcribed after ${block.attempts} attempts: ${messageOf(error)}`
           );
