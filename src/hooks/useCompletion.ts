@@ -5,6 +5,11 @@ import { KnowledgeFile } from "@/types/system-audio";
 import { MAX_FILES } from "@/config";
 import { useApp } from "@/contexts";
 import {
+  captureOwnership,
+  mayMicrophoneRun,
+  type CaptureToken,
+} from "@/lib/capture-owner";
+import {
   fetchAIResponse,
   saveConversation,
   getConversationById,
@@ -816,36 +821,49 @@ export const useCompletion = (capturing: boolean = false) => {
   // room is on screen, and whatever the overlay is doing.
   //
   // Rust routes the "audio_recording" binding to `handle_audio_shortcut`, which
-  // emits "start-audio-recording". That is a different event from
-  // "toggle-system-audio", which belongs to the separate "system_audio" binding
-  // and drives Listen's capture — so listening here cannot disturb Listen.
+  // emits "start-audio-recording"; `useGlobalShortcuts` delivers that to the one
+  // callback registered near the bottom of this hook (`registerAudioCallback`).
+  // This hook used to also `listen` for the event directly, so a single press ran
+  // two handlers with different semantics (Phase 2A §C2) — that duplicate path is
+  // gone. Space and the action-row button flip the same intent flag.
   //
-  // The pair is deliberately not keyed the same way: Space is contextual (mic in
-  // Ask, system-audio capture in Listen), while this shortcut always means
-  // "toggle the microphone".
+  // Phase 4 R5: ownership — not intent — decides whether the mic may run. The
+  // reconcile effect below requests the capture token whenever this room wants
+  // the mic, and a refusal turns the intent straight back off, so a press during
+  // a Listen capture cannot start a second pipeline and cannot resurface later
+  // when Listen stops. `MicDriver` is driven by the gated flag (see the return
+  // below), so the VAD never runs without the token.
+  const micTokenRef = useRef<CaptureToken | null>(null);
+
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
+    if (!enableVAD) {
+      // The mic is off, so it holds nothing. Identity-checked: a token the system
+      // capture already preempted is a harmless no-op here.
+      captureOwnership.release(micTokenRef.current);
+      micTokenRef.current = null;
+      return;
+    }
 
-    const subscribe = async () => {
-      const off = await listen("start-audio-recording", () => {
-        setEnableVAD((prev) => !prev);
-        setMicOpen((prev) => !prev);
-      });
-      if (cancelled) {
-        off();
-        return;
-      }
-      unlisten = off;
-    };
+    const token = captureOwnership.request("microphone");
+    if (!token) {
+      console.warn(
+        "[mic] refused: the system-audio capture owns the microphone right now"
+      );
+      setEnableVAD(false);
+      setMicOpen(false);
+      return;
+    }
+    micTokenRef.current = token;
+  }, [enableVAD]);
 
-    void subscribe();
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
+  // An Ask room that goes away while its mic is on must not keep the token.
+  useEffect(
+    () => () => {
+      captureOwnership.release(micTokenRef.current);
+      micTokenRef.current = null;
+    },
+    []
+  );
 
   // Auto scroll to bottom when response updates
   useEffect(() => {
@@ -1079,7 +1097,10 @@ export const useCompletion = (capturing: boolean = false) => {
     cancel,
     reset,
     setState,
-    enableVAD,
+    // The gated flag: the room's intent AND the capture token. While a Listen
+    // capture owns the microphone this is false, so `MicDriver`/`AutoSpeechVAD`
+    // never drive the Ask VAD — the second pipeline cannot exist at all (R5).
+    enableVAD: mayMicrophoneRun(enableVAD),
     setEnableVAD,
     micTranscript,
     setMicTranscript,

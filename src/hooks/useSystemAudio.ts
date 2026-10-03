@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
+import { captureOwnership, type CaptureToken } from "@/lib/capture-owner";
 import { SpeechBlockQueue } from "@/lib/speech-block-queue";
 import { getTranscriptStore } from "@/lib/database/transcript-adapter";
 import {
@@ -307,6 +308,22 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // Keep the capture-state ref in step with the React state.
   useEffect(() => {
     capturingRef.current = capturing;
+  }, [capturing]);
+
+  // Phase 4 R5: the Listen capture is one of the two capture owners, and it owns
+  // the token for exactly as long as it captures. `take` (not `request`) because
+  // the product rule is explicit — a starting system-audio capture pauses the Ask
+  // mic, so a mic that is still holding on must not be able to refuse it. The
+  // release is identity-checked, so a stale token can never free a later owner,
+  // and it runs on both edges: the capture ending, and this hook unmounting.
+  const systemTokenRef = useRef<CaptureToken | null>(null);
+  useEffect(() => {
+    if (capturing) {
+      systemTokenRef.current = captureOwnership.take("system");
+      return;
+    }
+    captureOwnership.release(systemTokenRef.current);
+    systemTokenRef.current = null;
   }, [capturing]);
 
   // Load quick actions from localStorage on mount
@@ -632,7 +649,17 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     return speechQueueRef.current;
   };
 
-  useEffect(() => () => speechQueueRef.current?.dispose(), []);
+  // Disposed on unmount, and the capture token goes with it: a hook that
+  // disappears must not leave the app believing Listen still owns the
+  // microphone (Phase 4 R5).
+  useEffect(
+    () => () => {
+      speechQueueRef.current?.dispose();
+      captureOwnership.release(systemTokenRef.current);
+      systemTokenRef.current = null;
+    },
+    []
+  );
 
   // Handle single speech detection event (both VAD and continuous modes)
   useEffect(() => {
