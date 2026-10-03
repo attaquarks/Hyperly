@@ -151,13 +151,24 @@ export const AudioRecorder = ({
         (p) => p.id === selectedSttProvider.provider
       );
 
-      const text = await fetchSTT({
+      const result = await fetchSTT({
         provider,
         selectedProvider: selectedSttProvider,
         audio: audioBlob,
       });
 
-      onTranscriptionComplete(text);
+      // R4: only real speech is submitted. A failure is logged and the recorder
+      // closes (as a thrown error used to); it is never submitted as the user's
+      // message. This component has no error surface of its own — Listen and Ask
+      // both show provider errors in the UI.
+      if (result.status === "ok") {
+        onTranscriptionComplete(result.text);
+        return;
+      }
+      if (result.status === "error") {
+        console.error("Transcription failed:", result.message);
+      }
+      onCancel();
     } catch (error) {
       console.error("Transcription failed:", error);
       onCancel();

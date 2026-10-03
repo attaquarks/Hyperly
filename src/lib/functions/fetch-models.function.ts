@@ -1,7 +1,7 @@
 import curl2Json from "@bany/curl-to-json";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { MODEL_LIST_OVERRIDES } from "@/config";
-import { TYPE_PROVIDER } from "@/types";
+import type { TYPE_PROVIDER } from "@/types";
 import { deepVariableReplacer, getByPath } from "./common.function";
 
 export type FetchModelsResult =
@@ -82,8 +82,10 @@ export const fetchProviderModels = async (
   const idPath = override?.idPath ?? "id";
 
   try {
-    // Same fetch split as fetchAIResponse: plain fetch for http(s) URLs.
-    const fetchFunction = url.includes("http") ? fetch : tauriFetch;
+    // Same fetch split as fetchAIResponse: the Tauri client for http(s) URLs, so
+    // the request is issued from Rust and is not subject to the WebView's CORS
+    // enforcement (R4).
+    const fetchFunction = url.includes("http") ? tauriFetch : fetch;
     const response = await fetchFunction(url, { method: "GET", headers });
     if (!response.ok) {
       return {

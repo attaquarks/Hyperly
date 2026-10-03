@@ -568,13 +568,19 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           if (!providerConfig) {
             throw new Error("Speech provider config not found.");
           }
-          return withSttTimeout(
+          // R4: the queue's contract is "resolve with text, or throw to retry".
+          // A typed `error` becomes a throw, so a provider that used to answer
+          // with an error string is retried and then dead-lettered with its
+          // audio intact instead of being shown as speech.
+          const result = await withSttTimeout(
             fetchSTT({
               provider: providerConfig,
               selectedProvider: selected,
               audio: block.audio,
             })
           );
+          if (result.status === "error") throw new Error(result.message);
+          return result.status === "ok" ? result.text : "";
         },
         onText: async (text) => {
           if (!text.trim()) {
@@ -655,16 +661,20 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
               );
               if (!providerConfig) return;
 
+              // R4: a partial is best-effort. Only a real transcript is shown;
+              // an error/empty/cancelled result is ignored here (the final block
+              // path reports errors), so a provider hiccup can never inject error
+              // text into the live transcript.
               const partial = await fetchSTT({
                 provider: providerConfig,
                 selectedProvider: selectedSttProvider,
                 audio: audioBlob,
               });
 
-              if (partial && partial.trim()) {
-                setLivePartial(partial);
-                livePartialRef.current = partial;
-                upsertPartialSegment(partial);
+              if (partial.status === "ok" && partial.text.trim()) {
+                setLivePartial(partial.text);
+                livePartialRef.current = partial.text;
+                upsertPartialSegment(partial.text);
               }
             } catch (err) {
               // Swallow partial errors so they don't interrupt the recording.
