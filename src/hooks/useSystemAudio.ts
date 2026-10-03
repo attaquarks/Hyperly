@@ -22,7 +22,8 @@ import {
   generateMessageId,
   getConversationById,
 } from "@/lib";
-import { Message } from "@/types/completion";
+import { AiTurnGate } from "@/lib/ai-turn";
+import { chronological } from "@/lib/message-order";
 import {
   CaptureBehavior,
   KnowledgeFile,
@@ -247,7 +248,19 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     systemPrompt,
     selectedAudioDevices,
   } = useApp();
-  const abortControllerRef = useRef<AbortController | null>(null);
+  /**
+   * One in-flight AI turn per session (Phase 4 R6, issue #19). The gate owns the
+   * AbortController, so the signal that reaches `fetchAIResponse` is exactly the
+   * one Stop aborts, and an answer may only be recorded while its turn is still
+   * the current one.
+   */
+  const aiTurnsRef = useRef<AiTurnGate | null>(null);
+  const getAiTurns = (): AiTurnGate => {
+    if (!aiTurnsRef.current) {
+      aiTurnsRef.current = new AiTurnGate();
+    }
+    return aiTurnsRef.current;
+  };
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSavingRef = useRef<boolean>(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -561,11 +574,12 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         listenModeRef.current
       );
 
-      const previousMessages = (conversation.messages ?? []).map((msg) => {
-        return { role: msg.role, content: msg.content };
-      });
-
-      await processWithAI(plan.text, effectiveSystemPrompt, previousMessages);
+      // The stored messages go to the boundary as-is; it orders them once (R6).
+      await processWithAI(
+        plan.text,
+        effectiveSystemPrompt,
+        conversation.messages ?? []
+      );
     };
   });
 
@@ -896,11 +910,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       }
     }
 
-    const previousMessages = updatedMessages.map((msg) => {
-      return { role: msg.role, content: msg.content };
-    });
-
-    await processWithAI(action, effectiveSystemPrompt, previousMessages);
+    // The stored messages go to the boundary as-is; it orders them once (R6).
+    await processWithAI(action, effectiveSystemPrompt, updatedMessages);
   };
 
   // Start continuous recording manually
@@ -949,7 +960,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // After each answer, ask the provider for a few conversation-specific
   // follow-ups. Failures are silent — the four fixed chips always remain.
   const generateFollowUps = useCallback(
-    async (userText: string, assistantText: string) => {
+    async (userText: string, assistantText: string, signal?: AbortSignal) => {
       if (!selectedAIProvider.provider) return;
       const provider = allAiProviders.find(
         (p) => p.id === selectedAIProvider.provider
@@ -965,6 +976,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             "You suggest short follow-up prompts for an ongoing conversation. Reply with one suggestion per line, no numbering, no bullets, at most 8 words each.",
           history: [],
           userMessage: `Conversation excerpt:\nThem: ${userText}\nYou: ${assistantText}\n\nSuggest 3 follow-ups the user might ask next.`,
+          // Abandoned with the turn it belongs to (R6), so a stopped answer does
+          // not keep a request running behind it.
+          signal,
         })) {
           out += chunk;
         }
@@ -986,13 +1000,13 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     async (
       transcription: string,
       prompt: string,
-      previousMessages: Message[]
+      priorMessages: ChatMessage[]
     ) => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-
-      abortControllerRef.current = new AbortController();
+      // R6: one in-flight turn per session. `begin()` supersedes (and cancels) a
+      // turn that is still streaming, so two answers can no longer interleave;
+      // its signal is what Stop aborts, and `mayPublish` is what refuses a
+      // partial answer.
+      const turn = getAiTurns().begin();
 
       try {
         setIsAIProcessing(true);
@@ -1026,21 +1040,41 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           ? `${prompt}\n\nKnowledge from "${knowledge.name}":\n${knowledge.text}`
           : prompt;
 
+        // R6: order once, at the boundary. The session stores messages
+        // newest-first (and the quick-action path pushes onto the end of that
+        // array), so project them from their timestamps here - the same order a
+        // reload produces (`chat-history.action.ts` reads ORDER BY timestamp ASC).
+        const history = chronological(priorMessages).map(({ role, content }) => ({
+          role,
+          content,
+        }));
+
         try {
           for await (const chunk of fetchAIResponse({
             provider,
             selectedProvider: selectedAIProvider,
             systemPrompt: promptWithKnowledge,
-            history: previousMessages,
+            history,
             userMessage: transcription,
             imagesBase64: screenshotForThisCall ? [screenshotForThisCall] : [],
+            // The signal Stop aborts. Without it the request kept streaming and
+            // Stop was a no-op for anything already in flight (R6).
+            signal: turn.signal,
           })) {
+            // A superseded or stopped turn must not keep writing into the UI.
+            if (!turn.isCurrent()) break;
             fullResponse += chunk;
             setLastAIResponse((prev) => prev + chunk);
           }
         } catch (aiError: any) {
+          // An aborted turn is not an error to show: stopping is a user action.
+          if (!turn.isCurrent()) return;
           setError(aiError.message || "Failed to get AI response");
         }
+
+        // R6: never record a partial answer. A stopped or superseded turn has no
+        // answer to publish, and this is exactly where the old code wrote one.
+        if (!getAiTurns().mayPublish(turn)) return;
 
         if (fullResponse) {
           const timestamp = Date.now();
@@ -1064,7 +1098,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             updatedAt: timestamp,
             title: prev.title || generateConversationTitle(transcription),
           }));
-          void generateFollowUps(transcription, fullResponse);
+          void generateFollowUps(transcription, fullResponse, turn.signal);
           // Phase 4 R3: the answer is an event too - the conversation list is a
           // projection of the event log, and this is what makes a reloaded
           // session show its answers even before the conversation is saved.
@@ -1083,9 +1117,15 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           })();
         }
       } catch (err) {
-        setError("Failed to get AI response");
+        if (turn.isCurrent()) setError("Failed to get AI response");
       } finally {
-        setIsAIProcessing(false);
+        // Only the current turn may clear the processing state: a superseded
+        // turn finishing must not switch off the newer turn's spinner.
+        const wasCurrent = turn.isCurrent();
+        getAiTurns().finish(turn.id);
+        if (wasCurrent) {
+          setIsAIProcessing(false);
+        }
         // No auto-restart - user manually controls when to start next recording
       }
     },
@@ -1130,11 +1170,12 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         listenModeRef.current
       );
 
-      const previousMessages = (conversation.messages ?? []).map((msg) => {
-        return { role: msg.role, content: msg.content };
-      });
-
-      await processWithAI(outbound, effectiveSystemPrompt, previousMessages);
+      // The stored messages go to the boundary as-is; it orders them once (R6).
+      await processWithAI(
+        outbound,
+        effectiveSystemPrompt,
+        conversation.messages ?? []
+      );
     },
     [systemPrompt, contextContent, conversation.messages, processWithAI]
   );
@@ -1186,15 +1227,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         listenModeRef.current
       );
 
-      const previousMessages = (conversation.messages ?? []).map((msg) => ({
-        role: msg.role,
-        content: msg.content,
-      }));
-
       await processWithAI(
         `User (microphone): ${plan.text}`,
         effectiveSystemPrompt,
-        previousMessages
+        conversation.messages ?? []
       );
     },
     [
@@ -1316,11 +1352,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
 
   const stopCapture = useCallback(async () => {
     try {
-      // Abort any ongoing AI requests
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
+      // Stop anything still streaming mid-answer. This used to abort a
+      // controller whose signal never reached the request, so Stop was a no-op
+      // for anything already in flight (R6).
+      getAiTurns().cancel();
 
       // Stop the audio capture
       await invoke<string>("stop_system_audio_capture");
@@ -1428,9 +1463,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
 
   useEffect(() => {
     return () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
+      getAiTurns().cancel();
       invoke("stop_system_audio_capture").catch(() => {});
     };
   }, []);
