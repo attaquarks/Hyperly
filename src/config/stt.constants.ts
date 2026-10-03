@@ -1,3 +1,18 @@
+/**
+ * Built-in speech-to-text providers.
+ *
+ * Contract notes (Phase 4 R4, issue #17):
+ *
+ * - `curl` is parsed with curl2json. In a form (`-F`) provider, the field whose
+ *   value is exactly `{{AUDIO}}` is the one that receives the audio blob —
+ *   `file` for OpenAI/Groq/ElevenLabs, `data_file` for Speechmatics, `media`
+ *   for Rev.ai. It must not be sent as the literal placeholder text.
+ * - `responseContentPath` is matched against the JSON body **case-sensitively**
+ *   (`getByPath`), so Azure's `DisplayText` must stay capitalised.
+ * - `jobBased: true` marks endpoints that create an asynchronous job and answer
+ *   with an id. A single request cannot transcribe them, so `fetchSTT` reports
+ *   that instead of returning the id as a transcript.
+ */
 export const SPEECH_TO_TEXT_PROVIDERS = [
   {
     id: "openai-whisper",
@@ -69,6 +84,9 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -H "Ocp-Apim-Subscription-Key: {{API_KEY}}" \\
       -H "Content-Type: audio/wav" \\
       --data-binary {{AUDIO}}`,
+    // Case-sensitive: the conversation endpoint returns `DisplayText` exactly.
+    // Lower-casing the first character (the old behaviour) made this path always
+    // resolve to undefined, so Azure could never produce a transcript (R4).
     responseContentPath: "DisplayText",
     streaming: false,
   },
@@ -79,7 +97,10 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -H "Authorization: Bearer {{API_KEY}}" \\
       -F "data_file={{AUDIO}}" \\
       -F 'config={"type": "transcription", "transcription_config": {"language": "en"}}'`,
-    responseContentPath: "job.id",
+    // The response is `{ "job": { "id": … } }` — a job handle, not text. It
+    // cannot be transcribed by one request, so the provider is flagged rather
+    // than returning the id to the caller as speech (R4).
+    jobBased: true,
     streaming: false,
   },
   {
@@ -89,7 +110,9 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -H "Authorization: Bearer {{API_KEY}}" \\
       -F "media={{AUDIO}}" \\
       -F "options={{OPTIONS}}"`,
-    responseContentPath: "id",
+    // The response is `{ "id": … }` — a job handle, same shape of problem as
+    // Speechmatics above (R4).
+    jobBased: true,
     streaming: false,
   },
   {

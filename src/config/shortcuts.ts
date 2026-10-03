@@ -1,4 +1,4 @@
-import { ShortcutAction } from "@/types";
+import type { ShortcutAction } from "@/types";
 
 export const DEFAULT_SHORTCUT_ACTIONS: ShortcutAction[] = [
   {

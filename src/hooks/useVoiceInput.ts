@@ -215,15 +215,30 @@ export const useVoiceInput = ({
         null
       : null;
 
-  /** Transcribe a buffer, or return "" when no provider is configured. */
+  /**
+   * Transcribe a buffer into the queue's `string` contract (R4). `fetchSTT`
+   * returns a typed `SttResult`; the queue's contract is "resolve with text, or
+   * throw to retry", so a provider error is thrown — the queue retries it and
+   * dead-letters it with its audio intact. `empty` (silence) and `cancelled`
+   * resolve as "" and are never delivered as speech.
+   */
   const transcribe = async (audio: Float32Array): Promise<string> => {
     const provider = resolveProvider();
     if (!provider) return "";
-    return fetchSTT({
+    const result = await fetchSTT({
       provider,
       selectedProvider: providerRef.current,
       audio: floatArrayToWav(audio, 16000, "wav"),
     });
+    switch (result.status) {
+      case "ok":
+        return result.text;
+      case "error":
+        throw new Error(result.message);
+      case "empty":
+      case "cancelled":
+        return "";
+    }
   };
 
   /**

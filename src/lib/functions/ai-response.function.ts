@@ -4,12 +4,17 @@ import {
   extractVariables,
   getByPath,
   getStreamingContent,
-} from "./common.function";
-import { Message, TYPE_PROVIDER } from "@/types";
+} from "./common.function.ts";
+import type { Message, TYPE_PROVIDER } from "@/types";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import curl2Json from "@bany/curl-to-json";
-import { getResponseSettings, RESPONSE_LENGTHS, LANGUAGES, composeSystemPromptWithContext } from "@/lib";
-import { MARKDOWN_FORMATTING_INSTRUCTIONS } from "@/config/constants";
+// Imported from the modules that define them rather than the `@/lib` barrel:
+// this is a low-level request module, and the barrel drags the whole app
+// (database, analytics, contexts) into its graph for four small helpers.
+import { getResponseSettings } from "../storage/response-settings.storage.ts";
+import { composeSystemPromptWithContext } from "../storage/personal-context.storage.ts";
+import { RESPONSE_LENGTHS, LANGUAGES } from "../response-settings.constants.ts";
+import { MARKDOWN_FORMATTING_INSTRUCTIONS } from "../../config/constants.ts";
 
 function buildEnhancedSystemPrompt(baseSystemPrompt?: string): string {
   const responseSettings = getResponseSettings();
@@ -55,6 +60,12 @@ export async function* fetchAIResponse(params: {
   userMessage: string;
   imagesBase64?: string[];
   signal?: AbortSignal;
+  /**
+   * The HTTP client to use. Defaults to the Tauri client for http(s) URLs (see
+   * the fetch-selection note below); injectable so the check script can drive
+   * the real streaming and error handling with no network.
+   */
+  fetchImpl?: typeof globalThis.fetch;
 }): AsyncIterable<string> {
   try {
     const {
@@ -65,6 +76,7 @@ export async function* fetchAIResponse(params: {
       userMessage,
       imagesBase64 = [],
       signal,
+      fetchImpl,
     } = params;
 
     // Check if already aborted
@@ -162,7 +174,14 @@ export async function* fetchAIResponse(params: {
       }
     }
 
-    const fetchFunction = url?.includes("http") ? fetch : tauriFetch;
+    // The Tauri HTTP client runs the request in Rust, outside the WebView's CORS
+    // enforcement. The old ternary (`url.includes("http") ? fetch : tauriFetch`)
+    // sent every real provider URL (all https://) through the browser client
+    // instead, so the granted `http:default` capability went unused and the
+    // calls were subject to CORS (R4). Streaming is unaffected: the plugin
+    // exposes the body as a `ReadableStream`.
+    const fetchFunction =
+      fetchImpl ?? (url?.includes("http") ? tauriFetch : fetch);
 
     let response;
     try {
@@ -180,10 +199,14 @@ export async function* fetchAIResponse(params: {
       ) {
         return; // Silently return on abort
       }
-      yield `Network error during API request: ${
-        fetchError instanceof Error ? fetchError.message : "Unknown error"
-      }`;
-      return;
+      // THROW, never yield. An error string in the content stream is
+      // indistinguishable from a token, so every caller concatenated it into the
+      // assistant's answer, persisted it, and re-sent it as history (R4).
+      throw new Error(
+        `Network error during API request: ${
+          fetchError instanceof Error ? fetchError.message : "Unknown error"
+        }`
+      );
     }
 
     if (!response.ok) {
@@ -191,10 +214,11 @@ export async function* fetchAIResponse(params: {
       try {
         errorText = await response.text();
       } catch {}
-      yield `API request failed: ${response.status} ${response.statusText}${
-        errorText ? ` - ${errorText}` : ""
-      }`;
-      return;
+      throw new Error(
+        `API request failed: ${response.status} ${response.statusText}${
+          errorText ? ` - ${errorText}` : ""
+        }`
+      );
     }
 
     if (!provider?.streaming) {
@@ -202,10 +226,11 @@ export async function* fetchAIResponse(params: {
       try {
         json = await response.json();
       } catch (parseError) {
-        yield `Failed to parse non-streaming response: ${
-          parseError instanceof Error ? parseError.message : "Unknown error"
-        }`;
-        return;
+        throw new Error(
+          `Failed to parse non-streaming response: ${
+            parseError instanceof Error ? parseError.message : "Unknown error"
+          }`
+        );
       }
       const content =
         getByPath(json, provider?.responseContentPath || "") || "";
@@ -214,8 +239,7 @@ export async function* fetchAIResponse(params: {
     }
 
     if (!response.body) {
-      yield "Streaming not supported or response body missing";
-      return;
+      throw new Error("Streaming not supported or response body missing");
     }
 
     const reader = response.body.getReader();
@@ -240,10 +264,11 @@ export async function* fetchAIResponse(params: {
         ) {
           return; // Silently return on abort
         }
-        yield `Error reading stream: ${
-          readError instanceof Error ? readError.message : "Unknown error"
-        }`;
-        return;
+        throw new Error(
+          `Error reading stream: ${
+            readError instanceof Error ? readError.message : "Unknown error"
+          }`
+        );
       }
       const { done, value } = readResult;
       if (done) break;
