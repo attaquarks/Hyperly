@@ -77,21 +77,36 @@ export function generateConversationId(
 }
 
 /**
+ * Per-process sequence for message ids.
+ *
+ * Two messages created in the same millisecond with the same role used to produce
+ * the SAME id (`msg_{timestamp}_{role}`), and `messages.id` is a PRIMARY KEY — a
+ * collision aborted the whole conversation save at every layer (Phase 4 R9,
+ * issue #21). The sequence makes every id unique within a process, which is the
+ * only window in which ids are ever minted.
+ */
+let messageSequence = 0;
+
+/**
  * Generate a unique message ID
  *
  * @param role - The role of the message ('user', 'assistant', or 'system')
  * @param timestamp - Optional timestamp (defaults to Date.now())
- * @returns A unique message ID in the format: msg_{timestamp}_{role}
+ * @returns A unique message ID in the format: msg_{timestamp}_{sequence}_{role}
  *
  * Examples:
- * - msg_1696291234567_user
- * - msg_1696291234568_assistant
+ * - msg_1696291234567_1_user
+ * - msg_1696291234567_2_assistant
+ *
+ * The sequence is what makes the id collision-free: callers legitimately mint
+ * several messages in one millisecond, and `messages.id` is a PRIMARY KEY.
  */
 export function generateMessageId(
   role: "user" | "assistant" | "system",
   timestamp: number = Date.now()
 ): string {
-  return `msg_${timestamp}_${role}`;
+  messageSequence += 1;
+  return `msg_${timestamp}_${messageSequence}_${role}`;
 }
 
 /**
@@ -126,5 +141,7 @@ export function isValidConversationId(id: string): boolean {
  * @returns true if the ID matches the expected format
  */
 export function isValidMessageId(id: string): boolean {
-  return /^msg_\d+_(user|assistant|system)$/.test(id);
+  // The sequence component is optional so ids minted before R9 - which are still
+  // stored in users' databases and keep their ids - continue to validate.
+  return /^msg_\d+_(?:\d+_)?(user|assistant|system)$/.test(id);
 }
