@@ -24,6 +24,7 @@ import {
 } from "@/lib";
 import { AiTurnGate } from "@/lib/ai-turn";
 import { chronological } from "@/lib/message-order";
+import { PendingSave } from "@/lib/pending-save";
 import {
   CaptureBehavior,
   KnowledgeFile,
@@ -261,8 +262,28 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     }
     return aiTurnsRef.current;
   };
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const isSavingRef = useRef<boolean>(false);
+  /**
+   * The debounced conversation save (Phase 4 R9). Coalescing and never-dropping:
+   * a change arriving while a save is in flight is written afterwards, and unmount
+   * flushes instead of clearing the timer. The old `saveTimeoutRef` + `isSavingRef`
+   * pair lost the newest answer in exactly those two windows.
+   */
+  const pendingSaveRef = useRef<PendingSave<ChatConversation> | null>(null);
+  const getPendingSave = (): PendingSave<ChatConversation> => {
+    if (!pendingSaveRef.current) {
+      pendingSaveRef.current = new PendingSave<ChatConversation>({
+        // Exactly what R6 decided is publishable is what is written: this path
+        // never inspects or rewrites the answer (R9).
+        save: async (state) => {
+          await saveConversation(state);
+        },
+        delayMs: CONVERSATION_SAVE_DEBOUNCE_MS,
+        onError: (error) =>
+          console.error("Failed to save system audio conversation:", error),
+      });
+    }
+    return pendingSaveRef.current;
+  };
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   // Load context settings and VAD config from localStorage on mount
@@ -1468,14 +1489,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     };
   }, []);
 
-  // Debounced save to prevent race conditions and improve performance
+  // Debounced save (Phase 4 R9): coalescing, and it never drops the newest state.
   useEffect(() => {
-    // Clear any pending save
-    if (saveTimeoutRef.current) {
-      clearTimeout(saveTimeoutRef.current);
-    }
-
-    // Only debounce if there are messages to save
     if (
       !conversation.id ||
       conversation.updatedAt === 0 ||
@@ -1483,36 +1498,22 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     ) {
       return;
     }
-
-    // Debounce saves (only save 500ms after last change)
-    saveTimeoutRef.current = setTimeout(async () => {
-      // Don't save if already saving (prevent concurrent saves)
-      if (isSavingRef.current) {
-        return;
-      }
-
-      try {
-        isSavingRef.current = true;
-        await saveConversation(conversation);
-      } catch (error) {
-        console.error("Failed to save system audio conversation:", error);
-      } finally {
-        isSavingRef.current = false;
-      }
-    }, CONVERSATION_SAVE_DEBOUNCE_MS);
-
-    // Cleanup on unmount or dependency change
-    return () => {
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
-      }
-    };
+    getPendingSave().schedule(conversation);
   }, [
     conversation.messages?.length ?? 0,
     conversation.title,
     conversation.id,
     conversation.updatedAt,
   ]);
+
+  // Unmount: write what is still pending. Clearing the timer (the old behaviour)
+  // silently discarded the last change before teardown.
+  useEffect(
+    () => () => {
+      void getPendingSave().flush();
+    },
+    []
+  );
 
   const startNewConversation = useCallback(() => {
     setConversation({

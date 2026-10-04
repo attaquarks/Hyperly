@@ -35,6 +35,25 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/transcript-events.down.sql"),
             kind: MigrationKind::Down,
         },
+        // Migration 4: make conversations.updated_at monotonic (Phase 4 R9).
+        // Migration 2's trigger sets updated_at = NEW.timestamp per inserted
+        // message, and Listen inserts newest-first, so the key ended up holding
+        // the OLDEST message's time. This re-creates the same two triggers with
+        // `max(updated_at, NEW.timestamp)`. It touches no table and no row - only
+        // the triggers - so existing conversations, messages and their ids are
+        // untouched, and the Down entry restores the migration-2 bodies.
+        Migration {
+            version: 4,
+            description: "monotonic_conversation_timestamp",
+            sql: include_str!("migrations/conversation-timestamp.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 4,
+            description: "restore_conversation_timestamp",
+            sql: include_str!("migrations/conversation-timestamp.down.sql"),
+            kind: MigrationKind::Down,
+        },
     ]
 }
 
