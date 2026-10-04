@@ -45,6 +45,17 @@ const App = () => {
     capturingRef.current = !!systemAudio?.capturing;
   }, [systemAudio?.capturing]);
 
+  // Mirror of the visible room for the trigger-screenshot mapping below. A
+  // screenshot taken on Listen used to be silently routed to Ask: the
+  // `modeForEvent` listeners below are registered once and their callbacks
+  // close over the mount-time mode, so a static "ask" entry fires for the
+  // wrong room. Reading `modeRef.current` at fire time attaches the shot to
+  // the room that is actually visible (D7).
+  const modeRef = useRef(mode);
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
   // Global-shortcut events pull the overlay onto the tab they act on, so a
   // shortcut fired while the other tab is active never takes effect
   // invisibly: the mic and the screenshot flow are Ask-side actions, and the
@@ -56,7 +67,6 @@ const App = () => {
   useEffect(() => {
     const modeForEvent: Array<[string, OverlayMode]> = [
       ["start-audio-recording", "ask"],
-      ["trigger-screenshot", "ask"],
       ["toggle-system-audio", "listen"],
       ["focus-text-input", "ask"],
     ];
@@ -64,6 +74,18 @@ const App = () => {
       listen(event, () => {
         if (event === "focus-text-input" && capturingRef.current) return;
         setMode(nextMode);
+      })
+    );
+    // D7: the screenshot goes to whichever room is visible at FIRE time —
+    // Listen's action row feeds its own pending-screenshot path, so routing
+    // here to a hardcoded "ask" (the old static-array entry) silently
+    // attached Listen shots to Ask. `modeRef.current` is read inside the
+    // callback, not in the effect body, so a room switch after mount is
+    // honoured. Default to Ask only when neither room is up (mode is always
+    // one of the two, so this branch is Ask <=> Listen).
+    unlistens.push(
+      listen("trigger-screenshot", () => {
+        setMode(modeRef.current === "listen" ? "listen" : "ask");
       })
     );
     return () => {
