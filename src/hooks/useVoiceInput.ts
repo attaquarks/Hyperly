@@ -7,6 +7,8 @@ import { floatArrayToWav } from "@/lib/utils";
 import { readStoredVadConfig } from "@/lib/vad-config";
 import { getMicrophoneStream } from "@/lib/microphone";
 import { micRedemptionMs } from "@/lib/turn-boundary";
+import { audioContextPool } from "@/lib/audio-context";
+import { speechThresholds } from "@/lib/vad-sensitivity";
 import { useApp } from "@/contexts";
 
 /**
@@ -49,6 +51,13 @@ import { useApp } from "@/contexts";
 export interface VoiceInputOptions {
   /** Desired on/off state; the VAD is started and paused to follow it. */
   active: boolean;
+  /**
+   * Voice sensitivity, 0.0-1.0 (Phase 4 R11). Read when the VAD is built and
+   * applied to the LIVE detector with `setOptions` when it changes, so a slider
+   * step re-tunes the running VAD instead of rebuilding it and cycling an
+   * AudioContext. Falls back to the stored value when omitted.
+   */
+  sensitivity?: number;
   /** Live partial transcript while the user is still speaking. */
   onPartial?: (text: string) => void;
   /** A finalized utterance, already transcribed. */
@@ -69,26 +78,8 @@ const PARTIAL_INTERVAL_MS = 2000;
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-/**
- * Map 0-1 voice sensitivity onto vad-web's speech thresholds.
- *
- * Higher sensitivity lowers the bar for calling a frame speech. At the 0.5
- * default this gives positive 0.5 / negative 0.35, which is the behaviour this
- * app has always had — the formula is unchanged.
- *
- * Note these are not vad-web's own defaults: its frame processor ships 0.3 and
- * 0.25, so the middle of the slider is stricter than the library. The clamps
- * only guard the ends: at 0 no normal speech would clear the bar, and at 1
- * every breath would.
- */
-const speechThresholds = (voiceSensitivity: number) => {
-  const sensitivity = Math.min(1, Math.max(0, voiceSensitivity));
-  const positive = Math.min(0.9, Math.max(0.15, 1 - sensitivity));
-  return {
-    positiveSpeechThreshold: positive,
-    negativeSpeechThreshold: Math.max(0.1, positive - 0.15),
-  };
-};
+// The sensitivity-to-threshold mapping now lives in `@/lib/vad-sensitivity`
+// (imported above), so the check script drives the real one — Phase 4 R11.
 
 /**
  * Tear an instance down without letting teardown throw or leak.
@@ -136,6 +127,7 @@ const concatFrames = (frames: Float32Array[]): Float32Array => {
 
 export const useVoiceInput = ({
   active,
+  sensitivity,
   onPartial,
   onUtterance,
   onError,
@@ -193,6 +185,13 @@ export const useVoiceInput = ({
   // error to explain it, in every room that shares this hook. Owning the context
   // here is what lets us resume it as part of starting.
   const audioContextRef = useRef<AudioContext | null>(null);
+  /**
+   * The sensitivity this instance builds and re-tunes with (Phase 4 R11).
+   * Consumers that read `useVoiceSensitivity` pass it in; anything else falls
+   * back to the stored value, exactly as before.
+   */
+  const resolveSensitivity = (): number =>
+    sensitivity ?? readStoredVadConfig().voice_sensitivity;
 
   const framesRef = useRef<Float32Array[]>([]);
   const accumulatingRef = useRef(false);
@@ -364,16 +363,19 @@ export const useVoiceInput = ({
     // synchronously, and passed in so vad-web adopts ours instead of making its
     // own unreachable one. A context created before the user's gesture starts
     // suspended — the start path resumes it.
-    const audioContext = new AudioContext();
+    // Phase 4 R11: the context comes from the pool, which creates it on first use
+    // and hands the same one to every later holder. It is no longer built and
+    // closed per mount, so a remount reuses it instead of cycling a hardware
+    // context — Chromium caps live contexts, and an eviction would take the other
+    // room's mic down with it.
+    const audioContext = audioContextPool.acquire();
     audioContextRef.current = audioContext;
     console.info(
       `[voice] audio context created: state="${audioContext.state}", ` +
         `sampleRate=${audioContext.sampleRate}`
     );
 
-    const thresholds = speechThresholds(
-      readStoredVadConfig().voice_sensitivity
-    );
+    const thresholds = speechThresholds(resolveSensitivity());
 
     const setup = async () => {
       let vad: MicVAD;
@@ -505,17 +507,30 @@ export const useVoiceInput = ({
       vadRef.current = null;
       if (vad) void safeDestroy(vad);
       // We supplied the context, so vad-web's own close — guarded by
-      // `ownsAudioContext` — never runs. Closing it here is what stops a
-      // remount (device or sensitivity change) from leaking one per switch.
-      const context = audioContextRef.current;
+      // `ownsAudioContext` — never runs. The pool owns the close now (Phase 4
+      // R11): it closes only when the LAST holder releases, so this instance
+      // going away cannot close a context the other room is still using.
       audioContextRef.current = null;
-      if (context && context.state !== "closed") void context.close();
+      audioContextPool.release();
     };
 
     // `micDeviceId`/`micDeviceName` are the inputs to `acquire`, so they are
     // this effect's identity — a device rename must rebuild the VAD too.
     // `resetAccumulator` is stable.
   }, [micDeviceId, micDeviceName, resetAccumulator]);
+
+  // Phase 4 R11: re-tune the live VAD in place. A sensitivity change used to
+  // remount the whole hook (the consumer keyed on `deviceId:sensitivity`), which
+  // built a second AudioContext and tore the device stream down and back up.
+  // `setOptions` updates the frame processor's thresholds on the running
+  // detector, so the slider applies with no context and no stream churn. It
+  // depends on `ready` so a change made while the model was still loading is
+  // applied as soon as the instance exists.
+  useEffect(() => {
+    const vad = vadRef.current;
+    if (!vad) return;
+    vad.setOptions(speechThresholds(resolveSensitivity()));
+  }, [sensitivity, ready]);
 
   // Apply `active` to the instance, but only once it exists. This depends on
   // `ready` as well as `active` so that a start requested during model load is

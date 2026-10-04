@@ -185,8 +185,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
       >
         <Suspense fallback={null}>
           <ListenUserMic
-            key={`${selectedAudioDevices.input?.id ?? "default"}:${voiceSensitivity}`}
+            key={selectedAudioDevices.input?.id ?? "default"}
             capturing={capturing && micWithSystem}
+            sensitivity={voiceSensitivity}
             onPartial={setUserMicPartial}
             onUtterance={submitUserUtterance}
             onError={setError}

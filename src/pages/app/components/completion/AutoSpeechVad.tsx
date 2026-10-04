@@ -5,7 +5,14 @@ import { useEffect, useRef } from "react";
 type Props = Pick<
   UseCompletionReturn,
   "submit" | "setState" | "enableVAD" | "setMicTranscript"
->;
+> & {
+  /**
+   * Voice sensitivity, 0.0-1.0. `useVoiceInput` reads it when it builds the VAD
+   * and applies later changes to the live detector with `setOptions`, so a slider
+   * step no longer remounts this component (Phase 4 R11).
+   */
+  sensitivity?: number;
+};
 
 /**
  * Headless mic for the Ask room: renders nothing, and everything said while the
@@ -27,12 +34,14 @@ export const AutoSpeechVAD = ({
   setState,
   enableVAD,
   setMicTranscript,
+  sensitivity,
 }: Props) => {
   // Everything said during one hold, joined in order on release.
   const bufferRef = useRef<string[]>([]);
 
   useVoiceInput({
     active: enableVAD,
+    sensitivity,
     onPartial: setMicTranscript,
     onUtterance: (text) => {
       // Accumulate only. The live strip still shows the newest utterance so the

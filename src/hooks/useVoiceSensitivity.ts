@@ -12,10 +12,11 @@ import { readStoredVadConfig } from "@/lib/vad-config";
  * The Audio Settings page runs in the dashboard window, so a change made there
  * arrives here as a `storage` event rather than as shared React state.
  *
- * Consumers must include the returned value in their mic's remount key:
- * `useVoiceInput` reads the sensitivity when it builds its VAD and rebuilds it
- * only when the microphone id changes, so re-keying is what applies a new
- * threshold.
+ * Consumers pass the returned value to `useVoiceInput` as `sensitivity` (Phase 4
+ * R11). It is read when the VAD is built and applied to the LIVE detector with
+ * `MicVAD.setOptions` when it changes. Do NOT re-key a mic on it: re-keying
+ * remounts the VAD, which cycles an AudioContext and rebuilds the device stream
+ * for what is only a threshold change.
  */
 export const useVoiceSensitivity = (): number => {
   const [sensitivity, setSensitivity] = useState(

@@ -25,9 +25,12 @@ type Props = Pick<
  * the device changes, so without a remount a device switch would keep recording
  * from the old one.
  *
- * The sensitivity is in the key for the same reason: it sets the VAD's
- * detection thresholds at build time, so a slider change only takes effect
- * through a remount.
+ * The sensitivity is NOT in the key (Phase 4 R11). It is passed as a prop and
+ * applied to the live VAD with `MicVAD.setOptions`, so a slider step re-tunes the
+ * running detector instead of remounting it. Keeping it in the key meant one
+ * remount per slider step, and each remount cycled an AudioContext and rebuilt the
+ * physical device stream — Chromium caps live contexts, so sustained churn could
+ * evict a context from under the other room's mic.
  */
 export const MicDriver = (props: Props) => {
   const { selectedAudioDevices } = useApp();
@@ -36,7 +39,11 @@ export const MicDriver = (props: Props) => {
 
   return (
     <Suspense fallback={null}>
-      <AutoSpeechVAD key={`${deviceId ?? "default"}:${sensitivity}`} {...props} />
+      <AutoSpeechVAD
+        key={deviceId ?? "default"}
+        sensitivity={sensitivity}
+        {...props}
+      />
     </Suspense>
   );
 };
