@@ -519,12 +519,11 @@ async fn run_continuous_capture(
         stop_flag_for_listener.store(true, Ordering::Release);
     });
 
-    // Emit recording started
-    let _ = app.emit(
-        "continuous-recording-start",
-        config.max_recording_duration_secs,
-    );
-
+    // Phase 4 cleanup: `continuous-recording-start`, `recording-progress` and
+    // `continuous-recording-stopped` are no longer emitted. Their only
+    // listeners went away with the vestigial continuous-mode frontend path, so
+    // nothing in the app could observe them. `manual-stop-continuous` (below)
+    // and `speech-partial` are still live.
     // Accumulate audio - check stop flag on EVERY sample for immediate response
     loop {
         // Check stop flag FIRST on every iteration for immediate stopping
@@ -544,10 +543,8 @@ async fn run_continuous_capture(
 
                         let elapsed = start_time.elapsed();
 
-                        // Emit progress every second
+                        // Partial-transcript cadence, once per second of audio
                         if audio_buffer.len() % (sr as usize) == 0 {
-                            let _ = app.emit("recording-progress", elapsed.as_secs());
-
                             // Emit a partial transcript roughly every 2 seconds so the UI can
                             // show a real-time running transcript while the user is still talking.
                             // We only do this once we have at least 2 seconds of audio so the
@@ -614,8 +611,6 @@ async fn run_continuous_capture(
         warn!("No audio captured in continuous mode");
         let _ = app.emit("audio-encoding-error", "No audio recorded");
     }
-
-    let _ = app.emit("continuous-recording-stopped", ());
 }
 
 // Apply noise gate

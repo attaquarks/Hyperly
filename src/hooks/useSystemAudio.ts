@@ -118,7 +118,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   const [isManagingQuickActions, setIsManagingQuickActions] =
     useState<boolean>(false);
   const [vadConfig, setVadConfig] = useState<VadConfig>(DEFAULT_VAD_CONFIG);
-  const [recordingProgress, setRecordingProgress] = useState<number>(0); // For continuous mode
   // Live, growing transcript shown while audio is still being captured. Each "speech-partial"
   // event from the Rust side yields an STT result that is appended here so the user can see the
   // running text. When they hit Stop & Send, the final canonical transcript replaces this.
@@ -226,9 +225,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       // A storage failure only costs the persisted preference.
     }
   }, []);
-  const [isContinuousMode, setIsContinuousMode] = useState<boolean>(false);
-  const [isRecordingInContinuousMode, setIsRecordingInContinuousMode] =
-    useState<boolean>(false);
 
   const [conversation, setConversation] = useState<ChatConversation>({
     id: "",
@@ -379,34 +375,16 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     }
   }, []);
 
-  // Handle continuous recording progress events AND error events
+  // Handle capture error events. Phase 4 cleanup: the `recording-progress`,
+  // `continuous-recording-start` and `continuous-recording-stopped` listeners
+  // went with the vestigial continuous-mode path, since they only ever fed
+  // `recordingProgress` / `isRecordingInContinuousMode`, which nothing read.
   useEffect(() => {
-    let progressUnlisten: (() => void) | undefined;
-    let startUnlisten: (() => void) | undefined;
-    let stopUnlisten: (() => void) | undefined;
     let errorUnlisten: (() => void) | undefined;
     let discardedUnlisten: (() => void) | undefined;
 
-    const setupContinuousListeners = async () => {
+    const setupCaptureListeners = async () => {
       try {
-        // Progress updates (every second)
-        progressUnlisten = await listen("recording-progress", (event) => {
-          const seconds = event.payload as number;
-          setRecordingProgress(seconds);
-        });
-
-        // Recording started
-        startUnlisten = await listen("continuous-recording-start", () => {
-          setRecordingProgress(0);
-          setIsRecordingInContinuousMode(true);
-        });
-
-        // Recording stopped
-        stopUnlisten = await listen("continuous-recording-stopped", () => {
-          setRecordingProgress(0);
-          setIsRecordingInContinuousMode(false);
-        });
-
         // Audio encoding errors
         errorUnlisten = await listen("audio-encoding-error", (event) => {
           const errorMsg = event.payload as string;
@@ -414,7 +392,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           setError(`Failed to process audio: ${errorMsg}`);
           setIsProcessing(false);
           setIsAIProcessing(false);
-          setIsRecordingInContinuousMode(false);
         });
 
         // Speech discarded (too short)
@@ -424,16 +401,13 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           // Don't show error - this is expected behavior
         });
       } catch (err) {
-        console.error("Failed to setup continuous recording listeners:", err);
+        console.error("Failed to setup capture listeners:", err);
       }
     };
 
-    setupContinuousListeners();
+    setupCaptureListeners();
 
     return () => {
-      if (progressUnlisten) progressUnlisten();
-      if (startUnlisten) startUnlisten();
-      if (stopUnlisten) stopUnlisten();
       if (errorUnlisten) errorUnlisten();
       if (discardedUnlisten) discardedUnlisten();
     };
@@ -940,49 +914,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     await processWithAI(action, effectiveSystemPrompt, updatedMessages);
   };
 
-  // Start continuous recording manually
-  const startContinuousRecording = useCallback(async () => {
-    try {
-      setRecordingProgress(0);
-      setError("");
-
-      const deviceId =
-        selectedAudioDevices.output?.id &&
-        selectedAudioDevices.output.id !== "default"
-          ? selectedAudioDevices.output.id
-          : null;
-
-      // Start a new continuous recording session
-      await invoke<string>("start_system_audio_capture", {
-        vadConfig: currentSpawnVadConfig(),
-        deviceId: deviceId,
-      });
-    } catch (err) {
-      console.error("Failed to start continuous recording:", err);
-      setError(`Failed to start recording: ${err}`);
-    }
-  }, [vadConfig, selectedAudioDevices.output?.id]);
-
-  // Ignore current recording (stop without transcription). Gated on `capturing`
-  // for the same reason as the Escape shortcut: the Rust-driven
-  // `isRecordingInContinuousMode` can lag the actual capture state.
-  const ignoreContinuousRecording = useCallback(async () => {
-    if (!isContinuousMode || !capturing) return;
-
-    try {
-      // Stop the capture without processing
-      await invoke<string>("stop_system_audio_capture");
-
-      // Reset states
-      setRecordingProgress(0);
-      setIsProcessing(false);
-      setIsRecordingInContinuousMode(false);
-    } catch (err) {
-      console.error("Failed to ignore recording:", err);
-      setError(`Failed to ignore recording: ${err}`);
-    }
-  }, [isContinuousMode, capturing]);
-
   // After each answer, ask the provider for a few conversation-specific
   // follow-ups. Failures are silent — the four fixed chips always remain.
   const generateFollowUps = useCallback(
@@ -1188,9 +1119,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
 
       setCapturing(false);
       setIsProcessing(false);
-      setIsContinuousMode(false);
-      setIsRecordingInContinuousMode(false);
-      setRecordingProgress(0);
       setLivePartial("");
       livePartialRef.current = "";
 
@@ -1301,8 +1229,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
 
       setCapturing(true);
       setIsPopoverOpen(true);
-      setIsContinuousMode(false);
-      setRecordingProgress(0);
       setLivePartial("");
       livePartialRef.current = "";
       setTranscriptSegments([]);
@@ -1314,7 +1240,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       // to arm first and wait for a separate Space/button press, which read
       // as dead (button clicked, nothing happens) and made `capturing` claim
       // audio was flowing while nothing was being captured.
-      setIsRecordingInContinuousMode(false);
 
       // Stop any existing capture
       await invoke<string>("stop_system_audio_capture");
@@ -1359,11 +1284,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
 
       setCapturing(true);
       setIsPopoverOpen(true);
-      setIsContinuousMode(false);
-      setRecordingProgress(0);
       setLivePartial("");
       livePartialRef.current = "";
-      setIsRecordingInContinuousMode(false);
       sessionStartRef.current = Date.now();
 
       const deviceId =
@@ -1399,9 +1321,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       setCapturing(false);
       setIsProcessing(false);
       setIsAIProcessing(false);
-      setIsContinuousMode(false);
-      setIsRecordingInContinuousMode(false);
-      setRecordingProgress(0);
       setLastTranscription("");
       setLastAIResponse("");
       setError("");
@@ -1738,12 +1657,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     vadConfig,
     updateVadConfiguration,
     // Continuous recording
-    isContinuousMode,
-    isRecordingInContinuousMode,
-    recordingProgress,
     manualStopAndSend,
-    startContinuousRecording,
-    ignoreContinuousRecording,
     // Screenshot captured in the listen panel — sent with the next AI call
     pendingScreenshot,
     setPendingScreenshot,
