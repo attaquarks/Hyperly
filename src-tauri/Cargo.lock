@@ -2246,7 +2246,6 @@ dependencies = [
  "tauri-plugin-sql",
  "tokio",
  "tracing",
- "uuid",
  "wasapi",
  "webview2-com",
  "winreg",
