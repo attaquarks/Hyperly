@@ -2,6 +2,10 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { ChevronDownIcon, ChevronUpIcon, MicIcon, RadioIcon } from "lucide-react";
 import { TranscriptSegment } from "@/types";
 import { cn } from "@/lib/utils";
+import {
+  transcriptLabel,
+  transcriptSourceLabel,
+} from "@/lib/transcript-label";
 
 type Props = {
   segments: TranscriptSegment[];
@@ -127,7 +131,7 @@ export const TranscriptThread = ({
                       {formatTimestamp(segment.timestamp)}
                     </time>
                     <span className="hyperly-transcript-speaker">
-                      {segment.speaker}
+                      {transcriptLabel(segment)}
                     </span>
                     <span
                       className={
@@ -146,7 +150,11 @@ export const TranscriptThread = ({
                           ?.timestamp ?? 0
                       )}
                     </time>
-                    <span className="hyperly-transcript-speaker">User</span>
+                    {/* The trailing live row is the browser mic's partial: label
+                        it by channel, never as a person (Phase 4 R8). */}
+                    <span className="hyperly-transcript-speaker">
+                      {transcriptSourceLabel("microphone")}
+                    </span>
                     <span className="hyperly-transcript-live">{userPartial}</span>
                   </div>
                 )}
