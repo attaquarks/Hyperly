@@ -25,6 +25,7 @@ import {
 import { AiTurnGate } from "@/lib/ai-turn";
 import { chronological } from "@/lib/message-order";
 import { PendingSave } from "@/lib/pending-save";
+import { modelSourceTag } from "@/lib/transcript-label";
 import {
   CaptureBehavior,
   KnowledgeFile,
@@ -456,7 +457,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         {
           id: nextSegmentId(),
           timestamp,
-          speaker: "Speaker",
+          source: "system",
           text,
           isPartial: true,
         },
@@ -479,7 +480,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         {
           id: nextSegmentId(),
           timestamp,
-          speaker: "Speaker",
+          source: "system",
           text,
           isPartial: false,
         },
@@ -496,7 +497,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       {
         id: nextSegmentId(),
         timestamp,
-        speaker: "User",
+        source: "microphone",
         text,
         isPartial: false,
       },
@@ -814,7 +815,11 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           return orphans.map((event) => ({
             id: `restored-${event.id}`,
             timestamp: 0,
-            speaker: event.source === "microphone" ? "User" : "Speaker",
+            // R8: the row records the CHANNEL, and the real speaker label only
+            // when one was actually stored. It used to derive a label from the
+            // source, which is exactly the identity claim this item removes.
+            source: event.source,
+            speakerLabel: event.speaker_label,
             text: event.text,
             isPartial: false,
           }));
@@ -1021,7 +1026,14 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     async (
       transcription: string,
       prompt: string,
-      priorMessages: ChatMessage[]
+      priorMessages: ChatMessage[],
+      /**
+       * What the model is asked with, when that must differ from what is stored.
+       * The source tag ("User (microphone): ...") belongs here: the model needs to
+       * tell the user's own words from the room, while the stored message must stay
+       * the plain transcript (Phase 4 R8).
+       */
+      modelInput?: string
     ) => {
       // R6: one in-flight turn per session. `begin()` supersedes (and cancels) a
       // turn that is still streaming, so two answers can no longer interleave;
@@ -1076,7 +1088,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             selectedProvider: selectedAIProvider,
             systemPrompt: promptWithKnowledge,
             history,
-            userMessage: transcription,
+            userMessage: modelInput ?? transcription,
             imagesBase64: screenshotForThisCall ? [screenshotForThisCall] : [],
             // The signal Stop aborts. Without it the request kept streaming and
             // Stop was a no-op for anything already in flight (R6).
@@ -1105,6 +1117,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
               {
                 id: generateMessageId("user", timestamp),
                 role: "user" as const,
+                // The stored message is the plain transcript - never the model's
+                // source tag (Phase 4 R8).
                 content: transcription,
                 timestamp,
               },
@@ -1237,9 +1251,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         return;
       }
 
-      // The speaker tag is part of the message the model receives, so it can tell
-      // the user's own words apart from the room. It is deliberately not part of
-      // the transcript row, which already renders its own "User" label.
+      // The model's source tag is applied at the processWithAI call below; it is
+      // never part of the stored record (Phase 4 R8).
       const baseSystemPrompt = useSystemPrompt
         ? systemPrompt || DEFAULT_SYSTEM_PROMPT
         : contextContent || DEFAULT_SYSTEM_PROMPT;
@@ -1249,9 +1262,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       );
 
       await processWithAI(
-        `User (microphone): ${plan.text}`,
+        plan.text,
         effectiveSystemPrompt,
-        conversation.messages ?? []
+        conversation.messages ?? [],
+        modelSourceTag("microphone", plan.text)
       );
     },
     [

@@ -27,12 +27,52 @@
  */
 import { hasMicConsent, requestMicConsent } from "./mic-consent.ts";
 
-/** Constraints applied to every capture, so gain/echo handling is consistent. */
+/**
+ * Constraints REQUESTED for every capture. They are not guarantees: a WebView may
+ * grant none of them, which is why `appliedProcessing` reads back what actually
+ * took effect instead of this app claiming echo handling works (Phase 4 R8).
+ */
 const PROCESSING_CONSTRAINTS: MediaTrackConstraints = {
   channelCount: 1,
   echoCancellation: true,
   autoGainControl: true,
   noiseSuppression: true,
+};
+
+/**
+ * What the WebView actually granted, read back from the track itself (Phase 4 R8,
+ * issue #20).
+ *
+ * The constraints above are requests. `MediaTrackSettings` reports what was really
+ * applied, so this app measures rather than assumes: a denied `echoCancellation`
+ * stays false here, and nothing downstream may present it as working. There is no
+ * software AEC fallback in this build.
+ */
+export const appliedProcessing = (
+  settings: MediaTrackSettings | undefined
+): {
+  echoCancellation?: boolean;
+  autoGainControl?: boolean;
+  noiseSuppression?: boolean;
+  channelCount?: number;
+} => ({
+  echoCancellation: settings?.echoCancellation,
+  autoGainControl: settings?.autoGainControl,
+  noiseSuppression: settings?.noiseSuppression,
+  channelCount: settings?.channelCount,
+});
+
+/** Log what the stream's own settings say, then hand the stream straight back. */
+const reporting = (stream: MediaStream): MediaStream => {
+  // Defensive: a stream without tracks — or a test double — reports nothing
+  // rather than throwing. Measuring must never be able to break acquisition.
+  const track = stream.getAudioTracks?.()[0];
+  const settings = track?.getSettings?.();
+  console.info(
+    "[mic] requested echoCancellation/autoGainControl/noiseSuppression; " +
+      `applied=${JSON.stringify(appliedProcessing(settings))}`
+  );
+  return stream;
 };
 
 /** True for a genuine user/permission refusal, which a fallback must not mask. */
@@ -172,9 +212,11 @@ export const getMicrophoneStream = async (
 
     if (known) {
       try {
-        return await navigator.mediaDevices.getUserMedia({
-          audio: { ...PROCESSING_CONSTRAINTS, deviceId: { exact: deviceId } },
-        });
+        return reporting(
+          await navigator.mediaDevices.getUserMedia({
+            audio: { ...PROCESSING_CONSTRAINTS, deviceId: { exact: deviceId } },
+          })
+        );
       } catch (error) {
         if (isPermissionError(error)) throw error;
         // Device vanished between enumeration and capture: fall through.
@@ -185,16 +227,20 @@ export const getMicrophoneStream = async (
   const byName = await findWebInputByName(deviceName);
   if (byName) {
     try {
-      return await navigator.mediaDevices.getUserMedia({
-        audio: { ...PROCESSING_CONSTRAINTS, deviceId: { exact: byName } },
-      });
+      return reporting(
+        await navigator.mediaDevices.getUserMedia({
+          audio: { ...PROCESSING_CONSTRAINTS, deviceId: { exact: byName } },
+        })
+      );
     } catch (error) {
       if (isPermissionError(error)) throw error;
     }
   }
 
   // Last resort: whatever the system considers the default input.
-  return navigator.mediaDevices.getUserMedia({
-    audio: PROCESSING_CONSTRAINTS,
-  });
+  return reporting(
+    await navigator.mediaDevices.getUserMedia({
+      audio: PROCESSING_CONSTRAINTS,
+    })
+  );
 };

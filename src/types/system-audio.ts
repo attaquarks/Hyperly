@@ -1,11 +1,23 @@
+/**
+ * Where a transcript row's words came from. It is NOT who said them: this app
+ * does no diarization, and nothing here infers an identity from the channel
+ * (Phase 4 R8, issue #20). A real speaker label lives in `speakerLabel`, which
+ * stays empty until identity is genuinely known.
+ */
+export type TranscriptSource = "microphone" | "system";
+
 export type TranscriptSegment = {
   id: string;
   /** Seconds elapsed since the current listen session started. */
   timestamp: number;
-  /** Source-based label: "User" for typed input and the browser-side mic,
-      "Speaker" for captured system audio. True multi-voice diarization depends
-      on the STT provider. */
-  speaker: string;
+  /** The capture channel the words arrived on. Never an identity. */
+  source: TranscriptSource;
+  /**
+   * A label for the speaker, ONLY when identity is actually known. Nothing in
+   * this build produces one (no diarization by design), so it is null and the UI
+   * falls back to the channel label — see `@/lib/transcript-label`.
+   */
+  speakerLabel?: string | null;
   text: string;
   isPartial?: boolean;
 };
