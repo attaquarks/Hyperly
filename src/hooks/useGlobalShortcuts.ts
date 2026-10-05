@@ -16,7 +16,11 @@ let globalEventListeners: {
 // Global debounce for screenshot events to prevent duplicates
 let lastScreenshotEventTime = 0;
 
-// Global callback refs
+// Global callback refs. NOTE: `globalInputRef` (and the `registerInputRef`
+// plumbing around it) is dead: the focus-text-input handler used to focus it
+// after a 100 ms shot, but D5 focuses the real composer element directly via
+// the "hyperly:focus-ask-input" DOM event instead. Kept (not deleted) so the
+// exported `registerInputRef` API stays intact for any external caller.
 let globalInputRef: HTMLInputElement | null = null;
 let globalAudioCallback: (() => void) | null = null;
 let globalScreenshotCallback: (() => void | Promise<void>) | null = null;
@@ -66,10 +70,14 @@ export const useGlobalShortcuts = () => {
     }
   }, []);
 
-  // Register input element for auto-focus
+  // Register input element for auto-focus. D5: retained for API shape —
+  // `useCompletion` still calls it — but the focus-text-input path no longer
+  // reads this ref; it focuses the real composer via the DOM event instead.
+  // `void` keeps the intentionally-unused ref from tripping noUnusedLocals.
   const registerInputRef = useCallback((input: HTMLInputElement | null) => {
     inputRef.current = input;
     globalInputRef = input;
+    void globalInputRef;
   }, []);
 
   // Register audio callback
@@ -159,15 +167,12 @@ export const useGlobalShortcuts = () => {
           }
         }
 
-        // Listen for focus text input event
-        const unlistenFocus = await listen("focus-text-input", () => {
-          setTimeout(() => {
-            if (globalInputRef) {
-              globalInputRef.focus();
-            }
-          }, 100);
-        });
-        globalEventListeners.focus = unlistenFocus;
+        // D5: focus-text-input is owned entirely by app/index.tsx now (room
+        // switch + retried "hyperly:focus-ask-input" dispatch + mid-capture
+        // guard). No second listener here: two dispatchers would double-focus,
+        // and an unguarded one would steal keyboard focus off a live
+        // transcript mid-capture.
+        globalEventListeners.focus = undefined;
 
         // Listen for audio recording event
         const unlistenAudio = await listen("start-audio-recording", () => {
