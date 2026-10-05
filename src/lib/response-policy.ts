@@ -1,4 +1,5 @@
 import type { CaptureBehavior } from "@/types";
+import type { TranscriptSource } from "@/types/system-audio";
 
 // The response policy for a finalized utterance, lifted out of the
 // `speech-detected` listener so it is a pure, directly testable function. The
@@ -32,7 +33,13 @@ export const planUtterance = (
   behavior: CaptureBehavior,
   transcript: string,
   pending: string,
-  stopRequested: boolean
+  stopRequested: boolean,
+  /**
+   * D1 Gap 2: the channel the utterance arrived on. "Auto · On questions"
+   * may only fire for the room (`source === "system"`); the user's own
+   * microphone words can never trigger the AI, whichever words they use.
+   */
+  source?: TranscriptSource
 ): UtterancePlan => {
   // A stop pressed while this utterance was transcribing is applied here, once,
   // so a fast press still sends it. Any text already held rides along.
@@ -44,12 +51,18 @@ export const planUtterance = (
     };
   }
 
-  // Manual holds every utterance, and "Auto · On questions" holds everything
-  // that does not read as a question — a question does not flush what is
-  // already held.
+  // Manual holds every utterance. "Auto · On questions" holds everything that
+  // does not read as a question — a question does not flush what is
+  // already held — AND holds every microphone utterance regardless of shape:
+  // only the room (`source === "system"`) may trigger the AI (D1 Gap 2), so
+  // the user's own "can you explain that" can never answer itself. Callers
+  // that predate the source parameter pass nothing, in which case the gate
+  // defaults to open (system) — a safe default only because the system path
+  // is the one that always passes it explicitly.
   if (
     behavior === "manual" ||
-    (behavior === "questions" && !looksLikeQuestion(transcript))
+    (behavior === "questions" &&
+      (source === "microphone" || !looksLikeQuestion(transcript)))
   ) {
     return {
       kind: "hold",

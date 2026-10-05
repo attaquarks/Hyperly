@@ -26,6 +26,7 @@ import { AiTurnGate } from "@/lib/ai-turn";
 import { chronological } from "@/lib/message-order";
 import { PendingSave } from "@/lib/pending-save";
 import { modelSourceTag } from "@/lib/transcript-label";
+import { isMicEchoOfSystem, type DedupCandidate } from "@/lib/mic-echo-dedup";
 import {
   CaptureBehavior,
   KnowledgeFile,
@@ -54,17 +55,19 @@ const MIC_WITH_SYSTEM_KEY = "listen_mic_with_system";
 // preset (when it has one) rides on top of the user's configured prompt.
 const composeListenPrompt = (base: string, mode: ListenMode): string => {
   const preset = LISTEN_MODE_PROMPTS[mode];
-  // Every message reaching the model is tagged with where the words came from:
-  // "User (microphone)" is what the person wearing the headset said, and an
-  // untagged message is audio picked up out of the room by the system. Without
-  // this the model cannot tell the user's own words from someone else's, and
-  // answers the room instead of the user.
+  // D1 Gap 1: every message reaching the model carries its channel label —
+  // "User: ..." is the person wearing the headset speaking directly to the
+  // model, "System: ..." is audio captured from the system/room (someone
+  // else talking). The model must answer questions FROM the room without
+  // treating the user's own words as a question to answer.
   const legend =
-    'Each incoming message is prefixed with its source. ' +
-    '"User (microphone): ..." is the user speaking directly to you. ' +
-    'Anything without that prefix is audio captured from the system/room, ' +
-    'which is someone else talking. Address the user directly and treat the ' +
-    "user's own words as the request.";
+    'Each incoming message is prefixed with its source channel. ' +
+    '"User: ..." is the user speaking directly to you — their words are the ' +
+    'request and the context, never a question for you to answer on their behalf. ' +
+    '"System: ..." is audio captured from the system/room: someone else ' +
+    'talking. In "Auto - On questions" mode, questions in System messages ' +
+    "are what you answer; answer them in first person as the user. " +
+    "Address the user directly.";
   return preset
     ? `${base}\n\n${legend}\n\n${preset}`
     : `${base}\n\n${legend}`;
@@ -518,10 +521,20 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   const applyTranscriptionRef = useRef<(text: string) => Promise<void>>(
     async () => {}
   );
+  // Recent finalized SYSTEM utterances, newest last, for the mic-echo dedup
+  // (D1 Gap 3). Bounded: only the window matters, so old entries are dropped.
+  const systemHistoryRef = useRef<DedupCandidate[]>([]);
   useEffect(() => {
     applyTranscriptionRef.current = async (text: string) => {
       setLastTranscription(text);
       finalizeTranscriptSegment(text);
+      // D1 Gap 3: the room's finalized words feed the dedup window the mic
+      // path checks against. Bounded to the last 32: only an 8 s window
+      // matters, so this never grows.
+      systemHistoryRef.current = [
+        ...systemHistoryRef.current.slice(-31),
+        { atSeconds: elapsedSeconds(), text },
+      ];
       // The full transcript just arrived - clear the live running one so the UI
       // shows the canonical final text and the AI response.
       setLivePartial("");
@@ -545,12 +558,14 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
 
       // One call decides the outcome for every mode - send now, hold, or apply a
       // stop pressed while this utterance was transcribing - so Auto cannot
-      // drift into the Manual/Questions path.
+      // drift into the Manual/Questions path. D1: the room path — only
+      // `source === "system"` utterances may trigger the AI.
       const plan = planUtterance(
         captureBehaviorRef.current,
         text,
         pendingTranscriptRef.current,
-        stopRequestedRef.current
+        stopRequestedRef.current,
+        "system"
       );
       stopRequestedRef.current = false;
       pendingTranscriptRef.current = plan.pending;
@@ -571,10 +586,14 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       );
 
       // The stored messages go to the boundary as-is; it orders them once (R6).
+      // D1 Gap 1: the room's words reach the model labelled `System: ...`,
+      // never bare — `modelInput` is prompt-only, the stored message stays
+      // the plain transcript (R8).
       await processWithAI(
         plan.text,
         effectiveSystemPrompt,
-        conversation.messages ?? []
+        conversation.messages ?? [],
+        modelSourceTag("system", plan.text)
       );
     };
   });
@@ -1161,13 +1180,33 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       const transcript = text.trim();
       if (!transcript) return;
 
+      // D1 Gap 3 (dedup half): the mic frequently re-captures room audio
+      // through the speakers when WebView2 denies echoCancellation. If this
+      // utterance is a near-duplicate of a recent system utterance, it is
+      // bleed-through, not the user — suppress it BEFORE it reaches the
+      // transcript or the AI. Suppressed copies are dropped, not held: the
+      // room's own segment already carries the words.
+      if (
+        isMicEchoOfSystem(
+          transcript,
+          systemHistoryRef.current,
+          elapsedSeconds()
+        )
+      ) {
+        return;
+      }
+
       pushUserSegment(transcript);
 
+      // D1 Gap 2: the microphone path. Passing `source: "microphone"` is
+      // what keeps "Auto · On questions" from answering the user's own
+      // words — the gate holds every mic utterance regardless of shape.
       const plan = planUtterance(
         captureBehaviorRef.current,
         transcript,
         pendingTranscriptRef.current,
-        stopRequestedRef.current
+        stopRequestedRef.current,
+        "microphone"
       );
       stopRequestedRef.current = false;
       pendingTranscriptRef.current = plan.pending;

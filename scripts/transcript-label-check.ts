@@ -145,21 +145,22 @@ if (transcriptLabel && sourceLabel && modelTag) {
 
   check(
     "the channels are labelled as channels",
-    source("microphone") === "Mic" && source("system") === "Room",
+    source("microphone") === "User" && source("system") === "System",
     () => `mic=${source("microphone")} system=${source("system")}`
   );
 
   check(
-    "no channel is ever labelled as a person",
-    !["User", "Speaker", "You", "Them"].includes(source("microphone")) &&
-      !["User", "Speaker", "You", "Them"].includes(source("system")),
+    "no channel is labelled with anything but the two product labels",
+    ["User", "System"].includes(source("microphone")) &&
+      ["User", "System"].includes(source("system")) &&
+      source("microphone") !== source("system"),
     () => `mic=${source("microphone")} system=${source("system")}`
   );
 
   check(
     "a row with no known speaker shows the channel",
-    label({ source: "microphone" }) === "Mic" &&
-      label({ source: "system" }) === "Room",
+    label({ source: "microphone" }) === "User" &&
+      label({ source: "system" }) === "System",
     () =>
       JSON.stringify([
         label({ source: "microphone" }),
@@ -170,9 +171,9 @@ if (transcriptLabel && sourceLabel && modelTag) {
   check(
     "a real speaker label is used ONLY when it is actually known",
     label({ source: "system", speakerLabel: "Dana" }) === "Dana" &&
-      label({ source: "system", speakerLabel: "   " }) === "Room" &&
-      label({ source: "system", speakerLabel: null }) === "Room" &&
-      label({ source: "system", speakerLabel: "" }) === "Room",
+      label({ source: "system", speakerLabel: "   " }) === "System" &&
+      label({ source: "system", speakerLabel: null }) === "System" &&
+      label({ source: "system", speakerLabel: "" }) === "System",
     () =>
       JSON.stringify([
         label({ source: "system", speakerLabel: "Dana" }),
@@ -182,9 +183,9 @@ if (transcriptLabel && sourceLabel && modelTag) {
   );
 
   check(
-    "the model still gets a source tag, and only the microphone gets one",
-    tag("microphone", "hello") === "User (microphone): hello" &&
-      tag("system", "hello") === "hello",
+    "the model gets both channels labelled, never a bare room line",
+    tag("microphone", "hello") === "User: hello" &&
+      tag("system", "hello") === "System: hello",
     () =>
       JSON.stringify([tag("microphone", "hello"), tag("system", "hello")])
   );
