@@ -20,7 +20,12 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22, not 20: `persistence-integrity-check.ts` and
+          # `transcript-store-check.ts` import `node:sqlite`, which only exists
+          # from Node 22.5.0. On Node 20 both guards died with
+          # ERR_UNKNOWN_BUILTIN_MODULE before running a single assertion. The
+          # guards also need Node's TypeScript type-stripping (22.6+).
+          node-version: 22
           cache: npm
 
       - name: Install frontend dependencies
@@ -31,6 +36,18 @@ jobs:
 
       - name: Type-check and build frontend
         run: npm run build
+
+      # The regression guards. Until this step existed none of them ran in CI,
+      # so a guard could be silently neutered and the build stayed green -- which
+      # is how D1 shipped with two `processWithAI` call sites still sending
+      # unlabelled text to the model.
+      #
+      # `scripts/run-guards.mjs` discovers every `scripts/*-check.ts` from disk
+      # (never a hardcoded list, so a guard added later is picked up for free)
+      # and exits non-zero if any of them fails. Keep it green by fixing the
+      # regression, never by weakening or deleting a guard.
+      - name: Run regression guards
+        run: npm run guards
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
