@@ -275,6 +275,89 @@ check(
   () => "the tagged utterance is still passed as the stored transcription"
 );
 
+/**
+ * D1 Gap 1, the half that shipped unfixed. Every `processWithAI` call site must
+ * pass the 4th argument (`modelInput`), because that argument IS the label: omit
+ * it and `userMessage: modelInput ?? transcription` silently falls back to the
+ * BARE transcript, and the model can no longer tell the user's own words from
+ * the room. PR #41 tagged the two auto-send call sites and left `stopAndSend`
+ * and the quick-action path untagged, so the original defect survived in Manual
+ * mode — the mode the feature is actually used in.
+ *
+ * Counted by extracting each call's balanced argument list, not by matching
+ * `processWithAI(` alone: the argument text has to be inspected, because a call
+ * with the tag in the wrong position is still unlabelled.
+ */
+const processWithAICalls = (source: string): string[] => {
+  const calls: string[] = [];
+  const marker = /processWithAI\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = marker.exec(source)) !== null) {
+    // The declaration `const processWithAI = useCallback(` is not a call site.
+    const before = source.slice(Math.max(0, match.index - 60), match.index);
+    if (/\bconst\s+$/.test(before)) continue;
+    const open = match.index + match[0].length;
+    let depth = 1;
+    let i = open;
+    while (i < source.length && depth > 0) {
+      const ch = source[i];
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      i++;
+    }
+    calls.push(source.slice(open, i - 1));
+    marker.lastIndex = i;
+  }
+  return calls;
+};
+
+/** Split an argument list on commas that are not nested in brackets or strings. */
+const topLevelArgs = (args: string): string[] => {
+  const out: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let current = "";
+  for (let i = 0; i < args.length; i++) {
+    const ch = args[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote && args[i - 1] !== "\\") quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) depth--;
+    if (ch === "," && depth === 0) {
+      out.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) out.push(current);
+  return out;
+};
+
+const aiCalls = processWithAICalls(systemAudioSource);
+const untagged = aiCalls.filter(
+  (args) => !/modelSourceTag\s*\(/.test(topLevelArgs(args)[3] ?? "")
+);
+
+check(
+  `every processWithAI call passes a source tag (${aiCalls.length} call sites)`,
+  aiCalls.length >= 4 && untagged.length === 0,
+  () =>
+    `${untagged.length} call site(s) omit the 4th modelInput argument, so the ` +
+    `model receives the BARE transcript and cannot tell User from System:\n` +
+    untagged
+      .map((a) => `          processWithAI(${a.trim().replace(/\s+/g, " ").slice(0, 88)}...)`)
+      .join("\n")
+);
+
 check(
   "echo cancellation is measured, not claimed",
   /appliedProcessing\(/.test(microphoneSource) &&
