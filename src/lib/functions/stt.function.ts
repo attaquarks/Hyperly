@@ -107,8 +107,10 @@ const formEntries = (form: unknown): Array<[string, string]> => {
  * Failure is never signalled by returning text: the four `SttResult` outcomes
  * are distinct, and no path returns `ok` when no transcript was produced.
  * Provider misconfiguration that used to look like working speech (Azure's
- * case-mangled path, the unsubstituted `{{AUDIO}}` placeholder, job APIs) now
- * surfaces as an explicit `error`.
+ * case-mangled path, the unsubstituted `{{AUDIO}}` placeholder) now surfaces
+ * as an explicit `error`. (D9: the job-based providers that answered with a
+ * job id are gone entirely — one non-polling request can never yield text
+ * from them, so they were removed rather than left to fail.)
  */
 export async function fetchSTT(params: STTParams): Promise<SttResult> {
   const { provider, selectedProvider, audio, signal, fetchImpl } = params;
@@ -118,17 +120,6 @@ export async function fetchSTT(params: STTParams): Promise<SttResult> {
     if (!selectedProvider) return failed("Selected provider not provided");
     if (!audio) return failed("Audio file is required");
     if (signal?.aborted) return cancelled();
-
-    // An asynchronous job API answers with an id, not a transcript, and this
-    // function makes exactly one request and never polls. Returning the id to
-    // the caller (the old behaviour) invented a transcript from a job handle.
-    if (provider.jobBased) {
-      return failed(
-        `${provider.id ?? "This provider"} creates an asynchronous ` +
-          "transcription job; one request cannot return the text. Use a " +
-          "synchronous provider."
-      );
-    }
 
     let curlJson: any;
     try {

@@ -34,7 +34,9 @@
 //        7. the metric field named by `{{AUDIO}}` (`data_file`, `media`) receives
 //           the audio blob — the placeholder is never sent as text;
 //        8. `file={{AUDIO}}` providers still post the blob under `file`;
-//        9. a job-based provider reports an error instead of returning its id;
+//        9. no built-in provider is job-based: the Speechmatics/Rev.ai async job
+//           APIs were removed (D9), so `jobBasedIds` must be empty — one
+//           non-polling request can never yield text from a job handle;
 //       10. a `response_format=text` 2xx body is still speech (no regression).
 //   C. fetchAIResponse never yields an error
 //       11. a 401 throws and yields nothing, so no assistant turn is persisted
@@ -442,30 +444,11 @@ console.log("\nB. the provider contracts");
   );
 }
 
-// B9. job APIs report an error instead of returning the job id.
-{
-  for (const id of ["speechmatics-stt", "rev-ai-stt"]) {
-    const provider = providerById(id);
-    const { impl, calls } = requestRecorder(() =>
-      json({ job: { id: "job-42" }, id: "job-42" })
-    );
-    const result = await fetchSTT({
-      provider,
-      selectedProvider: { provider: id, variables: { api_key: "k" } },
-      audio: audioBlob(),
-      fetchImpl: impl,
-    });
-    check(
-      `${id} reports an error instead of returning its job id`,
-      result.status === "error" &&
-        !JSON.stringify(result).includes("job-42") &&
-        result.message.includes("asynchronous") &&
-        calls.length === 0,
-      () => `got ${JSON.stringify(result)}, calls=${calls.length}`
-    );
-  }
-}
-
+// B9. the job APIs are gone: one non-polling request can never yield text
+// from an asynchronous job handle, so Speechmatics and Rev.ai were removed
+// (D9) instead of keeping two providers that exist only to fail. A custom
+// job-shaped provider is still honoured by the form plumbing below, but no
+// built-in provider declares or depends on `jobBased`.
 // B10. `response_format=text` still yields speech (a provider that worked must
 // not start failing because of R4).
 {
@@ -745,11 +728,21 @@ const jobBasedIds = providers
   .filter((provider) => provider.jobBased === true)
   .map((provider) => provider.id);
 check(
-  "exactly the two job APIs are flagged as job-based",
-  jobBasedIds.length === 2 &&
-    jobBasedIds.includes("speechmatics-stt") &&
-    jobBasedIds.includes("rev-ai-stt"),
-  () => `flagged: ${jobBasedIds.join(", ") || "none"}`
+  "no built-in provider is job-based (the two job APIs are gone)",
+  jobBasedIds.length === 0,
+  () => `still flagged: ${jobBasedIds.join(", ") || "none"}`
+);
+
+check(
+  "the removed job APIs are absent from the provider list",
+  !providers.some((provider) =>
+    ["speechmatics-stt", "rev-ai-stt"].includes(provider.id)
+  ),
+  () =>
+    `still listed: ${providers
+      .map((provider) => provider.id)
+      .filter((id) => ["speechmatics-stt", "rev-ai-stt"].includes(id))
+      .join(", ")}`
 );
 
 check(
