@@ -6,6 +6,7 @@ import { MAX_FILES } from "@/config";
 import { useApp } from "@/contexts";
 import {
   captureOwnership,
+  decideAskMic,
   mayMicrophoneRun,
   type CaptureToken,
 } from "@/lib/capture-owner";
@@ -1053,6 +1054,19 @@ export const useCompletion = (capturing: boolean = false) => {
   // popover open after the mic turns off.
   const toggleRecording = useCallback(() => {
     const next = !enableVAD;
+    // D3+D8: Ctrl+Shift+A from Listen. When the running Listen capture also
+    // holds the browser mic, starting Ask would need a second getUserMedia
+    // pipeline — and the old code silently no-op'd (intent flipped straight
+    // back off with only a console.warn), which read as "the shortcut does
+    // nothing". Refuse VISIBLY instead, and never touch the running capture:
+    // switching rooms must not stop it.
+    if (next && decideAskMic() === "refuse") {
+      setState((prev) => ({
+        ...prev,
+        error: "Microphone already in use by the Listen capture.",
+      }));
+      return;
+    }
     setEnableVAD(next);
     setMicOpen(next);
   }, [enableVAD]);

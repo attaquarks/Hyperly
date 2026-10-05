@@ -341,6 +341,13 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     capturingRef.current = capturing;
   }, [capturing]);
 
+  // D3+D8: report the live system-capture shape to the ownership registry on
+  // every change, so the Ctrl+Shift+A decision reads exact state instead of
+  // inferring it: system-only leaves the mic free, mic+system refuses.
+  useEffect(() => {
+    captureOwnership.reportSystemCapture({ capturing, micWithSystem });
+  }, [capturing, micWithSystem]);
+
   // Phase 4 R5: the Listen capture is one of the two capture owners, and it owns
   // the token for exactly as long as it captures. `take` (not `request`) because
   // the product rule is explicit — a starting system-audio capture pauses the Ask

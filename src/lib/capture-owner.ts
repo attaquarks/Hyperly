@@ -40,6 +40,20 @@ export interface CaptureToken {
   readonly id: number;
 }
 
+/**
+ * D3+D8: the token answers *which* system capture holds it, because the
+ * Ctrl+Shift+A decision depends on it: mic+system must refuse visibly, while
+ * system-only leaves the mic genuinely free. `request("microphone")` is only
+ * called when no system capture is running (see the token contract on the
+ * class), so the answer is exact, not inferred.
+ */
+export interface SystemCaptureDetail {
+  /** Whether the Listen engine is running. */
+  capturing: boolean;
+  /** Whether its browser mic is on alongside system audio. */
+  micWithSystem: boolean;
+}
+
 export class CaptureOwnership {
   private holder: CaptureToken | null = null;
   private nextId = 1;
@@ -52,6 +66,28 @@ export class CaptureOwnership {
   /** The token currently held, or null. */
   get token(): CaptureToken | null {
     return this.holder;
+  }
+
+  /**
+   * Detail about the current SYSTEM capture, for the Ctrl+Shift+A decision
+   * (D3+D8): the mic may start when no Listen capture is running at all, and
+   * must be refused visibly when the running capture also holds the mic.
+   * Defaults to idle; `useSystemAudio` reports its live state so this stays
+   * exact (a capture that never reported counts as not running).
+   */
+  private systemDetail: SystemCaptureDetail = {
+    capturing: false,
+    micWithSystem: false,
+  };
+
+  /** The hook calls this whenever its capture or mic-toggle state changes. */
+  reportSystemCapture(detail: SystemCaptureDetail): void {
+    this.systemDetail = { ...detail };
+  }
+
+  /** Snapshot of the last reported system-capture state. */
+  get systemCapture(): SystemCaptureDetail {
+    return { ...this.systemDetail };
   }
 
   /** How many capture owners are active. 0 or 1 by construction. */
@@ -113,3 +149,24 @@ export const mayMicrophoneRun = (
   microphoneIntent: boolean,
   ownership: CaptureOwnership = captureOwnership
 ): boolean => microphoneIntent && ownership.isHeldBy("microphone");
+
+/**
+ * D3+D8 decision for the Ctrl+Shift+A press, computed from the REPORTED
+ * system-capture state (exact — the hook reports on every change):
+ *
+ * - "start"  — nothing capturing, or a system-only capture whose mic is
+ *   genuinely free: switch to Ask and start the mic normally. A running
+ *   system-only capture keeps running (switching rooms never stops it).
+ * - "refuse" — the running capture also holds the browser mic: starting Ask
+ *   would need a second getUserMedia pipeline, so refuse VISIBLY with
+ *   "microphone already in use" instead of silently no-op'ing.
+ */
+export type AskMicDecision = "start" | "refuse";
+
+export const decideAskMic = (
+  ownership: CaptureOwnership = captureOwnership
+): AskMicDecision => {
+  const detail = ownership.systemCapture;
+  if (detail.capturing && detail.micWithSystem) return "refuse";
+  return "start";
+};
