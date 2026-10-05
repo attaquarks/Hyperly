@@ -331,6 +331,56 @@ if (OwnershipClass) {
 
 // ---- B. lifecycle: the owner token must not leak ---------------------------
 
+// ---- B2. D4 recovery: a fresh Ask request must succeed the moment Listen's
+// token is released. The suspected mechanism is a STALE preempted Ask token
+// (Listen's `take` minted a new one; a later re-acquire was refused against
+// a token Listen had already released) - the symptom being a mic that
+// ignores every activation and then starts on its own later.
+//
+// NOTE (D4 cause unconfirmed): both scenarios below PASS against the real
+// state machine on main, so the token layer already recovers cleanly and no
+// production change is made here. The app-level stuck mic was never
+// reproduced in this layer - it needs manual runtime confirmation across a
+// Listen->Ask cycle (see the commit message), not another token tweak.
+
+console.log("\nB2. recovery after Listen stops (D4)");
+
+if (OwnershipClass) {
+  {
+    // Ask owned the token first, Listen preempted it, the stale Ask token
+    // could not free the system owner, then Listen stopped and released.
+    const ownership = new OwnershipClass();
+    const askFirst = ownership.request("microphone");
+    const system = ownership.take("system");
+    ownership.release(askFirst);
+    ownership.release(system);
+    const freed = ownership.owner === null && ownership.activeCount === 0;
+    const retry = ownership.request("microphone");
+    check(
+      "preempted Ask token: after Listen stops and releases, a fresh Ask request succeeds immediately",
+      freed && retry !== null && ownership.owner === "microphone",
+      () =>
+        `freed=${freed} retry=${retry === null ? "null (REFUSED - stuck mic)" : "ok"} owner=${ownership.owner}`
+    );
+  }
+
+  {
+    // Ask only pressed DURING the capture (refused, intent off), then Listen
+    // stopped. Same bar: the next press must succeed immediately.
+    const ownership = new OwnershipClass();
+    const system = ownership.take("system");
+    const refused = ownership.request("microphone");
+    ownership.release(system);
+    const retry = ownership.request("microphone");
+    check(
+      "press-during-capture: after Listen stops, the next press succeeds immediately",
+      refused === null && retry !== null && ownership.owner === "microphone",
+      () =>
+        `refused=${refused === null} retry=${retry === null ? "null (REFUSED - stuck mic)" : "ok"} owner=${ownership.owner}`
+    );
+  }
+}
+
 console.log("\nB. lifecycle");
 
 if (OwnershipClass) {
