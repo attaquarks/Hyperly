@@ -369,8 +369,17 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       systemTokenRef.current = captureOwnership.take("system");
       return;
     }
-    captureOwnership.release(systemTokenRef.current);
+    // [D4] INSTRUMENTATION (temporary, kept deliberately — see PR): point (a)
+    // the moment a Listen capture stops. Logs the released token id and the
+    // owner/token left behind, for reading a Listen->Ask cycle.
+    const released = systemTokenRef.current;
+    captureOwnership.release(released);
     systemTokenRef.current = null;
+    console.log(
+      `[D4][listen-stop] released token id=${released?.id ?? "none"}; owner=${
+        captureOwnership.owner ?? "null"
+      }; token=${captureOwnership.token?.id ?? "null"}`
+    );
   }, [capturing]);
 
   // Load quick actions from localStorage on mount

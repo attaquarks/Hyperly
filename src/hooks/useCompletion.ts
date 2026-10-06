@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from "react";
 import { useGlobalShortcuts } from "@/hooks";
 import { useKnowledge } from "./useKnowledge";
 import { KnowledgeFile } from "@/types/system-audio";
@@ -836,6 +836,27 @@ export const useCompletion = (capturing: boolean = false) => {
   // below), so the VAD never runs without the token.
   const micTokenRef = useRef<CaptureToken | null>(null);
 
+  // D4: the propagation half of the fix. The token layer grants the mic
+  // INSIDE this effect — after the render that already computed the derived
+  // flag from `mayMicrophoneRun` — and until now that grant wrote a plain
+  // field, so React never redrew: every press reached the token layer
+  // (console: GRANTED) while the visible flag kept its stale pre-grant
+  // `false`, and the mic only started when something unrelated re-rendered.
+  // `useSyncExternalStore` closes that gap: the registry's `subscribe` (a
+  // dependency-free listener array) re-renders this hook on the holder
+  // change, the return below recomputes `mayMicrophoneRun` against the
+  // fresh state, and `AutoSpeechVAD` starts on the same press. The snapshot
+  // is the holder token itself — its identity is stable between changes,
+  // which is exactly what `useSyncExternalStore` requires. The token is
+  // also in the reconcile deps below on purpose: a grant or release from
+  // outside (Listen preempting, or releasing) re-runs the reconciliation so
+  // intent and token can never diverge. Each run either no-ops or performs
+  // one idempotent request, so the notify chain terminates.
+  const captureToken = useSyncExternalStore(
+    captureOwnership.subscribe,
+    () => captureOwnership.token
+  );
+
   useEffect(() => {
     if (!enableVAD) {
       // The mic is off, so it holds nothing. Identity-checked: a token the system
@@ -845,7 +866,19 @@ export const useCompletion = (capturing: boolean = false) => {
       return;
     }
 
+    // [D4] INSTRUMENTATION (temporary, kept deliberately — see PR): point (b)
+    // every Ask activation attempt with the owner/token snapshot. WITH the fix,
+    // a GRANTED here is followed by [D4][ask-start] on the same press.
+    const preOwner = captureOwnership.owner;
+    const preToken = captureOwnership.token?.id ?? null;
     const token = captureOwnership.request("microphone");
+    console.log(
+      `[D4][ask-attempt] pre-owner=${preOwner ?? "null"} pre-token=${preToken} -> ${
+        token
+          ? `GRANTED token id=${token.id}`
+          : `REFUSED (owner=${captureOwnership.owner ?? "null"})`
+      }`
+    );
     if (!token) {
       console.warn(
         "[mic] refused: the system-audio capture owns the microphone right now"
@@ -855,7 +888,7 @@ export const useCompletion = (capturing: boolean = false) => {
       return;
     }
     micTokenRef.current = token;
-  }, [enableVAD]);
+  }, [enableVAD, captureToken]);
 
   // An Ask room that goes away while its mic is on must not keep the token.
   useEffect(
@@ -1054,6 +1087,14 @@ export const useCompletion = (capturing: boolean = false) => {
   // popover open after the mic turns off.
   const toggleRecording = useCallback(() => {
     const next = !enableVAD;
+    // [D4] INSTRUMENTATION (temporary, kept deliberately — see PR): point (b)
+    // the global Voice Input shortcut reached the toggle. `raw` is the
+    // UN-gated intent at the moment of the press.
+    console.log(
+      `[D4][ask-press shortcut] raw=${enableVAD} -> ${next}; owner=${
+        captureOwnership.owner ?? "null"
+      }; token=${captureOwnership.token?.id ?? "null"}`
+    );
     // D3+D8: Ctrl+Shift+A from Listen. When the running Listen capture also
     // holds the browser mic, starting Ask would need a second getUserMedia
     // pipeline — and the old code silently no-op'd (intent flipped straight

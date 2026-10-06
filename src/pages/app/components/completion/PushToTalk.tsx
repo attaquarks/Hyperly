@@ -1,6 +1,7 @@
 import { MicIcon } from "lucide-react";
 import { UseCompletionReturn } from "@/types";
 import { cn } from "@/lib/utils";
+import { captureOwnership } from "@/lib/capture-owner";
 
 type Props = Pick<UseCompletionReturn, "enableVAD" | "setEnableVAD">;
 
@@ -20,7 +21,16 @@ export const PushToTalk = ({ enableVAD, setEnableVAD }: Props) => {
     <button
       type="button"
       className={cn("hyperly-action", enableVAD && "hyperly-action-active")}
-      onClick={() => setEnableVAD((prev) => !prev)}
+      onClick={() => {
+        // [D4] INSTRUMENTATION (temporary, kept deliberately — see PR): point
+        // (b) the mouse activation. `shown` is the GATED flag the user sees.
+        console.log(
+          `[D4][ask-press button] shown=${enableVAD}; owner=${
+            captureOwnership.owner ?? "null"
+          }; token=${captureOwnership.token?.id ?? "null"}`
+        );
+        setEnableVAD((prev) => !prev);
+      }}
       title={
         enableVAD
           ? "Stop voice input and send the transcription"
