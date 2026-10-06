@@ -45,7 +45,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     startNewConversation,
     loadConversation,
     conversation,
-    setPendingScreenshot,
+    setPendingScreenshots,
     livePartial,
     userMicPartial,
     setUserMicPartial,
@@ -87,24 +87,27 @@ export const SystemAudio = (props: useSystemAudioType) => {
   const [showHistory, setShowHistory] = useState(false);
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
 
-  // Screenshot state — the local preview mirrors into the hook so the next
-  // AI call attaches it.
-  const [screenshotImage, setScreenshotImage] = useState<string | null>(null);
+  // Screenshot state — the local previews mirror into the hook so the next
+  // AI call attaches them. D11: an ARRAY, same behaviour as the Ask panel's
+  // attached files — each capture appends, so a second screenshot no longer
+  // replaces the first; every thumbnail stays visible with its own remove
+  // button, and the whole batch rides on the next AI call.
+  const [screenshotImages, setScreenshotImages] = useState<string[]>([]);
   const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
   // One-shot listener for region captures, so a cancelled selection can't
   // swallow a later Ask-side capture.
   const regionUnlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    setPendingScreenshot(screenshotImage);
-  }, [screenshotImage, setPendingScreenshot]);
+    setPendingScreenshots(screenshotImages);
+  }, [screenshotImages, setPendingScreenshots]);
 
-  // Clear the local preview once the hook consumed the shot.
+  // Clear the local previews once the hook consumed the shots.
   useEffect(() => {
-    if (isProcessing && screenshotImage) {
-      setScreenshotImage(null);
+    if (isProcessing && screenshotImages.length > 0) {
+      setScreenshotImages([]);
     }
-  }, [isProcessing, screenshotImage]);
+  }, [isProcessing, screenshotImages]);
 
   useEffect(
     () => () => {
@@ -131,7 +134,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     setIsCapturingScreenshot(true);
     try {
       const base64: string = await invoke("capture_to_base64");
-      setScreenshotImage(base64);
+      setScreenshotImages((prev) => [...prev, base64]);
     } catch (err) {
       console.error("Failed to capture screenshot:", err);
     } finally {
@@ -143,7 +146,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
   // registered Ask's `captureScreenshot` for every `trigger-screenshot`, so a
   // shot taken while Listen was visible ran Ask's pipeline and landed on Ask —
   // Listen's action row was the only way to reach this path. Register Listen's
-  // full-screen capture (`capture_to_base64` -> `setScreenshotImage` -> the
+  // full-screen capture (`capture_to_base64` -> `setScreenshotImages` -> the
   // `pendingScreenshot` flow the thumbnail strip shows at the bottom) so the
   // shot attaches to the room that was visible. Re-registered whenever
   // `handleCapture` changes identity, so the slot always points at the live
@@ -156,7 +159,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
   const handleCaptureRegion = useCallback(async () => {
     try {
       const unlisten = await listen<string>("captured-selection", (event) => {
-        setScreenshotImage(event.payload);
+        setScreenshotImages((prev) => [...prev, event.payload]);
         regionUnlistenRef.current?.();
         regionUnlistenRef.current = null;
       });
@@ -185,7 +188,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     const reader = new FileReader();
     reader.onload = () => {
       const result = reader.result as string;
-      setScreenshotImage(result.split(",")[1] ?? "");
+      setScreenshotImages((prev) => [...prev, result.split(",")[1] ?? ""]);
     };
     reader.readAsDataURL(file);
   }, []);
@@ -332,23 +335,29 @@ export const SystemAudio = (props: useSystemAudioType) => {
               onPickFolder={pickKnowledgeFolder}
               onSelectFile={(name) => void selectKnowledgeFile(name)}
             />
-            {screenshotImage && (
+            {screenshotImages.length > 0 && (
               <div className="hyperly-thumb-strip mt-2">
-                <span className="relative">
-                  <img
-                    src={`data:image/png;base64,${screenshotImage}`}
-                    alt="Screenshot"
-                    className="hyperly-thumb"
-                  />
-                  <button
-                    type="button"
-                    className="hyperly-thumb-remove"
-                    onClick={() => setScreenshotImage(null)}
-                    title="Remove screenshot"
-                  >
-                    <XIcon className="h-2.5 w-2.5" />
-                  </button>
-                </span>
+                {screenshotImages.map((image, index) => (
+                  <span className="relative" key={`${index}:${image.length}`}>
+                    <img
+                      src={`data:image/png;base64,${image}`}
+                      alt="Screenshot"
+                      className="hyperly-thumb"
+                    />
+                    <button
+                      type="button"
+                      className="hyperly-thumb-remove"
+                      onClick={() =>
+                        setScreenshotImages((prev) =>
+                          prev.filter((_, i) => i !== index)
+                        )
+                      }
+                      title="Remove screenshot"
+                    >
+                      <XIcon className="h-2.5 w-2.5" />
+                    </button>
+                  </span>
+                ))}
                 <span className="text-[9px] text-muted-foreground">
                   Sent with the next prompt
                 </span>
