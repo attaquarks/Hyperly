@@ -5,13 +5,16 @@
  *
  * - `curl` is parsed with curl2json. In a form (`-F`) provider, the field whose
  *   value is exactly `{{AUDIO}}` is the one that receives the audio blob —
- *   `file` for OpenAI/Groq/ElevenLabs, `data_file` for Speechmatics, `media`
- *   for Rev.ai. It must not be sent as the literal placeholder text.
+ *   `file` for OpenAI/Groq/ElevenLabs. It must not be sent as the literal
+ *   placeholder text.
  * - `responseContentPath` is matched against the JSON body **case-sensitively**
  *   (`getByPath`), so Azure's `DisplayText` must stay capitalised.
- * - `jobBased: true` marks endpoints that create an asynchronous job and answer
- *   with an id. A single request cannot transcribe them, so `fetchSTT` reports
- *   that instead of returning the id as a transcript.
+ *
+ * Note (D9): Speechmatics and Rev.ai used to be listed here. They are
+ * asynchronous job APIs — a single request answers with a job id, never with
+ * text — so they could never work in this app, which makes exactly one
+ * non-polling request (`fetchSTT`). They were removed rather than left to
+ * exist only to fail (implementing polling is deliberately out of scope).
  */
 export const SPEECH_TO_TEXT_PROVIDERS = [
   {
@@ -88,31 +91,6 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
     // Lower-casing the first character (the old behaviour) made this path always
     // resolve to undefined, so Azure could never produce a transcript (R4).
     responseContentPath: "DisplayText",
-    streaming: false,
-  },
-  {
-    id: "speechmatics-stt",
-    name: "Speechmatics",
-    curl: `curl -X POST "https://asr.api.speechmatics.com/v2/jobs" \\
-      -H "Authorization: Bearer {{API_KEY}}" \\
-      -F "data_file={{AUDIO}}" \\
-      -F 'config={"type": "transcription", "transcription_config": {"language": "en"}}'`,
-    // The response is `{ "job": { "id": … } }` — a job handle, not text. It
-    // cannot be transcribed by one request, so the provider is flagged rather
-    // than returning the id to the caller as speech (R4).
-    jobBased: true,
-    streaming: false,
-  },
-  {
-    id: "rev-ai-stt",
-    name: "Rev.ai Speech-to-Text",
-    curl: `curl -X POST "https://api.rev.ai/speechtotext/v1/jobs" \\
-      -H "Authorization: Bearer {{API_KEY}}" \\
-      -F "media={{AUDIO}}" \\
-      -F "options={{OPTIONS}}"`,
-    // The response is `{ "id": … }` — a job handle, same shape of problem as
-    // Speechmatics above (R4).
-    jobBased: true,
     streaming: false,
   },
   {

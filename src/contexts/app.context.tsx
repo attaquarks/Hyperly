@@ -229,10 +229,19 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       try {
         const parsed = JSON.parse(savedSelectedStt);
         if (parsed && typeof parsed === "object") {
-          setSelectedSttProvider({
-            provider: parsed.provider ?? "",
-            variables: parsed.variables ?? {},
-          });
+          setSelectedSttProvider(
+            // D9: resolve a selection saved before Speechmatics/Rev.ai
+            // were removed to a provider that still exists, so the queue
+            // never throws "Speech provider config not found". Custom
+            // providers load above, so a saved custom id still resolves.
+            resolveSttSelection(
+              {
+                provider: parsed.provider ?? "",
+                variables: parsed.variables ?? {},
+              },
+              [...SPEECH_TO_TEXT_PROVIDERS, ...customSttProviders]
+            )
+          );
         }
       } catch {
         console.warn("Failed to parse selected STT provider");
@@ -417,6 +426,33 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     ...SPEECH_TO_TEXT_PROVIDERS,
     ...customSttProviders,
   ];
+
+  /**
+   * Resolve a persisted STT selection against the providers that actually
+   * exist. D9 removed the Speechmatics/Rev.ai job APIs, so a stored
+   * selection of one of those no longer names anything - and the queue
+   * throws "Speech provider config not found" (then dead-letters every
+   * block) for an unknown id. Falling back to the first built-in provider
+   * keeps transcription working instead of crashing or silently transcribing
+   * with no provider. The stored variables (e.g. a saved api key) are kept.
+   */
+  const resolveSttSelection = (
+    saved: { provider: string; variables: Record<string, string> },
+    known: TYPE_PROVIDER[]
+  ): { provider: string; variables: Record<string, string> } => {
+    if (saved.provider && known.some((pr) => pr.id === saved.provider)) {
+      return saved;
+    }
+    const fallbackId =
+      SPEECH_TO_TEXT_PROVIDERS[0]?.id ?? known[0]?.id ?? saved.provider;
+    if (saved.provider && saved.provider !== fallbackId) {
+      console.warn(
+        `Stored STT provider "${saved.provider}" no longer exists; ` +
+          `falling back to "${fallbackId}".`
+      );
+    }
+    return { provider: fallbackId, variables: saved.variables ?? {} };
+  };
 
   const onSetSelectedAIProvider = ({
     provider,
