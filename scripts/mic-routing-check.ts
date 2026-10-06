@@ -5,6 +5,8 @@ import {
   planUtterance,
   looksLikeQuestion,
 } from "../src/lib/response-policy.ts";
+import { modelSourceTag } from "../src/lib/transcript-label.ts";
+import { isMicEchoOfSystem } from "../src/lib/mic-echo-dedup.ts";
 
 type Behavior = "auto" | "manual" | "questions";
 
@@ -65,25 +67,63 @@ const check = (label: string, ok: boolean, detail = "") => {
 }
 
 // --- Speaker labelling -------------------------------------------------------
-// The mic prefix must survive into the text handed to the model, and the room
-// path must stay untagged so the two remain distinguishable.
+// Both channels carry their label into the text handed to the model, and the
+// two labels differ — that is what keeps User and System distinguishable.
+// The stored record keeps the plain text; the tag is prompt-only (R8).
 {
-  const speaker = (s: string) => `User (microphone): ${s}`;
-  const mic = speaker("what did they decide about pricing");
-  const room = "the team agreed to ship on friday";
+  const mic = modelSourceTag("microphone", "what did they decide about pricing");
+  const room = modelSourceTag("system", "the team agreed to ship on friday");
   check(
     "mic text carries the User label",
-    mic.startsWith("User (microphone): ")
+    mic === "User: what did they decide about pricing"
   );
   check(
-    "room text stays untagged, so it reads as system audio",
-    !room.startsWith("User (microphone):")
+    "room text carries the System label, never bare",
+    room === "System: the team agreed to ship on friday"
   );
   const both = `Previous: ${room}\nNow: ${mic}`;
   check(
     "a mixed turn keeps both distinguishable",
-    both.includes("User (microphone):") &&
-      !room.includes("User (microphone):")
+    both.includes("User:") &&
+      both.includes("System:") &&
+      !room.startsWith("User:")
+  );
+}
+
+// --- The questions gate is channel-aware (D1 Gap 2) --------------------------
+// Only `source === "system"` utterances may trigger the AI in questions
+// mode: a question-shaped MIC utterance is held, never sent.
+{
+  const b: Behavior = "questions";
+  const micQ = planUtterance(b, "can you explain that", "", false, "microphone");
+  check("questions: a mic question is held, not answered", micQ.kind === "hold", micQ.kind);
+  const roomQ = planUtterance(b, "can you explain that", "", false, "system");
+  check("questions: the same words from the room are sent", roomQ.kind === "send", roomQ.kind);
+  const roomS = planUtterance(b, "the build is red", "", false, "system");
+  check("questions: a room statement is still held", roomS.kind === "hold", roomS.kind);
+}
+
+// --- Mic-echo dedup (D1 Gap 3, dedup half) ------------------------------------
+// A mic utterance that closely matches a recent system utterance is bleed-
+// through (WebView2 denied echoCancellation) and is suppressed; genuinely
+// new mic speech and stale matches pass through.
+{
+  const history = [{ atSeconds: 100, text: "the team agreed to ship on friday" }];
+  check(
+    "an echo of the room is suppressed",
+    isMicEchoOfSystem("the team agreed to ship on friday", history, 103)
+  );
+  check(
+    "genuinely new mic speech passes through",
+    !isMicEchoOfSystem("my action item is the deploy script", history, 103)
+  );
+  check(
+    "a stale match outside the window passes through",
+    !isMicEchoOfSystem("the team agreed to ship on friday", history, 200)
+  );
+  check(
+    "an empty mic utterance is not an echo",
+    !isMicEchoOfSystem("   ", history, 103)
   );
 }
 
