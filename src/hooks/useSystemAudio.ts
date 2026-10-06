@@ -32,6 +32,7 @@ import {
   KnowledgeFile,
   ListenMode,
   TranscriptSegment,
+  TranscriptSource,
 } from "@/types/system-audio";
 import { useKnowledge } from "./useKnowledge";
 import { planUtterance } from "@/lib/response-policy";
@@ -578,7 +579,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       if (plan.kind === "hold") return;
 
       if (plan.kind === "stop-and-send") {
-        await stopAndSend(plan.text);
+        await stopAndSend(plan.text, "system");
         return;
       }
 
@@ -947,7 +948,18 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     }
 
     // The stored messages go to the boundary as-is; it orders them once (R6).
-    await processWithAI(action, effectiveSystemPrompt, updatedMessages);
+    // D1 Gap 1: the quick action is a TYPED user action, not room audio, so it
+    // is labelled `User: ...`. That matches what the transcript row already
+    // shows — `pushUserSegment` stores typed input with `source: "microphone"`
+    // one screen above — so the model and the thread now agree. It was sent
+    // bare here, which let the model read a clicked chip as unattributed
+    // speech.
+    await processWithAI(
+      action,
+      effectiveSystemPrompt,
+      updatedMessages,
+      modelSourceTag("microphone", action)
+    );
   };
 
   // After each answer, ask the provider for a few conversation-specific
@@ -1146,7 +1158,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // the popover and never clears the conversation — that full teardown is
   // `stopCapture`, which belongs to Auto's Stop button.
   const stopAndSend = useCallback(
-    async (text: string) => {
+    async (text: string, source: TranscriptSource) => {
       try {
         await invoke<string>("stop_system_audio_capture");
       } catch (err) {
@@ -1170,10 +1182,16 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       );
 
       // The stored messages go to the boundary as-is; it orders them once (R6).
+      // D1 Gap 1 (the remaining half): `source` is threaded in rather than
+      // assumed, so this path labels the room's words `System: ...` instead of
+      // sending them bare. Untagged text here made the model read a Manual-mode
+      // send as "the user asked", which is the reported symptom. `modelInput` is
+      // prompt-only; the stored message stays the plain transcript (R8).
       await processWithAI(
         outbound,
         effectiveSystemPrompt,
-        conversation.messages ?? []
+        conversation.messages ?? [],
+        modelSourceTag(source, outbound)
       );
     },
     [systemPrompt, contextContent, conversation.messages, processWithAI]
@@ -1231,7 +1249,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       if (plan.kind === "hold") return;
 
       if (plan.kind === "stop-and-send") {
-        await stopAndSend(plan.text);
+        await stopAndSend(plan.text, "microphone");
         return;
       }
 
@@ -1417,7 +1435,13 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           : partial
         : held;
 
-    await stopAndSend(combined);
+    // "system", not "microphone": `held` is the Manual-mode buffer that
+    // `finalizeTranscriptSegment` (the system-audio path) fills, and `partial`
+    // is that same capture's live VAD partial. The Manual stop button is the
+    // "send me the room" action, so the model is told the words came from the
+    // room. Labelling this `User` is what made the model answer as if the user
+    // had asked.
+    await stopAndSend(combined, "system");
   }, [stopAndSend]);
 
   const handleSetup = useCallback(async () => {
