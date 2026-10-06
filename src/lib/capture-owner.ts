@@ -105,6 +105,39 @@ export class CaptureOwnership {
   }
 
   /**
+   * D4: observers of HOLDER changes. The registry stays plain state on
+   * purpose — no imports, no browser APIs, no React (`mic-ownership-check.ts`
+   * drives it directly as a pure state machine), but the app's Ask flag is
+   * DERIVED from it during React render (`mayMicrophoneRun`), and a bare field
+   * write never tells React to redraw. The grant therefore lands after the
+   * render that needed it and no render follows — the mic sits visibly OFF
+   * while it already holds the token, until an unrelated update redrew the
+   * screen. These listeners are the propagation path: `useCompletion`
+   * subscribes with `useSyncExternalStore`, so a grant or release re-renders
+   * the hook immediately. Listeners fire ONLY when the holder actually
+   * changes; with none registered (the guard's world) `notify` is a no-op.
+   */
+  private listeners: Array<() => void> = [];
+
+  /**
+   * Subscribe to holder changes; returns the unsubscribe function (safe to
+   * call twice). An arrow-function field so `captureOwnership.subscribe` can
+   * be handed to `useSyncExternalStore` directly without losing its receiver.
+   */
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.push(listener);
+    return () => {
+      const index = this.listeners.indexOf(listener);
+      if (index !== -1) this.listeners.splice(index, 1);
+    };
+  };
+
+  /** Notify observers. Iterated over a copy: a listener may unsubscribe. */
+  private notify(): void {
+    for (const listener of [...this.listeners]) listener();
+  }
+
+  /**
    * Ask for ownership. Refused (`null`) while the other source owns capture.
    * Re-requesting while already holding returns the live token.
    */
@@ -113,6 +146,7 @@ export class CaptureOwnership {
       return this.holder.source === source ? this.holder : null;
     }
     this.holder = { source, id: this.nextId++ };
+    this.notify();
     return this.holder;
   }
 
@@ -124,6 +158,7 @@ export class CaptureOwnership {
   take(source: CaptureSource): CaptureToken {
     if (this.holder && this.holder.source === source) return this.holder;
     this.holder = { source, id: this.nextId++ };
+    this.notify();
     return this.holder;
   }
 
@@ -133,7 +168,10 @@ export class CaptureOwnership {
    */
   release(token: CaptureToken | null | undefined): void {
     if (!token) return;
-    if (this.holder === token) this.holder = null;
+    if (this.holder === token) {
+      this.holder = null;
+      this.notify();
+    }
   }
 }
 

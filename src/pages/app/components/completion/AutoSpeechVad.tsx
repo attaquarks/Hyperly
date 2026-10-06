@@ -1,6 +1,7 @@
 import { UseCompletionReturn } from "@/types";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { useEffect, useRef } from "react";
+import { captureOwnership } from "@/lib/capture-owner";
 
 type Props = Pick<
   UseCompletionReturn,
@@ -54,8 +55,25 @@ export const AutoSpeechVAD = ({
 
   // Key released: join everything captured during the hold and send it once.
   // A pause mid-hold never reaches this, so nothing goes out early.
+  // [D4] INSTRUMENTATION (temporary, kept deliberately — see PR): point (c)
+  // the Ask mic starting. Rising-edge guarded, so a `submit` identity change
+  // mid-hold or a MicDriver remount cannot fake a start. The pass condition:
+  // an [D4][ask-start] on the SAME press as its [D4][ask-attempt] GRANTED —
+  // within one frame — and no start without one.
+  const prevStartRef = useRef(false);
   useEffect(() => {
-    if (enableVAD) return;
+    if (enableVAD) {
+      if (!prevStartRef.current) {
+        console.log(
+          `[D4][ask-start] owner=${captureOwnership.owner ?? "null"}; token=${
+            captureOwnership.token?.id ?? "null"
+          }`
+        );
+      }
+      prevStartRef.current = true;
+      return;
+    }
+    prevStartRef.current = false;
 
     const said = bufferRef.current.join(" ").trim();
     bufferRef.current = [];

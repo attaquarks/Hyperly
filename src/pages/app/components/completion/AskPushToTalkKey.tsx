@@ -37,6 +37,13 @@ export const AskPushToTalkKey = ({
       e.stopPropagation();
       if (e.repeat) return;
 
+      // [D4] INSTRUMENTATION (temporary, kept deliberately — see PR): point
+      // (b) an Alt+Space that reached the toggle. Deliberately no owner/token
+      // here: mic-ownership-check asserts this file stays free of the
+      // ownership registry (the key handler must not become an ownership
+      // decision point). The snapshot for this press is the
+      // [D4][ask-attempt] line the reconcile effect prints in the same tick.
+      console.log(`[D4][ask-press space] panel-visible=${active}`);
       setEnableVAD((prev) => !prev);
     };
 
