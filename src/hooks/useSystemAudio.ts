@@ -51,6 +51,11 @@ export type { VadConfig };
 /// Persisted preference for Listen's "Mic + system audio" toggle.
 const MIC_WITH_SYSTEM_KEY = "listen_mic_with_system";
 
+/// D1b: crash recovery restores the interrupted session, not all history.
+/// Orphans older than this stay in the store (until the 90-day prune) but no
+/// longer replay into the thread on every reopen.
+const ORPHAN_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 // Compose the system prompt for listen-panel AI calls: the active mode's
 // preset (when it has one) rides on top of the user's configured prompt.
 const composeListenPrompt = (base: string, mode: ListenMode): string => {
@@ -802,10 +807,22 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         await store.pruneOrphans();
         const orphans = await store.listRecentOrphans();
         if (cancelled || orphans.length === 0) return;
+        // D1b: the thread is speech only. `ai_response` events stay persisted
+        // (the conversation list is a projection of the event log), but they
+        // must never enter the rendered transcript — and recovery is bounded
+        // to the interrupted session, so orphans older than the restore
+        // window stay in the store (until the 90-day prune) instead of
+        // replaying into every reopen.
+        const recoverable = orphans.filter(
+          (event) =>
+            event.kind !== "ai_response" &&
+            event.created_at >= Date.now() - ORPHAN_RESTORE_WINDOW_MS
+        );
+        if (recoverable.length === 0) return;
         setTranscriptSegments((segments) => {
           // Never clobber a transcript that is already on screen.
           if (segments.length > 0) return segments;
-          return orphans.map((event) => ({
+          return recoverable.map((event) => ({
             id: `restored-${event.id}`,
             timestamp: 0,
             // R8: the row records the CHANNEL, and the real speaker label only
@@ -1504,6 +1521,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     setIsPopoverOpen(false);
     setUseSystemPrompt(true);
     setLivePartial("");    setSuggestedFollowUps([]);
+    // D1b: a new conversation starts from an empty thread — the same wipe
+    // `startCapture` performs. Without this the previous transcript stayed on
+    // screen behind the new conversation.
+    setTranscriptSegments([]);
   }, []);
 
   // Load an existing conversation from history into the listen panel. Used by the
