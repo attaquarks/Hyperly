@@ -24,6 +24,17 @@ let lastScreenshotEventTime = 0;
 let globalInputRef: HTMLInputElement | null = null;
 let globalAudioCallback: (() => void) | null = null;
 let globalScreenshotCallback: (() => void | Promise<void>) | null = null;
+// D10: Listen registers its own screenshot capture here. Ask and Listen both
+// stay mounted in every mode, so both screenshot callbacks are live at once —
+// the single debounced `trigger-screenshot` listener below picks between them
+// using `globalScreenshotPanel`, so the shot lands on the panel that was
+// visible instead of always running Ask's pipeline.
+let globalListenScreenshotCallback: (() => void | Promise<void>) | null = null;
+// D10: which panel the global screenshot shortcut routes to. Fed by
+// app/index.tsx, which owns the live `mode`; read at fire time so a room
+// switch after mount is honoured. Defaults to Ask (unchanged behaviour) until
+// the getter registers.
+let globalScreenshotPanel: () => "ask" | "listen" = () => "ask";
 let globalSystemAudioCallback: (() => void) | null = null;
 let globalCustomShortcutCallbacks: Map<string, () => void> = new Map();
 
@@ -91,6 +102,25 @@ export const useGlobalShortcuts = () => {
     (callback: () => void | Promise<void>) => {
       screenshotCallbackRef.current = callback;
       globalScreenshotCallback = callback;
+    },
+    []
+  );
+
+  // D10: register Listen's screenshot callback. Separate from Ask's
+  // `registerScreenshotCallback` because both rooms stay mounted; the debounced
+  // listener routes between the two via `registerScreenshotPanel`.
+  const registerListenScreenshotCallback = useCallback(
+    (callback: (() => void | Promise<void>) | null) => {
+      globalListenScreenshotCallback = callback;
+    },
+    []
+  );
+
+  // D10: register the panel getter the screenshot listener routes by. Owned by
+  // app/index.tsx (it holds the live `mode`); defaults to Ask when unset.
+  const registerScreenshotPanel = useCallback(
+    (getPanel: () => "ask" | "listen") => {
+      globalScreenshotPanel = getPanel;
     },
     []
   );
@@ -194,9 +224,22 @@ export const useGlobalShortcuts = () => {
 
           lastScreenshotEventTime = now;
 
-          if (globalScreenshotCallback) {
+          // D10: route the shot to the panel that was visible at fire time.
+          // Ask and Listen each register their own capture; the panel getter
+          // (fed by app/index, which owns `mode`) decides which runs. Exactly
+          // one debounce — this block — covers both paths, so a double-fire
+          // cannot return. This single `trigger-screenshot` listener is the
+          // only one that captures; app/index no longer runs a second,
+          // no-op listener for the same event.
+          const panel = globalScreenshotPanel();
+          const screenshotCallback =
+            panel === "listen"
+              ? globalListenScreenshotCallback
+              : globalScreenshotCallback;
+
+          if (screenshotCallback) {
             try {
-              Promise.resolve(globalScreenshotCallback())
+              Promise.resolve(screenshotCallback())
                 .catch((error) => {
                   console.error("Screenshot shortcut callback failed:", error);
                 })
@@ -267,6 +310,8 @@ export const useGlobalShortcuts = () => {
     registerInputRef,
     registerAudioCallback,
     registerScreenshotCallback,
+    registerListenScreenshotCallback,
+    registerScreenshotPanel,
     registerSystemAudioCallback,
     registerCustomShortcutCallback,
     unregisterCustomShortcutCallback,

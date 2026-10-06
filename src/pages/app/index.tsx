@@ -5,7 +5,7 @@ import {
   OverlayChrome,
   OverlayMode,
 } from "./components";
-import { useApp } from "@/hooks";
+import { useApp, useGlobalShortcuts } from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
 import { useEffect, useRef, useState } from "react";
 import { ErrorBoundary } from "react-error-boundary";
@@ -22,6 +22,8 @@ const App = () => {
   const { isHidden, systemAudio } = useApp({ listenActive: mode === "listen" });
   const { customizable } = useAppContext();
   const platform = getPlatform();
+  // D10: supplies the screenshot-panel routing getter (see the effect below).
+  const globalShortcuts = useGlobalShortcuts();
 
   // Mode is user-controlled via the header tabs. The only automatic switch is
   // INTO listen mode the moment a capture starts (e.g. via the global
@@ -56,6 +58,20 @@ const App = () => {
     modeRef.current = mode;
   }, [mode]);
 
+  // D10: the global screenshot shortcut routes to whichever panel was visible
+  // at fire time. app/index owns the live `mode`, so it feeds the getter that
+  // the single screenshot listener in useGlobalShortcuts branches on. Reading
+  // `modeRef.current` inside the getter (not a value captured at registration)
+  // means a room switch after mount is honoured. This replaces the old
+  // `trigger-screenshot` listener that lived here, which was a provable no-op:
+  // `OverlayMode` is always "ask" or "listen", so
+  // `setMode(modeRef.current === "listen" ? "listen" : "ask")` assigned each
+  // value to itself and could never route anything — which is exactly why the
+  // "screenshot lands on Ask" symptom survived PR #39.
+  useEffect(() => {
+    globalShortcuts.registerScreenshotPanel(() => modeRef.current);
+  }, [globalShortcuts.registerScreenshotPanel]);
+
   // Global-shortcut events pull the overlay onto the tab they act on, so a
   // shortcut fired while the other tab is active never takes effect
   // invisibly: the mic and the screenshot flow are Ask-side actions, and the
@@ -75,18 +91,6 @@ const App = () => {
     const unlistens = modeForEvent.map(([event, nextMode]) =>
       listen(event, () => {
         setMode(nextMode);
-      })
-    );
-    // D7: the screenshot goes to whichever room is visible at FIRE time —
-    // Listen's action row feeds its own pending-screenshot path, so routing
-    // here to a hardcoded "ask" (the old static-array entry) silently
-    // attached Listen shots to Ask. `modeRef.current` is read inside the
-    // callback, not in the effect body, so a room switch after mount is
-    // honoured. Default to Ask only when neither room is up (mode is always
-    // one of the two, so this branch is Ask <=> Listen).
-    unlistens.push(
-      listen("trigger-screenshot", () => {
-        setMode(modeRef.current === "listen" ? "listen" : "ask");
       })
     );
     unlistens.push(

@@ -12,7 +12,11 @@ import { FollowUps } from "./FollowUps";
 import { ListenActionRow } from "./ListenActionRow";
 import { ListeningBar } from "./ListeningBar";
 import { ListenFooter } from "./ListenFooter";
-import { useSystemAudioType, useVoiceSensitivity } from "@/hooks";
+import {
+  useSystemAudioType,
+  useVoiceSensitivity,
+  useGlobalShortcuts,
+} from "@/hooks";
 import { useApp } from "@/contexts";
 import { cn } from "@/lib/utils";
 
@@ -74,6 +78,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
   // Drives the mic remount key below, so a sensitivity change made on the Audio
   // Settings page reaches the VAD (see `useVoiceSensitivity`).
   const voiceSensitivity = useVoiceSensitivity();
+  // D10: Listen registers its own screenshot callback for the global shortcut
+  // (see the effect after `handleCapture` below).
+  const globalShortcuts = useGlobalShortcuts();
 
   // Chat history overlays the transcript area; the transcript keeps running
   // behind it and the overlay closes on pick or re-click.
@@ -131,6 +138,20 @@ export const SystemAudio = (props: useSystemAudioType) => {
       setIsCapturingScreenshot(false);
     }
   }, [isCapturingScreenshot]);
+
+  // D10: Listen's own callback for the global screenshot shortcut. The old code
+  // registered Ask's `captureScreenshot` for every `trigger-screenshot`, so a
+  // shot taken while Listen was visible ran Ask's pipeline and landed on Ask —
+  // Listen's action row was the only way to reach this path. Register Listen's
+  // full-screen capture (`capture_to_base64` -> `setScreenshotImage` -> the
+  // `pendingScreenshot` flow the thumbnail strip shows at the bottom) so the
+  // shot attaches to the room that was visible. Re-registered whenever
+  // `handleCapture` changes identity, so the slot always points at the live
+  // handler. Ask keeps its own gate (`screenshotInitiatedByThisContext`), so a
+  // capture started by one room cannot be swallowed by the other.
+  useEffect(() => {
+    globalShortcuts.registerListenScreenshotCallback(handleCapture);
+  }, [globalShortcuts.registerListenScreenshotCallback, handleCapture]);
 
   const handleCaptureRegion = useCallback(async () => {
     try {
