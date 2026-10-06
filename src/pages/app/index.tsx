@@ -61,18 +61,19 @@ const App = () => {
   // invisibly: the mic and the screenshot flow are Ask-side actions, and the
   // system-audio toggle belongs to Listen (capture start also switches via
   // the effect above — this covers the setup-required path where capture
-  // never starts). The exception is focus-text-input mid-capture:
-  // toggle-window emits it on every show, and it must not yank the user off
-  // the live transcript.
+  // never starts). focus-text-input is the one event that deliberately does
+  // NOT switch rooms: its whole job is landing on Ask's composer (D5), so it
+  // fires a dedicated DOM event the Ask panel listens for instead of going
+  // through the room switch. The mid-capture exception stays: toggle-window
+  // emits focus-text-input on every show, and it must not yank the user off
+  // the live transcript — a running capture keeps its transcript.
   useEffect(() => {
     const modeForEvent: Array<[string, OverlayMode]> = [
       ["start-audio-recording", "ask"],
       ["toggle-system-audio", "listen"],
-      ["focus-text-input", "ask"],
     ];
     const unlistens = modeForEvent.map(([event, nextMode]) =>
       listen(event, () => {
-        if (event === "focus-text-input" && capturingRef.current) return;
         setMode(nextMode);
       })
     );
@@ -86,6 +87,22 @@ const App = () => {
     unlistens.push(
       listen("trigger-screenshot", () => {
         setMode(modeRef.current === "listen" ? "listen" : "ask");
+      })
+    );
+    unlistens.push(
+      listen("focus-text-input", () => {
+        if (capturingRef.current) return;
+        setMode("ask");
+        // Fire after the room switch commits, so the composer exists when
+        // the Ask panel's listener runs. Retried a few times: the panel may
+        // still be mounting on a cold switch.
+        let attempts = 0;
+        const tick = () => {
+          attempts += 1;
+          window.dispatchEvent(new CustomEvent("hyperly:focus-ask-input"));
+          if (attempts < 5) setTimeout(tick, 60);
+        };
+        setTimeout(tick, 60);
       })
     );
     return () => {

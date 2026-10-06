@@ -1082,6 +1082,26 @@ export const useCompletion = (capturing: boolean = false) => {
     };
   }, []);
 
+  // D5: land on the Ask composer when the focus-text-input shortcut fires.
+  // The overlay-level mapping (app/index.tsx) switches to the Ask room and
+  // then fires "hyperly:focus-ask-input" a few times; this focuses the real
+  // composer element directly, so there is no dependence on the global input
+  // ref (a single 100 ms shot against whatever it happened to hold — the
+  // second half of the defect) and no race with the panel switch.
+  // Mid-capture the overlay never fires the DOM event at all, so a running
+  // capture keeps its transcript.
+  useEffect(() => {
+    const focusComposer = () => {
+      const el = document.querySelector<HTMLInputElement>(
+        ".hyperly-composer-input"
+      );
+      el?.focus();
+    };
+    window.addEventListener("hyperly:focus-ask-input", focusComposer);
+    return () =>
+      window.removeEventListener("hyperly:focus-ask-input", focusComposer);
+  }, []);
+
   // register callbacks for global shortcuts
   useEffect(() => {
     globalShortcuts.registerAudioCallback(toggleRecording);
