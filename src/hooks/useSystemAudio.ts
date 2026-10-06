@@ -198,13 +198,16 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     knowledgeFileRef.current = knowledgeFile;
   }, [knowledgeFile]);
   const sessionStartRef = useRef<number>(Date.now());
-  // Screenshot captured via the listen panel — attached to the next AI call when manual stop fires.
-  const [pendingScreenshot, setPendingScreenshot] = useState<string | null>(null);
+  // Screenshots captured via the listen panel — attached to the next AI call when manual stop fires.
+  // D11: an ARRAY, mirroring the Ask panel's attached-files behaviour: each
+  // capture appends, so taking a second screenshot no longer replaces the
+  // first. The whole batch rides on the next call and is cleared after it.
+  const [pendingScreenshots, setPendingScreenshots] = useState<string[]>([]);
   // Mirror in a ref so callbacks always see the latest value without rebuilding deps.
-  const pendingScreenshotRef = useRef<string | null>(null);
+  const pendingScreenshotsRef = useRef<string[]>([]);
   useEffect(() => {
-    pendingScreenshotRef.current = pendingScreenshot;
-  }, [pendingScreenshot]);
+    pendingScreenshotsRef.current = pendingScreenshots;
+  }, [pendingScreenshots]);
   // Monotonic counter for transcript segment ids. `Date.now()` collides when a
   // partial and a final land in the same millisecond, which produced duplicate
   // React keys; a counter can never repeat.
@@ -1047,11 +1050,12 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           return;
         }
 
-        // Capture the current pending screenshot (if any) and clear it so it is only
-        // attached to the next call.
-        const screenshotForThisCall = pendingScreenshotRef.current;
-        pendingScreenshotRef.current = null;
-        setPendingScreenshot(null);
+        // Capture the current pending screenshots (if any) and clear them so they are
+        // only attached to the next call. D11: the whole accumulated batch goes —
+        // Ask sends every attached file, and Listen now does the same.
+        const screenshotsForThisCall = pendingScreenshotsRef.current;
+        pendingScreenshotsRef.current = [];
+        setPendingScreenshots([]);
 
         // Library knowledge rides on top of the system prompt for this call only.
         const knowledge = knowledgeFileRef.current;
@@ -1075,7 +1079,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             systemPrompt: promptWithKnowledge,
             history,
             userMessage: modelInput ?? transcription,
-            imagesBase64: screenshotForThisCall ? [screenshotForThisCall] : [],
+            imagesBase64: screenshotsForThisCall,
             // The signal Stop aborts. Without it the request kept streaming and
             // Stop was a no-op for anything already in flight (R6).
             signal: turn.signal,
@@ -1750,8 +1754,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     // Continuous recording
     manualStopAndSend,
     // Screenshot captured in the listen panel — sent with the next AI call
-    pendingScreenshot,
-    setPendingScreenshot,
+    pendingScreenshots,
+    setPendingScreenshots,
     // Live running transcript shown while audio is still being captured
     livePartial,
     transcriptSegments,
