@@ -165,19 +165,27 @@ type OwnershipCtor = new () => Ownership;
 let OwnershipClass: OwnershipCtor | null = null;
 let mayMicrophoneRun: ((intent: boolean, ownership: Ownership) => boolean) | null =
   null;
+let DecideAskMic: ((ownership: Ownership) => "start" | "refuse") | null = null;
+let ReportClass: (new () => Ownership & {
+  reportSystemCapture(detail: { capturing: boolean; micWithSystem: boolean }): void;
+}) | null = null;
 
 try {
   const mod: any = await import("../src/lib/capture-owner.ts");
   if (
     typeof mod.CaptureOwnership !== "function" ||
-    typeof mod.mayMicrophoneRun !== "function"
+    typeof mod.mayMicrophoneRun !== "function" ||
+    typeof mod.decideAskMic !== "function" ||
+    typeof mod.CaptureOwnership.prototype.reportSystemCapture !== "function"
   ) {
     throw new Error(
-      "capture-owner.ts must export CaptureOwnership and mayMicrophoneRun"
+      "capture-owner.ts must export CaptureOwnership (with reportSystemCapture), mayMicrophoneRun and decideAskMic"
     );
   }
   OwnershipClass = mod.CaptureOwnership;
   mayMicrophoneRun = mod.mayMicrophoneRun;
+  DecideAskMic = mod.decideAskMic;
+  ReportClass = mod.CaptureOwnership;
 } catch (error) {
   fail(
     "the ownership module runs",
@@ -492,6 +500,65 @@ if (OwnershipClass) {
     violations === 0,
     () => `${violations} interleaving(s) ran more than one capture owner`
   );
+}
+
+// ---- E. D3+D8: the shortcut press decides from the reported shape ---------
+
+console.log("\nE. Ctrl+Shift+A decides from the reported capture shape");
+
+if (DecideAskMic && ReportClass) {
+  const shape = (
+    capturing: boolean,
+    micWithSystem: boolean
+  ): InstanceType<typeof ReportClass> => {
+    // A fresh registry per shape, as the unit tests do for the state machine.
+    const ownership = new ReportClass();
+    ownership.reportSystemCapture({ capturing, micWithSystem });
+    return ownership;
+  };
+
+  check(
+    "idle: the shortcut starts the mic",
+    DecideAskMic(shape(false, false)) === "start",
+    () => `got ${DecideAskMic(shape(false, false))}`
+  );
+  check(
+    "system-only capture: the shortcut starts the mic normally",
+    DecideAskMic(shape(true, false)) === "start",
+    () => `got ${DecideAskMic(shape(true, false))}`
+  );
+  check(
+    "mic+system capture: the shortcut refuses instead of silently no-op'ing",
+    DecideAskMic(shape(true, true)) === "refuse",
+    () => `got ${DecideAskMic(shape(true, true))}`
+  );
+  check(
+    "a stale report (mic toggle off without capture) still starts",
+    DecideAskMic(shape(false, true)) === "start",
+    () => `got ${DecideAskMic(shape(false, true))}`
+  );
+
+  const idle = shape(false, false);
+  check(
+    "the visible refusal text exists at the Ask call site",
+    /Microphone already in use by the Listen capture/.test(completionSource),
+    () => "toggleRecording sets no user-visible refusal"
+  );
+  check(
+    "the refusal returns before touching intent or the running capture",
+    /decideAskMic\(\) === "refuse"[\s\S]{0,400}?return;/.test(
+      completionSource
+    ) && !/decideAskMic[\s\S]{0,400}?stop_/.test(completionSource),
+    () => "the refuse path does not return early"
+  );
+  check(
+    "Listen reports its live capture shape to the registry",
+    /reportSystemCapture\(\{ capturing, micWithSystem \}\)/.test(
+      systemAudioSource
+    ),
+    () => "useSystemAudio never reports { capturing, micWithSystem }"
+  );
+  void idle;
 }
 
 // ---- report ----------------------------------------------------------------
