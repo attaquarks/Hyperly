@@ -163,10 +163,16 @@ pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
                     .map_err(|e| format!("Failed to hide dashboard window: {}", e))?;
             }
             Ok(false) => {
-                // Window is hidden, show and focus it
+                // Window is hidden, show and focus it. `unminimize` is what
+                // actually raises a minimized window: `show()` alone leaves a
+                // minimized dashboard behind the overlay, unfocused, so the
+                // user has to click it (D6).
                 dashboard_window
                     .show()
                     .map_err(|e| format!("Failed to show dashboard window: {}", e))?;
+                dashboard_window.unminimize().map_err(|e| {
+                    format!("Failed to unminimize dashboard window: {}", e)
+                })?;
                 dashboard_window
                     .set_focus()
                     .map_err(|e| format!("Failed to focus dashboard window: {}", e))?;
