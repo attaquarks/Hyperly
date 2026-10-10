@@ -1,4 +1,4 @@
-import { AudioSelection, VoiceSensitivity } from "./components";
+import { AecToggle, AudioSelection, VoiceSensitivity } from "./components";
 import { PageLayout } from "@/layouts";
 import { getPlatform } from "@/lib";
 
@@ -40,6 +40,8 @@ const Audio = () => {
       <AudioSelection />
 
       <VoiceSensitivity />
+
+      <AecToggle />
 
       <div className="text-xs text-amber-600 bg-amber-500/10 p-3 rounded-md mb-4 space-y-2">
         <p>
