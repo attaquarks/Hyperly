@@ -181,6 +181,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   const startingRef = useRef<boolean>(false);
   const aecReferenceStopRef = useRef<(() => Promise<void>) | null>(null);
   const startReferenceTap = useCallback(async () => {
+    // Step 1 intentionally opens the reference when hyperly.aec.enabled is
+    // false; Step 4 will gate the reference tee and Channel on the saved toggle.
+    if (aecReferenceStopRef.current) return;
+
     try {
       aecReferenceStopRef.current = await openAecReferenceChannel(() => {});
     } catch (error) {

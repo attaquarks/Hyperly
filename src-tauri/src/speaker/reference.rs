@@ -31,7 +31,7 @@ pub struct ReferenceFrame {
 
 struct RawChunk {
     sequence: u64,
-    capture_ts_ns: u64,
+    enqueue_ts_ns: u64,
     samples: Vec<f32>,
 }
 
@@ -91,7 +91,8 @@ impl ReferenceTap {
             return;
         }
 
-        let capture_ts_ns = self
+        // Step 1 records enqueue time; the tee does not carry source capture timestamps.
+        let enqueue_ts_ns = self
             .0
             .started_at
             .elapsed()
@@ -100,7 +101,7 @@ impl ReferenceTap {
         self.0.queue_depth.fetch_add(1, Ordering::AcqRel);
         let chunk = RawChunk {
             sequence,
-            capture_ts_ns,
+            enqueue_ts_ns,
             samples,
         };
 
@@ -119,11 +120,10 @@ impl ReferenceTap {
 
     pub fn stop(&self) {
         self.0.active.store(false, Ordering::Release);
-        if let Ok(mut worker) = self.0.worker.lock() {
-            if let Some(worker) = worker.take() {
-                if worker.thread().id() != thread::current().id() {
-                    let _ = worker.join();
-                }
+        let worker = self.0.worker.lock().ok().and_then(|mut worker| worker.take());
+        if let Some(worker) = worker {
+            if worker.thread().id() != thread::current().id() {
+                let _ = worker.join();
             }
         }
     }
@@ -340,7 +340,7 @@ fn run_reference_worker(
                 if resampler.is_none() {
                     resampler = Some(SincResampler::new(
                         input_sample_rate,
-                        chunk.capture_ts_ns,
+                        chunk.enqueue_ts_ns,
                     ));
                     frame_start_output = 0;
                 }
