@@ -10,6 +10,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ASSET_DIR = join(ROOT, "public", "localvqe");
 const ASSETS = [
   { name: "localvqe.js", mime: "javascript" },
+  { name: "localvqe-glue.mjs", mime: "javascript" },
   { name: "localvqe.wasm", mime: "application/wasm" },
   { name: "localvqe-pi-aec-v1-49k-f32.gguf", mime: "" },
 ];
@@ -68,6 +69,9 @@ try {
     const validWorker =
       workerResponse.status === 200 &&
       (workerResponse.headers.get("content-type") ?? "").includes("javascript") &&
+      workerText.includes("localvqe-glue.mjs") &&
+      !workerText.includes("createObjectURL") &&
+      !workerText.includes("new Blob") &&
       workerText.includes("localvqe_new_with_options") &&
       workerText.includes("localvqe_process_frame_f32");
     if (!validWorker) failures.push(`Vite worker module did not compile at ${workerUrl}`);

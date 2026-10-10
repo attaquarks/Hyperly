@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
 import {
   LOCALVQE_SMOKE_SAMPLE_RATE,
@@ -19,6 +19,11 @@ const ASSETS = [
     name: "localvqe.js",
     bytes: 65_747,
     sha256: "a995cfa3fbf2a10aa61db8f6e85d8e8b2406309685ff4c5a05027e0fa0703222",
+  },
+  {
+    name: "localvqe-glue.mjs",
+    bytes: 65_792,
+    sha256: "ed2144b1d590afb0d3c6c54678af0ffaf8653d7b9236f6168d366e2be9288197",
   },
   {
     name: "localvqe.wasm",
@@ -48,6 +53,18 @@ for (const asset of ASSETS) {
   assetBytes.set(asset.name, bytes);
   console.log(`  ok    ${asset.name} (${asset.bytes} B, sha256 ${actualHash})`);
 }
+
+assert.equal(
+  assetBytes.get("localvqe-glue.mjs")!.toString("utf8"),
+  `${assetBytes.get("localvqe.js")!.toString("utf8")}\nexport { createLocalVQEModule as default };\n`,
+  "ESM glue must be the pinned classic glue with only a factory export appended"
+);
+console.log("  ok    ESM glue is derived from the pinned classic glue with a factory export");
+const esmGlue = await import(pathToFileURL(join(ASSET_DIR, "localvqe-glue.mjs")).href) as {
+  default?: unknown;
+};
+assert.equal(typeof esmGlue.default, "function", "ESM glue did not export the LocalVQE factory");
+console.log("  ok    same-origin ESM glue imports and exposes its factory");
 
 const gluePath = join(ASSET_DIR, "localvqe.js");
 const glueText = assetBytes.get("localvqe.js")!.toString("utf8");

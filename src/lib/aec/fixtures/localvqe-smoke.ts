@@ -18,15 +18,21 @@ export const makeLocalVqeSmokeFixture = (): LocalVqeSmokeFixture => {
   const echoDelaySamples = 480;
   let lowPassState = 0;
   let noiseState = 0x6d2b79f5;
+  let farNoiseState = 0x1b873593;
 
   for (let i = 0; i < sampleCount; i += 1) {
     const t = i / LOCALVQE_SMOKE_SAMPLE_RATE;
     const farEnvelope = 0.72 + 0.28 * Math.sin(2 * Math.PI * 0.37 * t);
-    const far = farEnvelope * (
-      0.23 * Math.sin(2 * Math.PI * (170 * t + 8 * t * t)) +
-      0.13 * Math.sin(2 * Math.PI * 293 * t + 0.4) +
-      0.08 * Math.sin(2 * Math.PI * 431 * t + 1.1)
-    );
+    farNoiseState ^= farNoiseState << 13;
+    farNoiseState ^= farNoiseState >>> 17;
+    farNoiseState ^= farNoiseState << 5;
+    const farNoise = (farNoiseState >>> 0) / 0x80000000 - 1;
+    const pulsePhase = ((i * 120) % LOCALVQE_SMOKE_SAMPLE_RATE) / LOCALVQE_SMOKE_SAMPLE_RATE;
+    const pulseWidth = 0.1;
+    const glottalPulse = pulsePhase < pulseWidth
+      ? Math.sin(Math.PI * pulsePhase / pulseWidth) ** 2
+      : 0;
+    const far = farEnvelope * (0.62 * (glottalPulse - pulseWidth / 2) + 0.035 * farNoise);
     reference[i] = far;
 
     const delayedFar = i >= echoDelaySamples

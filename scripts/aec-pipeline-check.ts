@@ -30,13 +30,15 @@ console.log("  ok    microphone acquisition uses the saved toggle and teardown s
 
 const assetPaths = [
   "public/localvqe/localvqe.js",
+  "public/localvqe/localvqe-glue.mjs",
   "public/localvqe/localvqe.wasm",
   "public/localvqe/localvqe-pi-aec-v1-49k-f32.gguf",
 ];
 for (const assetPath of assetPaths) {
   assert.ok(existsSync(join(ROOT, assetPath)), `missing bundled LocalVQE asset: ${assetPath}`);
 }
-assert.match(worker, /new URL\("\/localvqe\/localvqe\.js"/);
+assert.match(worker, /import localVqeGlueUrl from "\/localvqe\/localvqe-glue\.mjs\?url"/);
+assert.match(worker, /import\(\/\* @vite-ignore \*\/ localVqeGlueUrl\)/);
 assert.match(worker, /new URL\(MODEL_URL, scope\.location\.origin\)/);
 assert.match(worker, /const MODEL_URL = "\/localvqe\/localvqe-pi-aec-v1-49k-f32\.gguf"/);
 assert.match(worker, /if \(!context\)/, "worker must reject a null LocalVQE context");

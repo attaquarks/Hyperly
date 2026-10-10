@@ -1,3 +1,5 @@
+import localVqeGlueUrl from "/localvqe/localvqe-glue.mjs?url";
+
 interface WorkerScope {
   location: Location;
   onmessage: ((event: MessageEvent<WorkerRequest>) => void) | null;
@@ -74,32 +76,18 @@ const bind = <T extends (...args: never[]) => unknown>(
 async function loadModule(): Promise<LocalVqeModule> {
   if (!modulePromise) {
     modulePromise = (async () => {
-      const glueUrl = new URL("/localvqe/localvqe.js", scope.location.origin);
-      const response = await fetch(glueUrl);
-      if (!response.ok) {
-        throw new Error(`LocalVQE glue request failed: ${response.status}`);
+      const glueModule = (await import(/* @vite-ignore */ localVqeGlueUrl)) as {
+        default?: LocalVqeFactory;
+      };
+      if (typeof glueModule.default !== "function") {
+        throw new Error("LocalVQE ESM glue did not expose createLocalVQEModule");
       }
-
-      // The published glue is a classic script. Export its factory from a
-      // same-origin ESM wrapper so this Vite-bundled module worker can load it.
-      const glueText = await response.text();
-      const wrapperUrl = URL.createObjectURL(
-        new Blob([glueText, "\nexport default createLocalVQEModule;"], {
-          type: "text/javascript",
-        })
-      );
-      try {
-        const glueModule = (await import(/* @vite-ignore */ wrapperUrl)) as {
-          default?: LocalVqeFactory;
-        };
-        if (typeof glueModule.default !== "function") {
-          throw new Error("LocalVQE glue did not expose createLocalVQEModule");
-        }
-        const module = await glueModule.default({
-          locateFile: (path) => new URL(path, new URL("/localvqe/", scope.location.origin)).href,
-        });
-        moduleInstance = module;
-        api = {
+      const factory = glueModule.default;
+      const module = await factory({
+        locateFile: (path) => new URL(path, new URL("/localvqe/", scope.location.origin)).href,
+      });
+      moduleInstance = module;
+      api = {
           optionsNew: bind(module, "localvqe_options_new", "number", []),
           optionsSetModel: bind(module, "localvqe_options_set_model_path", "number", ["number", "string"]),
           optionsSetThreads: bind(module, "localvqe_options_set_threads", "number", ["number", "number"]),
@@ -118,11 +106,8 @@ async function loadModule(): Promise<LocalVqeModule> {
             "number",
           ]),
           free: bind(module, "localvqe_free", null, ["number"]),
-        };
-        return module;
-      } finally {
-        URL.revokeObjectURL(wrapperUrl);
-      }
+      };
+      return module;
     })();
   }
   return modulePromise;
