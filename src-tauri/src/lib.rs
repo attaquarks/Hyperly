@@ -16,7 +16,7 @@ use tauri_nspanel::{cocoa::appkit::NSWindowCollectionBehavior, panel_delegate, W
 use tokio::task::JoinHandle;
 mod speaker;
 use capture::CaptureState;
-use speaker::VadConfig;
+use speaker::{ReferenceTap, VadConfig};
 
 
 #[derive(Default)]
@@ -24,6 +24,8 @@ pub struct AudioState {
     stream_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     vad_config: Arc<Mutex<VadConfig>>,
     is_capturing: Arc<Mutex<bool>>,
+    reference_tap: Arc<Mutex<Option<ReferenceTap>>>,
+    capture_sample_rate: Arc<Mutex<Option<u32>>>,
 }
 
 #[tauri::command]
@@ -133,6 +135,8 @@ pub fn run() {
             shortcuts::toggle_main_window,
             speaker::start_system_audio_capture,
             speaker::stop_system_audio_capture,
+            speaker::start_aec_reference,
+            speaker::stop_aec_reference,
             speaker::manual_stop_continuous,
             speaker::check_system_audio_access,
             speaker::request_system_audio_access,

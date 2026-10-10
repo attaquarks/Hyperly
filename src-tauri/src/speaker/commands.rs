@@ -1,5 +1,5 @@
 // Hyperly AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
-use crate::speaker::{AudioDevice, SpeakerInput};
+use crate::speaker::{AudioDevice, ReferenceFrame, ReferenceStream, ReferenceTap, SpeakerInput};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::StreamExt;
@@ -10,6 +10,7 @@ use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Listener, Manager};
 use tauri_plugin_shell::ShellExt;
 use tracing::{error, warn};
@@ -91,8 +92,8 @@ pub async fn start_system_audio_capture(
         format!("Failed to access system audio: {}", e)
     })?;
 
-    let stream = input.stream();
-    let sr = stream.sample_rate();
+    let raw_stream = input.stream();
+    let sr = raw_stream.sample_rate();
 
     // Validate sample rate
     if !(8000..=96000).contains(&sr) {
@@ -102,6 +103,10 @@ pub async fn start_system_audio_capture(
             sr
         ));
     }
+
+    // This adapter copies raw samples into a bounded side FIFO while yielding
+    // each original sample unchanged to the existing capture path.
+    let stream = ReferenceStream::new(raw_stream, Arc::clone(&state.reference_tap));
 
     let app_clone = app.clone();
     let vad_config = state
@@ -115,6 +120,10 @@ pub async fn start_system_audio_capture(
         .is_capturing
         .lock()
         .map_err(|e| format!("Failed to set capturing state: {}", e))? = true;
+    *state
+        .capture_sample_rate
+        .lock()
+        .map_err(|e| format!("Failed to store capture sample rate: {}", e))? = Some(sr);
 
     // Emit capture started event
     let _ = app_clone.emit("capture-started", sr);
@@ -128,6 +137,10 @@ pub async fn start_system_audio_capture(
         }
 
         let state = app_clone.state::<crate::AudioState>();
+        stop_reference_tap(&state);
+        if let Ok(mut sample_rate) = state.capture_sample_rate.lock() {
+            *sample_rate = None;
+        }
         {
             if let Ok(mut guard) = state.stream_task.lock() {
                 *guard = None;
@@ -141,6 +154,59 @@ pub async fn start_system_audio_capture(
         .map_err(|e| format!("Failed to store task: {}", e))? = Some(task);
 
     Ok(())
+}
+
+/// Start the raw loopback reference Channel for the currently running system
+/// capture. The tee is installed before capture starts and can be enabled at
+/// any point while that capture is running.
+#[tauri::command]
+pub async fn start_aec_reference(
+    app: AppHandle,
+    channel: Channel<ReferenceFrame>,
+) -> Result<(), String> {
+    let state = app.state::<crate::AudioState>();
+    let is_capturing = *state
+        .is_capturing
+        .lock()
+        .map_err(|e| format!("Failed to read capture state: {}", e))?;
+    if !is_capturing {
+        return Err("System audio capture must be running before starting the AEC reference".into());
+    }
+    let sample_rate = state
+        .capture_sample_rate
+        .lock()
+        .map_err(|e| format!("Failed to read capture sample rate: {}", e))?
+        .ok_or_else(|| "System audio sample rate is not available".to_string())?;
+
+    let tap = ReferenceTap::start(channel, sample_rate);
+    let previous = state
+        .reference_tap
+        .lock()
+        .map_err(|e| format!("Failed to update reference tap: {}", e))?
+        .replace(tap);
+    if let Some(previous) = previous {
+        previous.stop();
+    }
+    Ok(())
+}
+
+/// Stop the reference tee without stopping system-audio transcription.
+#[tauri::command]
+pub async fn stop_aec_reference(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<crate::AudioState>();
+    stop_reference_tap(&state);
+    Ok(())
+}
+
+fn stop_reference_tap(state: &crate::AudioState) {
+    let tap = state
+        .reference_tap
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
+    if let Some(tap) = tap {
+        tap.stop();
+    }
 }
 
 // VAD-enabled capture - OPTIMIZED for real-time speech detection
@@ -728,6 +794,8 @@ pub async fn stop_system_audio_capture(app: AppHandle) -> Result<(), String> {
         }
     }
 
+    stop_reference_tap(&state);
+
     // LONGER delay for proper cleanup (300ms instead of 150ms)
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -736,6 +804,10 @@ pub async fn stop_system_audio_capture(app: AppHandle) -> Result<(), String> {
         .is_capturing
         .lock()
         .map_err(|e| format!("Failed to update capturing state: {}", e))? = false;
+    *state
+        .capture_sample_rate
+        .lock()
+        .map_err(|e| format!("Failed to clear capture sample rate: {}", e))? = None;
 
     // Additional cleanup delay (CRITICAL for mic indicator)
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;

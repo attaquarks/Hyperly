@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useGlobalShortcuts } from "./useGlobalShortcuts";
 import { invoke } from "@tauri-apps/api/core";
+import { startAecReference as openAecReferenceChannel } from "@/lib/aec/reference-channel";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
@@ -178,6 +179,26 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   const stopRequestedRef = useRef<boolean>(false);
   // Guards the async spawn against a concurrent start.
   const startingRef = useRef<boolean>(false);
+  const aecReferenceStopRef = useRef<(() => Promise<void>) | null>(null);
+  const startReferenceTap = useCallback(async () => {
+    try {
+      aecReferenceStopRef.current = await openAecReferenceChannel(() => {});
+    } catch (error) {
+      // Reference delivery is additive; failure must not interrupt the existing
+      // system-audio transcription path.
+      console.warn("[aec] reference channel unavailable:", error);
+    }
+  }, []);
+  const stopReferenceTap = useCallback(async () => {
+    const stop = aecReferenceStopRef.current;
+    aecReferenceStopRef.current = null;
+    if (!stop) return;
+    try {
+      await stop();
+    } catch (error) {
+      console.warn("[aec] failed to stop reference channel:", error);
+    }
+  }, []);
 
   // AI-suggested follow-ups, regenerated after each answer.
   const [suggestedFollowUps, setSuggestedFollowUps] = useState<string[]>([]);
@@ -1179,6 +1200,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // `stopCapture`, which belongs to Auto's Stop button.
   const stopAndSend = useCallback(
     async (text: string, source: TranscriptSource) => {
+      await stopReferenceTap();
       try {
         await invoke<string>("stop_system_audio_capture");
       } catch (err) {
@@ -1214,7 +1236,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         modelSourceTag(source, outbound)
       );
     },
-    [systemPrompt, contextContent, conversation.messages, processWithAI]
+    [systemPrompt, contextContent, conversation.messages, processWithAI, stopReferenceTap]
   );
 
   // A finalized microphone utterance. It is shown in the transcript under the
@@ -1336,6 +1358,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       // audio was flowing while nothing was being captured.
 
       // Stop any existing capture
+      await stopReferenceTap();
       await invoke<string>("stop_system_audio_capture");
 
       const deviceId =
@@ -1352,12 +1375,13 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         vadConfig: currentSpawnVadConfig(),
         deviceId: deviceId,
       });
+      await startReferenceTap();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
       setIsPopoverOpen(true);
     }
-  }, [vadConfig, selectedAudioDevices.output?.id]);
+  }, [vadConfig, selectedAudioDevices.output?.id, startReferenceTap, stopReferenceTap]);
 
   // Start the VAD engine inside a session that is already on screen: no
   // conversation reset, no transcript wipe, no stop-then-start. Called only
@@ -1392,6 +1416,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         vadConfig: currentSpawnVadConfig(),
         deviceId: deviceId,
       });
+      await startReferenceTap();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
@@ -1399,7 +1424,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     } finally {
       startingRef.current = false;
     }
-  }, [vadConfig, selectedAudioDevices.output?.id]);
+  }, [vadConfig, selectedAudioDevices.output?.id, startReferenceTap]);
 
   const stopCapture = useCallback(async () => {
     try {
@@ -1409,6 +1434,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       getAiTurns().cancel();
 
       // Stop the audio capture
+      await stopReferenceTap();
       await invoke<string>("stop_system_audio_capture");
 
       // Reset ALL states
@@ -1428,7 +1454,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       setError(`Failed to stop capture: ${errorMessage}`);
       console.error("Stop capture error:", err);
     }
-  }, []);
+  }, [stopReferenceTap]);
 
   // Spacebar / Stop in Manual and "Auto · On questions": stop the engine and
   // send what was collected — held utterances plus the live partial, unless
@@ -1518,9 +1544,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   useEffect(() => {
     return () => {
       getAiTurns().cancel();
+      void stopReferenceTap();
       invoke("stop_system_audio_capture").catch(() => {});
     };
-  }, []);
+  }, [stopReferenceTap]);
 
   // Debounced save (Phase 4 R9): coalescing, and it never drops the newest state.
   useEffect(() => {
