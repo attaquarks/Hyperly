@@ -18,35 +18,38 @@ import { MARKDOWN_FORMATTING_INSTRUCTIONS } from "../../config/constants.ts";
 
 function buildEnhancedSystemPrompt(baseSystemPrompt?: string): string {
   const responseSettings = getResponseSettings();
-  const prompts: string[] = [];
+  const sections: string[] = [];
 
   // Personal / interview context is prepended first so the AI treats it
   // as the highest-priority system instruction.
   const contextPrompt = composeSystemPromptWithContext(baseSystemPrompt);
   if (contextPrompt && contextPrompt.trim()) {
-    prompts.push(contextPrompt);
+    sections.push(contextPrompt);
   } else if (baseSystemPrompt) {
-    prompts.push(baseSystemPrompt);
+    sections.push(baseSystemPrompt);
   }
 
   const lengthOption = RESPONSE_LENGTHS.find(
     (l) => l.id === responseSettings.responseLength
   );
   if (lengthOption?.prompt?.trim()) {
-    prompts.push(lengthOption.prompt);
+    sections.push(lengthOption.prompt);
   }
 
   const languageOption = LANGUAGES.find(
     (l) => l.id === responseSettings.language
   );
   if (languageOption?.prompt?.trim()) {
-    prompts.push(languageOption.prompt);
+    sections.push(languageOption.prompt);
   }
 
   // Add markdown formatting instructions
-  prompts.push(MARKDOWN_FORMATTING_INSTRUCTIONS);
+  sections.push(MARKDOWN_FORMATTING_INSTRUCTIONS);
 
-  return prompts.join(" ");
+  // Join with double newline so each section is clearly delimited.
+  // A single space made the personal context, base prompt, and formatting
+  // rules run together into one run-on line that models struggle to parse.
+  return sections.join("\n\n");
 }
 
 export async function* fetchAIResponse(params: {
