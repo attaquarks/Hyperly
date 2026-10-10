@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useGlobalShortcuts } from "./useGlobalShortcuts";
 import { invoke } from "@tauri-apps/api/core";
-import { startAecReference as openAecReferenceChannel } from "@/lib/aec/reference-channel";
+import { AecReferenceFeed } from "@/lib/aec/reference";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
@@ -179,29 +179,19 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   const stopRequestedRef = useRef<boolean>(false);
   // Guards the async spawn against a concurrent start.
   const startingRef = useRef<boolean>(false);
-  const aecReferenceStopRef = useRef<(() => Promise<void>) | null>(null);
+  const aecReferenceFeedRef = useRef<AecReferenceFeed | null>(null);
   const startReferenceTap = useCallback(async () => {
     // Step 1 intentionally opens the reference when hyperly.aec.enabled is
     // false; Step 4 will gate the reference tee and Channel on the saved toggle.
-    if (aecReferenceStopRef.current) return;
-
-    try {
-      aecReferenceStopRef.current = await openAecReferenceChannel(() => {});
-    } catch (error) {
-      // Reference delivery is additive; failure must not interrupt the existing
-      // system-audio transcription path.
-      console.warn("[aec] reference channel unavailable:", error);
-    }
+    if (aecReferenceFeedRef.current) return;
+    const feed = new AecReferenceFeed();
+    aecReferenceFeedRef.current = feed;
+    await feed.connect();
   }, []);
   const stopReferenceTap = useCallback(async () => {
-    const stop = aecReferenceStopRef.current;
-    aecReferenceStopRef.current = null;
-    if (!stop) return;
-    try {
-      await stop();
-    } catch (error) {
-      console.warn("[aec] failed to stop reference channel:", error);
-    }
+    const feed = aecReferenceFeedRef.current;
+    aecReferenceFeedRef.current = null;
+    if (feed) await feed.close();
   }, []);
 
   // AI-suggested follow-ups, regenerated after each answer.
