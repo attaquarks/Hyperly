@@ -15,7 +15,7 @@ interface QueuedFrame {
 
 export interface AecReferenceStatus {
   state: "waiting" | "ready" | "degraded" | "closed";
-  reason?: "channel-unavailable" | "invalid-frame" | "sequence-gap" | "overflow" | "internal-error";
+  reason?: "channel-unavailable" | "invalid-frame" | "sequence-gap" | "duplicate-frame" | "internal-error";
   sampleRate: 16_000;
   depth: number;
   sequenceGaps: number;
@@ -162,27 +162,28 @@ export class AecReferenceFeed {
       }
 
       if (
-        this.lastReceivedSeq !== null &&
-        frame.seq !== this.lastReceivedSeq + 1
+        (this.lastReceivedSeq !== null && frame.seq <= this.lastReceivedSeq) ||
+        this.frames.has(frame.seq)
       ) {
+        this.status.sequenceGaps += 1;
+        this.degrade("duplicate-frame");
+        return;
+      }
+      if (this.lastReceivedSeq !== null && frame.seq !== this.lastReceivedSeq + 1) {
         this.status.sequenceGaps += 1;
         this.degrade("sequence-gap");
       }
       this.lastReceivedSeq = frame.seq;
       this.recordRelativeTransit(frame);
 
-      if (this.frames.has(frame.seq)) {
-        this.status.sequenceGaps += 1;
-        this.degrade("sequence-gap");
-        return;
-      }
+      const samples = Float32Array.from(frame.samples);
       if (this.frames.size >= FIFO_CAPACITY) {
+        const oldestSeq = this.frames.keys().next().value as number | undefined;
+        if (oldestSeq !== undefined) this.frames.delete(oldestSeq);
+        // Drop the oldest buffered frame so the FIFO tracks recent playback.
         this.status.overflows += 1;
-        this.degrade("overflow");
-        return;
       }
 
-      const samples = Float32Array.from(frame.samples);
       this.frames.set(frame.seq, { seq: frame.seq, samples, offset: 0 });
       this.refreshDepth();
       if (this.status.state === "waiting") this.status.state = "ready";
