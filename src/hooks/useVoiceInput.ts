@@ -362,13 +362,22 @@ export const useVoiceInput = ({
       setAecStatusState(session.status);
       const context = audioContextRef.current;
       if (context) {
-        await session.activate(context, getActiveAecReferenceFeed(), (nextStatus) => {
-          setAecStatus(nextStatus);
-          setAecStatusState(nextStatus);
+        // Do not hold up vad-web startup while the local worker loads. activate
+        // installs a raw pass-through output graph synchronously, then replaces
+        // it with the AEC route only after the worker and worklet are ready.
+        void (async () => {
+          await session.activate(context, getActiveAecReferenceFeed(), (nextStatus) => {
+            setAecStatus(nextStatus);
+            setAecStatusState(nextStatus);
+          });
+          setAecStatus(session.status);
+          setAecStatusState(session.status);
+        })().catch((error) => {
+          console.warn("[aec] background activation failed; microphone startup continues:", error);
+          setAecStatus(session.status);
+          setAecStatusState(session.status);
         });
       }
-      setAecStatus(session.status);
-      setAecStatusState(session.status);
       const track = source.getAudioTracks()[0];
       console.info(
         `[voice] mic acquired: ${source.getAudioTracks().length} track(s), ` +

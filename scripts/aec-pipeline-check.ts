@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import { createMicAec } from "../src/lib/aec/index.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -9,6 +10,7 @@ const hook = readFileSync(join(ROOT, "src/hooks/useVoiceInput.ts"), "utf8");
 const worker = readFileSync(join(ROOT, "src/lib/aec/localvqe-worker.ts"), "utf8");
 const micAec = readFileSync(join(ROOT, "src/lib/aec/mic-aec.ts"), "utf8");
 const worklet = readFileSync(join(ROOT, "src/lib/aec/mic-aec-worklet.ts"), "utf8");
+const shippedWorklet = readFileSync(join(ROOT, "public/aec/mic-aec-worklet.js"), "utf8");
 const systemAudio = readFileSync(join(ROOT, "src/hooks/useSystemAudio.ts"), "utf8");
 const toggle = readFileSync(join(ROOT, "src/pages/audio/components/AecToggle.tsx"), "utf8");
 
@@ -64,5 +66,35 @@ assert.match(hook, /session\.source\.getTracks\(\)\.forEach\(\(track\) => track\
 assert.match(toggle, /does not guarantee echo removal/);
 console.log("  ok    enabled mic path consumes the shared reference, resamples to 16 kHz, and sends hops to the worker");
 console.log("  ok    failures bypass, AEC status is separate, teardown stops source, and toggle copy makes no efficacy claim");
+
+let registeredProcessorName = "";
+let registeredProcessor: (new () => {
+  port: { onmessage: ((event: { data: { type: string } }) => void) | null };
+  process: (inputs: Float32Array[][], outputs: Float32Array[][]) => boolean;
+}) | undefined;
+class WorkletHarnessBase {
+  port = {
+    onmessage: null as ((event: { data: { type: string } }) => void) | null,
+    postMessage: () => {},
+  };
+}
+runInNewContext(shippedWorklet, {
+  AudioWorkletProcessor: WorkletHarnessBase,
+  Float32Array,
+  sampleRate: 16_000,
+  registerProcessor: (name: string, processor: typeof registeredProcessor) => {
+    registeredProcessorName = name;
+    registeredProcessor = processor;
+  },
+});
+assert.equal(registeredProcessorName, "hyperly-mic-aec-bridge");
+assert.ok(registeredProcessor, "shipped worklet must register a processor");
+const workletInstance = new registeredProcessor();
+workletInstance.port.onmessage?.({ data: { type: "bypass" } });
+const bypassInput = new Float32Array([0.1, -0.2, 0.3, -0.4]);
+const bypassOutput = new Float32Array(bypassInput.length);
+assert.equal(workletInstance.process([[bypassInput]], [[bypassOutput]]), true);
+assert.deepEqual(Array.from(bypassOutput), Array.from(bypassInput));
+console.log("  ok    shipped AudioWorklet registers and copies mic samples in bypass mode");
 
 console.log("PASS - the Step 0 AEC bypass is an identity-preserving no-op.");

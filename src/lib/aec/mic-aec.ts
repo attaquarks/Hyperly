@@ -104,6 +104,7 @@ export const createMicAec = (
   let sourceNode: MediaStreamAudioSourceNode | null = null;
   let bridgeNode: AudioWorkletNode | null = null;
   let destination: MediaStreamAudioDestinationNode | null = null;
+  let rawRouteConnected = false;
   let pending = new Set<number>();
   let nextExpectedMicId = 0;
   let nextExpectedOutputId = 0;
@@ -139,15 +140,31 @@ export const createMicAec = (
     destination = null;
   };
 
+  const restoreRawRoute = (): void => {
+    const input = sourceNode;
+    const outputNode = destination;
+    if (!input || !outputNode) return;
+
+    bridgeNode?.port.postMessage({ type: "bypass" });
+    bridgeNode?.port.close();
+    bridgeNode?.disconnect();
+    bridgeNode = null;
+    try {
+      input.disconnect();
+      input.connect(outputNode);
+      rawRouteConnected = true;
+      output = outputNode.stream;
+    } catch (error) {
+      rawRouteConnected = false;
+      output = source;
+      console.warn("[aec] could not restore the raw microphone route:", error);
+    }
+  };
+
   const bypass = (reason: "no-reference" | "init-failed" | "overload", error?: unknown): void => {
     if (disposed || status.state === "bypass" && status.reason === reason) return;
     if (error) console.warn(`[aec] bypass (${reason}):`, error);
-    if (bridgeNode) {
-      bridgeNode.port.postMessage({ type: "bypass" });
-      // A live graph can pass the input through unchanged after a failure.
-      // Startup failures have not installed the graph and retain source identity.
-      if (destination) output = destination.stream;
-    }
+    if (bridgeNode) restoreRawRoute();
     stopWorker();
     publish({ state: "bypass", reason });
   };
@@ -175,6 +192,17 @@ export const createMicAec = (
         if (audioContext.sampleRate < AEC_SAMPLE_RATE) {
           throw new Error(`AudioContext rate ${audioContext.sampleRate} Hz is below 16 kHz`);
         }
+
+        // Hand VAD a stable stream immediately. Until the worker and worklet
+        // are ready, this graph carries the original mic audio unchanged.
+        const input = audioContext.createMediaStreamSource(source);
+        const destinationNode = audioContext.createMediaStreamDestination();
+        sourceNode = input;
+        destination = destinationNode;
+        input.connect(destinationNode);
+        rawRouteConnected = true;
+        output = destinationNode.stream;
+
         worker = createLocalVqeWorker();
         const ready = await waitForWorker(worker);
         if (disposed) {
@@ -190,16 +218,14 @@ export const createMicAec = (
         }
         lastReferenceOverflowCount = feed.status.overflows;
 
-        await audioContext.audioWorklet.addModule(
-          new URL("./mic-aec-worklet.ts", import.meta.url)
-        );
+        const workletUrl = new URL("/aec/mic-aec-worklet.js", location.origin);
+        await audioContext.audioWorklet.addModule(workletUrl.href);
         if (disposed) {
           stopWorker();
           activating = false;
           return;
         }
 
-        const input = audioContext.createMediaStreamSource(source);
         const bridge = new AudioWorkletNode(audioContext, "hyperly-mic-aec-bridge", {
           numberOfInputs: 1,
           numberOfOutputs: 1,
@@ -208,10 +234,7 @@ export const createMicAec = (
           channelCountMode: "explicit",
           processorOptions: { sampleRate: AEC_SAMPLE_RATE, hop: AEC_HOP_SAMPLES },
         });
-        const destinationNode = audioContext.createMediaStreamDestination();
-        sourceNode = input;
         bridgeNode = bridge;
-        destination = destinationNode;
 
         bridge.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
           const message = event.data;
@@ -287,6 +310,8 @@ export const createMicAec = (
         worker.onmessageerror = () => bypass("overload", new Error("LocalVQE worker message could not be decoded"));
         bridge.addEventListener("processorerror", () => bypass("overload", new Error("Mic AEC worklet failed")));
 
+        input.disconnect();
+        rawRouteConnected = false;
         input.connect(bridge);
         bridge.connect(destinationNode);
         output = destinationNode.stream;
@@ -297,9 +322,9 @@ export const createMicAec = (
           hops: 0,
         });
       } catch (error) {
-        disconnectGraph();
+        if (bridgeNode) restoreRawRoute();
         stopWorker();
-        output = source;
+        output = rawRouteConnected ? destination?.stream ?? source : source;
         publish({ state: "bypass", reason: "init-failed" });
         if (error) console.warn("[aec] initialization failed; using raw microphone stream:", error);
       } finally {

@@ -35,6 +35,36 @@ assert.ok(
 const wasmPath = join(DIST, "localvqe", "localvqe.wasm");
 assert.ok(statSync(wasmPath).isFile(), "dist/localvqe/localvqe.wasm is missing");
 
+const workletPath = join(DIST, "aec", "mic-aec-worklet.js");
+assert.ok(statSync(workletPath).isFile(), "dist/aec/mic-aec-worklet.js is missing");
+const workletText = readFileSync(workletPath, "utf8");
+assert.match(
+  workletText,
+  /registerProcessor\(\s*["']hyperly-mic-aec-bridge["']/,
+  "built AudioWorklet asset does not register hyperly-mic-aec-bridge"
+);
+
+const appChunkText = chunks
+  .filter((name) => /\.m?js$/i.test(name))
+  .map((name) => readFileSync(join(ASSETS, name), "utf8"))
+  .join("\n");
+assert.ok(
+  !appChunkText.includes("data:video/mp2t"),
+  "an emitted app chunk contains a raw TypeScript data:video/mp2t worklet"
+);
+assert.ok(
+  !/\.addModule\s*\(\s*["'`]data:/i.test(appChunkText),
+  "an emitted app chunk passes a data: URL to AudioWorklet.addModule"
+);
+const workletUrlVariable = appChunkText.match(
+  /(?:const|let|var)\s+([\w$]+)=new URL\(["']\/aec\/mic-aec-worklet\.js["'],\s*location\.origin\)/
+);
+assert.ok(
+  workletUrlVariable &&
+    new RegExp(`audioWorklet\\.addModule\\(\\s*${workletUrlVariable[1]}\\.href\\s*\\)`).test(appChunkText),
+  "built app does not load the AudioWorklet from the same-origin /aec/ asset"
+);
+
 assert.ok(
   /new URL\([^)]*"\/localvqe\/"/.test(localVqeWorker.text) &&
     localVqeWorker.text.includes("location.origin"),
@@ -50,4 +80,6 @@ console.log(`  ok    worker chunk emitted: ${localVqeWorker.name}`);
 console.log("  ok    worker references localvqe_process_frame_f32 and /localvqe/localvqe-glue.mjs");
 console.log("  ok    dist/localvqe/localvqe.wasm exists");
 console.log("  ok    locateFile uses absolute /localvqe/ with the app origin");
+console.log("  ok    AudioWorklet JS asset registers the bridge and app loads it from same-origin /aec/");
+console.log("  ok    no emitted app chunk embeds or loads a data:video/mp2t worklet");
 console.log("PASS - production LocalVQE worker assets are reachable from the built app.");
