@@ -9,6 +9,7 @@ interface WorkerScope {
 
 interface WorkerRequest {
   type: "load" | "process" | "reset" | "dispose";
+  id?: number;
   mic?: Float32Array;
   ref?: Float32Array;
   gap?: boolean;
@@ -16,10 +17,10 @@ interface WorkerRequest {
 
 type WorkerResponse =
   | { type: "ready"; sampleRate: number; hop: number; fft: number }
-  | { type: "processed"; samples: ArrayBuffer; rc: 0 }
+  | { type: "processed"; id: number; samples: ArrayBuffer; rc: 0 }
   | { type: "reset" }
   | { type: "disposed" }
-  | { type: "error"; message: string };
+  | { type: "error"; id?: number; message: string };
 
 interface LocalVqeModule {
   cwrap(name: string, returnType: string | null, argTypes: string[]): (...args: unknown[]) => unknown;
@@ -150,7 +151,7 @@ async function loadModel(): Promise<void> {
   });
 }
 
-function processFrame(mic: Float32Array, ref: Float32Array, gap: boolean): void {
+function processFrame(id: number, mic: Float32Array, ref: Float32Array, gap: boolean): void {
   const module = moduleInstance;
   const currentApi = api;
   if (!module || !currentApi || !context) throw new Error("LocalVQE model is not loaded");
@@ -180,7 +181,7 @@ function processFrame(mic: Float32Array, ref: Float32Array, gap: boolean): void 
     }
     const output = new Float32Array(hop);
     output.set(module.HEAPF32.subarray(pOut >> 2, (pOut >> 2) + hop));
-    scope.postMessage({ type: "processed", samples: output.buffer, rc: 0 }, [output.buffer]);
+    scope.postMessage({ type: "processed", id, samples: output.buffer, rc: 0 }, [output.buffer]);
   } finally {
     module._free(pMic);
     module._free(pRef);
@@ -189,13 +190,15 @@ function processFrame(mic: Float32Array, ref: Float32Array, gap: boolean): void 
 }
 
 scope.onmessage = async (event) => {
+  const requestId = event.data.id;
   try {
     const message = event.data;
     if (message.type === "load") {
       await loadModel();
     } else if (message.type === "process") {
       if (!message.mic || !message.ref) throw new Error("Mic and reference frames are required");
-      processFrame(message.mic, message.ref, Boolean(message.gap));
+      if (!Number.isSafeInteger(message.id)) throw new Error("A mic frame id is required");
+      processFrame(message.id!, message.mic, message.ref, Boolean(message.gap));
     } else if (message.type === "reset") {
       if (context && api) api.reset(context);
       scope.postMessage({ type: "reset" });
@@ -208,6 +211,7 @@ scope.onmessage = async (event) => {
   } catch (error) {
     scope.postMessage({
       type: "error",
+      ...(requestId === undefined ? {} : { id: requestId }),
       message: error instanceof Error ? error.message : String(error),
     });
   }

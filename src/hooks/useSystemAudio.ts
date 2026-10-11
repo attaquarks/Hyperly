@@ -1,7 +1,11 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useGlobalShortcuts } from "./useGlobalShortcuts";
 import { invoke } from "@tauri-apps/api/core";
-import { AecReferenceFeed } from "@/lib/aec/reference";
+import {
+  AecReferenceFeed,
+  setActiveAecReferenceFeed,
+} from "@/lib/aec/reference";
+import { readAecEnabled } from "@/lib/aec";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
@@ -181,16 +185,17 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   const startingRef = useRef<boolean>(false);
   const aecReferenceFeedRef = useRef<AecReferenceFeed | null>(null);
   const startReferenceTap = useCallback(async () => {
-    // Step 1 intentionally opens the reference when hyperly.aec.enabled is
-    // false; Step 4 will gate the reference tee and Channel on the saved toggle.
+    if (!readAecEnabled()) return;
     if (aecReferenceFeedRef.current) return;
     const feed = new AecReferenceFeed();
     aecReferenceFeedRef.current = feed;
+    setActiveAecReferenceFeed(feed);
     await feed.connect();
   }, []);
   const stopReferenceTap = useCallback(async () => {
     const feed = aecReferenceFeedRef.current;
     aecReferenceFeedRef.current = null;
+    if (feed) setActiveAecReferenceFeed(null);
     if (feed) await feed.close();
   }, []);
 
@@ -1337,7 +1342,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         updatedAt: 0,
       });
 
-      setCapturing(true);
       setIsPopoverOpen(true);
       setLivePartial("");
       livePartialRef.current = "";
@@ -1370,6 +1374,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         deviceId: deviceId,
       });
       await startReferenceTap();
+      setCapturing(true);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
@@ -1394,7 +1399,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         return;
       }
 
-      setCapturing(true);
       setIsPopoverOpen(true);
       setLivePartial("");
       livePartialRef.current = "";
@@ -1411,6 +1415,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         deviceId: deviceId,
       });
       await startReferenceTap();
+      setCapturing(true);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
