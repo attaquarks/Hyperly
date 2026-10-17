@@ -14,7 +14,7 @@ export const AecToggle = () => {
     <div className="space-y-3">
       <Header
         title="Acoustic Echo Cancellation"
-        description="The microphone currently passes through unchanged. This setting is saved for the AEC processor."
+        description="When enabled and a Listen reference is available, microphone audio is routed through the bundled AEC processor. Missing reference or processing failures fall back to the original microphone stream; processing does not guarantee echo removal."
       />
 
       <div className="flex items-center justify-between rounded-md border border-input/50 p-4">
@@ -23,7 +23,9 @@ export const AecToggle = () => {
             Enable AEC
           </Label>
           <p className="text-xs text-muted-foreground">
-            {enabled ? "Enabled for AEC processing." : "AEC processing disabled."}
+            {enabled
+              ? "AEC processing is enabled; missing reference or setup failures use the original microphone stream."
+              : "AEC is off; microphone audio passes through unchanged."}
           </p>
         </div>
         <Switch

@@ -26,6 +26,21 @@
  * remembered decision, and a decline is surfaced as a real refusal.
  */
 import { hasMicConsent, requestMicConsent } from "./mic-consent.ts";
+import type { AecStatus } from "./aec/index.ts";
+
+let currentAecStatus: AecStatus | undefined;
+let lastAecStatusLog: string | undefined;
+
+/** AEC telemetry is deliberately separate from WebView-applied constraints. */
+export const setAecStatus = (status: AecStatus | undefined): void => {
+  currentAecStatus = status;
+  const serialized = status ? JSON.stringify(status) : "undefined";
+  if (serialized === lastAecStatusLog) return;
+  lastAecStatusLog = serialized;
+  console.info(`[mic] aec: ${serialized}`);
+};
+
+export const getAecStatus = (): AecStatus | undefined => currentAecStatus;
 
 /**
  * Constraints REQUESTED for every capture. They are not guarantees: a WebView may

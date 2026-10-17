@@ -54,9 +54,33 @@ const serveVadRuntime = (): Plugin => {
   };
 };
 
+// The worker's runtime import requests the ESM glue with `?import`. Vite's
+// public-file transform rejects that shape, so serve only the plain and
+// `?import` requests byte-for-byte. Keep `?url` out of this middleware: the
+// worker's static URL import must remain a Vite-generated URL module.
+const serveLocalVqeGlue = (): Plugin => {
+  const isLocalVqeModule = (url: string): boolean =>
+    /^\/localvqe\/[A-Za-z0-9._-]+\.mjs(?:\?import)?$/.test(url);
+
+  return {
+    name: "hyperly:serve-localvqe-glue",
+    configureServer(server) {
+      const dir = path.resolve(__dirname, "public/localvqe");
+      server.middlewares.use((req, res, next) => {
+        if (!req.url || !isLocalVqeModule(req.url)) return next();
+        const file = path.join(dir, path.posix.basename(req.url.split("?")[0]));
+        if (!file.startsWith(dir) || !fs.existsSync(file)) return next();
+        res.setHeader("Content-Type", "text/javascript");
+        res.setHeader("Content-Length", fs.statSync(file).size);
+        fs.createReadStream(file).pipe(res);
+      });
+    },
+  };
+};
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss(), serveVadRuntime()],
+  plugins: [react(), tailwindcss(), serveVadRuntime(), serveLocalVqeGlue()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

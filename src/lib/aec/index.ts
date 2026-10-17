@@ -6,11 +6,17 @@ export type AecStatus =
   | { state: "active"; model: string; refDelayMs: number; hops: number };
 
 export interface MicAecSession {
-  /** Stream supplied to vad-web. Step 0 always returns the original stream. */
+  /** Stream supplied to vad-web; raw source in bypass, processed destination when active. */
   output: MediaStream;
   /** Original getUserMedia stream; teardown must stop this stream. */
   source: MediaStream;
   status: AecStatus;
+  /** Start processing after mic acquisition; failures leave output on the raw source. */
+  activate: (
+    audioContext: AudioContext,
+    referenceFeed: import("./reference.ts").AecReferenceFeed | null,
+    onStatus?: (status: AecStatus | undefined) => void
+  ) => Promise<void>;
   dispose: () => void;
 }
 
@@ -27,17 +33,4 @@ export const writeAecEnabled = (enabled: boolean): void => {
   safeLocalStorage.setItem(AEC_ENABLED_STORAGE_KEY, String(enabled));
 };
 
-/**
- * Step 0 deliberately has no processing stage: vad-web receives the exact
- * MediaStream returned by getUserMedia. Keeping source alongside output now
- * makes teardown correct when a later step introduces a destination stream.
- */
-export const createMicAec = (
-  source: MediaStream,
-  enabled = readAecEnabled()
-): MicAecSession => ({
-  output: source,
-  source,
-  status: enabled ? { state: "bypass", reason: "no-reference" } : { state: "off" },
-  dispose: () => {},
-});
+export { createMicAec } from "./mic-aec.ts";

@@ -1,7 +1,7 @@
 import {
   startAecReference,
   type AecReferenceFrame,
-} from "./reference-channel";
+} from "./reference-channel.ts";
 
 const REFERENCE_SAMPLE_RATE = 16_000;
 const FIFO_CAPACITY = 10;
@@ -57,6 +57,15 @@ export class AecReferenceFeed {
   private connected = false;
   private closed = false;
   private lastReadoutMs = 0;
+
+  /** Buffered reference samples available to the single active mic consumer. */
+  get bufferedSamples(): number {
+    let buffered = 0;
+    for (const frame of this.frames.values()) {
+      buffered += frame.samples.length - frame.offset;
+    }
+    return buffered;
+  }
 
   /** Opens the Channel. Failure is recorded in status and never rethrown. */
   async connect(): Promise<void> {
@@ -252,3 +261,15 @@ export class AecReferenceFeed {
     this.status.reason = reason;
   }
 }
+
+let activeAecReferenceFeed: AecReferenceFeed | null = null;
+
+/** Publish the feed owned by Listen so the mic pipeline consumes that same tap. */
+export const setActiveAecReferenceFeed = (
+  feed: AecReferenceFeed | null
+): void => {
+  activeAecReferenceFeed = feed;
+};
+
+export const getActiveAecReferenceFeed = (): AecReferenceFeed | null =>
+  activeAecReferenceFeed;

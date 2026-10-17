@@ -220,6 +220,20 @@ console.log(`  measured frame-wise throughput (${fixture.reference.length / LOCA
 assert.ok(outputEnergy > 0, "double-talk output was zero");
 assert.ok(nearCorrelation >= 0.95, `near-end best-lag correlation ${nearCorrelation.toFixed(4)} is below 0.95`);
 assert.ok(Math.abs(nearBestLag + 256) <= 256, `near-end best lag ${nearBestLag} is more than one 256-sample hop from -256`);
+// Add a causal-only scan whose range exactly matches the one-hop acceptance
+// window; positive lags would imply output preceding the near-end input.
+let causalNearCorrelation = -Infinity;
+let causalBestLag = 0;
+for (let lag = -512; lag <= 0; lag += 1) {
+  const candidate = correlationAtLag(doubleTalk.output, fixture.nearEnd, convergenceSkip, lag);
+  if (candidate > causalNearCorrelation) {
+    causalNearCorrelation = candidate;
+    causalBestLag = lag;
+  }
+}
+assert.ok(causalNearCorrelation >= 0.95, `causal near-end correlation ${causalNearCorrelation.toFixed(4)} is below 0.95`);
+assert.ok(Math.abs(causalBestLag + 256) <= 256, `causal best lag ${causalBestLag} is outside the accepted -256 ±256-sample window`);
+console.log(`  measured causal near-end correlation after 1 s: ${causalNearCorrelation.toFixed(4)} at ${causalBestLag} samples`);
 assert.ok(throughput >= 2, `throughput ${throughput.toFixed(2)}x is below 2x realtime`);
 freeContext(context);
 console.log("PASS - pinned LocalVQE assets load and process bundled synthetic double-talk in the VM harness.");

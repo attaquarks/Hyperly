@@ -5,11 +5,12 @@ import { SpeechBlockQueue } from "@/lib/speech-block-queue";
 import { getTranscriptStore } from "@/lib/database/transcript-adapter";
 import { floatArrayToWav } from "@/lib/utils";
 import { readStoredVadConfig } from "@/lib/vad-config";
-import { getMicrophoneStream } from "@/lib/microphone";
+import { getMicrophoneStream, setAecStatus } from "@/lib/microphone";
 import { micRedemptionMs } from "@/lib/turn-boundary";
 import { audioContextPool } from "@/lib/audio-context";
 import { speechThresholds } from "@/lib/vad-sensitivity";
-import { createMicAec, readAecEnabled, type MicAecSession } from "@/lib/aec";
+import { createMicAec, readAecEnabled, type AecStatus, type MicAecSession } from "@/lib/aec";
+import { getActiveAecReferenceFeed } from "@/lib/aec/reference";
 import { useApp } from "@/contexts";
 
 /**
@@ -71,6 +72,8 @@ export interface VoiceInputState {
   listening: boolean;
   loading: boolean;
   errored: string | false;
+  /** AEC telemetry is separate from the browser-applied processing report. */
+  aecStatus?: AecStatus;
 }
 
 // How often a live partial transcript is produced mid-utterance.
@@ -167,6 +170,7 @@ export const useVoiceInput = ({
   const [listening, setListening] = useState(false);
   const [loading, setLoading] = useState(true);
   const [errored, setErrored] = useState<string | false>(false);
+  const [aecStatus, setAecStatusState] = useState<AecStatus | undefined>();
   // Flips true once an instance exists and can be started. `active` is applied
   // against this rather than against mount, so a start requested while the
   // model is still loading is applied when it finishes instead of being lost.
@@ -354,6 +358,26 @@ export const useVoiceInput = ({
       const source = await getMicrophoneStream(micDeviceId, micDeviceName);
       const session = createMicAec(source, readAecEnabled());
       micAecRef.current = session;
+      setAecStatus(session.status);
+      setAecStatusState(session.status);
+      const context = audioContextRef.current;
+      if (context) {
+        // Do not hold up vad-web startup while the local worker loads. activate
+        // installs a raw pass-through output graph synchronously, then replaces
+        // it with the AEC route only after the worker and worklet are ready.
+        void (async () => {
+          await session.activate(context, getActiveAecReferenceFeed(), (nextStatus) => {
+            setAecStatus(nextStatus);
+            setAecStatusState(nextStatus);
+          });
+          setAecStatus(session.status);
+          setAecStatusState(session.status);
+        })().catch((error) => {
+          console.warn("[aec] background activation failed; microphone startup continues:", error);
+          setAecStatus(session.status);
+          setAecStatusState(session.status);
+        });
+      }
       const track = source.getAudioTracks()[0];
       console.info(
         `[voice] mic acquired: ${source.getAudioTracks().length} track(s), ` +
@@ -420,6 +444,8 @@ export const useVoiceInput = ({
             if (session?.output === stream) {
               session.source.getTracks().forEach((track) => track.stop());
               session.dispose();
+              setAecStatus(undefined);
+              setAecStatusState(undefined);
               if (micAecRef.current === session) micAecRef.current = null;
               return;
             }
@@ -492,6 +518,8 @@ export const useVoiceInput = ({
         const session = micAecRef.current;
         session?.source.getTracks().forEach((track) => track.stop());
         session?.dispose();
+        setAecStatus(undefined);
+        setAecStatusState(undefined);
         micAecRef.current = null;
         if (disposed) return;
         setLoading(false);
@@ -525,6 +553,8 @@ export const useVoiceInput = ({
       micAecRef.current = null;
       micAec?.source.getTracks().forEach((track) => track.stop());
       micAec?.dispose();
+      setAecStatus(undefined);
+      setAecStatusState(undefined);
       // We supplied the context, so vad-web's own close — guarded by
       // `ownsAudioContext` — never runs. The pool owns the close now (Phase 4
       // R11): it closes only when the LAST holder releases, so this instance
@@ -609,5 +639,6 @@ export const useVoiceInput = ({
     listening,
     loading,
     errored,
+    aecStatus,
   };
 };
