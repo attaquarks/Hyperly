@@ -82,24 +82,6 @@ try {
     console.log(`  FAIL GET /localvqe/localvqe-glue.mjs?import: ${problem}`);
   }
 
-  try {
-    const response = await fetch(`${base}/localvqe/localvqe-glue.mjs?url`);
-    const body = Buffer.from(await response.arrayBuffer());
-    let problem: string | null = null;
-    if (response.status !== 200) problem = `status ${response.status}, expected 200`;
-    else if (body.equals(expectedGlue)) {
-      problem = "?url was intercepted and served as raw glue instead of a URL module";
-    }
-    if (problem) failures.push(`glue ?url: ${problem}`);
-    console.log(
-      `  ${problem ? "FAIL" : "ok  "} GET /localvqe/localvqe-glue.mjs?url -> ${response.status}${problem ? `: ${problem}` : "; not intercepted as raw glue"}`
-    );
-  } catch (error) {
-    const problem = (error as Error).message;
-    failures.push(`glue ?url: ${problem}`);
-    console.log(`  FAIL GET /localvqe/localvqe-glue.mjs?url: ${problem}`);
-  }
-
   const factoryResponse = await fetch(`${base}/src/lib/aec/localvqe-worker-factory.ts`);
   const factoryText = await factoryResponse.text();
   const workerMatch = factoryText.match(/(["'])([^"']*localvqe-worker\.ts\?worker_file&type=module)\1/);
@@ -121,6 +103,31 @@ try {
       workerText.includes("localvqe_process_frame_f32");
     if (!validWorker) failures.push(`Vite worker module did not compile at ${workerUrl}`);
     console.log(`  ${validWorker ? "ok  " : "FAIL"} Vite module worker ${workerUrl} -> ${workerResponse.status}`);
+  }
+
+  // Fetch after the worker: this matches the browser's real ?url module-graph order.
+  try {
+    const response = await fetch(`${base}/localvqe/localvqe-glue.mjs?url`);
+    const body = Buffer.from(await response.arrayBuffer());
+    const bodyText = body.toString("utf8");
+    const contentType = response.headers.get("content-type") ?? "";
+    let problem: string | null = null;
+    if (response.status !== 200) problem = `status ${response.status}, expected 200`;
+    else if (!contentType.includes("javascript")) {
+      problem = `content-type "${contentType}" does not include javascript`;
+    } else if (body.equals(expectedGlue)) {
+      problem = "?url was intercepted and served as raw glue instead of a URL module";
+    } else if (!bodyText.includes('export default "/localvqe/localvqe-glue.mjs"')) {
+      problem = "body does not export the expected /localvqe/localvqe-glue.mjs URL";
+    }
+    if (problem) failures.push(`glue ?url: ${problem}`);
+    console.log(
+      `  ${problem ? "FAIL" : "ok  "} GET /localvqe/localvqe-glue.mjs?url -> ${response.status} (${contentType})${problem ? `: ${problem}` : "; URL module, not raw glue"}`
+    );
+  } catch (error) {
+    const problem = (error as Error).message;
+    failures.push(`glue ?url: ${problem}`);
+    console.log(`  FAIL GET /localvqe/localvqe-glue.mjs?url: ${problem}`);
   }
 } finally {
   await server.close();
