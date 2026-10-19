@@ -76,7 +76,7 @@ const bind = <T extends (...args: never[]) => unknown>(
 
 async function loadModule(): Promise<LocalVqeModule> {
   if (!modulePromise) {
-    modulePromise = (async () => {
+    const pending = (async () => {
       const glueModule = (await import(/* @vite-ignore */ localVqeGlueUrl)) as {
         default?: LocalVqeFactory;
       };
@@ -110,6 +110,10 @@ async function loadModule(): Promise<LocalVqeModule> {
       };
       return module;
     })();
+    modulePromise = pending;
+    void pending.catch(() => {
+      if (modulePromise === pending) modulePromise = null;
+    });
   }
   return modulePromise;
 }

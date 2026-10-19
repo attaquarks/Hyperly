@@ -169,6 +169,26 @@ export const createMicAec = (
     }
   };
 
+  const disposeSession = (preserveOutput = false): void => {
+    if (disposed) return;
+    disposed = true;
+    detachTrackMonitor();
+    disconnectGraph();
+    stopWorker();
+    source.getTracks().forEach((track) => track.stop());
+    if (!preserveOutput) output = source;
+    onStatus = undefined;
+  };
+
+  const teardownForSourceChange = (error: Error): void => {
+    if (disposed) return;
+    console.warn("[aec] microphone source changed; ending this AEC session:", error);
+    publish({ state: "bypass", reason: "overload" });
+    // Keep the output identity until vad-web pauses it; the source and AEC graph
+    // are already stopped, and the next acquire creates a fresh session.
+    disposeSession(true);
+  };
+
   const bypass = (reason: "no-reference" | "init-failed" | "overload", error?: unknown): void => {
     if (disposed || status.state === "bypass" && status.reason === reason) return;
     if (error) console.warn(`[aec] bypass (${reason}):`, error);
@@ -218,7 +238,7 @@ export const createMicAec = (
         const initialDeviceId = initialSettings.deviceId;
         const initialTrackSampleRate = initialSettings.sampleRate;
         const onTrackEnded = (): void => {
-          bypass("overload", new Error("Microphone track ended; AEC session torn down"));
+          teardownForSourceChange(new Error("Microphone track ended"));
         };
         micTrack.addEventListener("ended", onTrackEnded);
         removeTrackMonitor = () => micTrack.removeEventListener("ended", onTrackEnded);
@@ -295,7 +315,7 @@ export const createMicAec = (
             (initialDeviceId !== undefined && settings.deviceId !== initialDeviceId) ||
             (initialTrackSampleRate !== undefined && settings.sampleRate !== initialTrackSampleRate)
           ) {
-            bypass("overload", new Error("Microphone device or sample rate changed; AEC session torn down"));
+            teardownForSourceChange(new Error("Microphone device or sample rate changed"));
             return;
           }
           const gap = feed.consumeGap();
@@ -379,13 +399,7 @@ export const createMicAec = (
       }
     },
     dispose: () => {
-      if (disposed) return;
-      disposed = true;
-      detachTrackMonitor();
-      disconnectGraph();
-      stopWorker();
-      output = source;
-      onStatus = undefined;
+      disposeSession();
     },
   };
 
