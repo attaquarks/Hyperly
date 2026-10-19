@@ -34,9 +34,10 @@ assert.deepEqual(disabled.status, { state: "off" });
 console.log("  ok    disabled path returns the exact source stream object");
 
 assert.match(hook, /createMicAec\(source, readAecEnabled\(\)\)/);
-assert.match(hook, /releaseMicAecSession\(session\)/);
+const sessionReleaseCalls = hook.match(/releaseMicAecSession\(session\)/g) ?? [];
+assert.ok(sessionReleaseCalls.length >= 2,
+  `expected releaseMicAecSession(session) in pause and setup cleanup, found ${sessionReleaseCalls.length}`);
 assert.match(hook, /releaseMicAecSession\(micAec\)/);
-assert.match(hook, /releaseMicAecSession\(previousSession\)/);
 assert.match(releaseSource, /session\.source\.getTracks\(\)\.forEach\(\(track\) => track\.stop\(\)\)/);
 assert.match(releaseSource, /session\.dispose\(\)/);
 const releaseOrder: string[] = [];
@@ -71,6 +72,10 @@ const acquireBody = hook.slice(acquireStart, acquireEnd);
 assert.ok(acquireStart >= 0 && acquireEnd > acquireStart, "could not locate microphone acquire block");
 assert.ok(acquireBody.indexOf("releaseMicAecSession(previousSession)") < acquireBody.indexOf("createMicAec(source"),
   "acquire must release the previous mic session before replacing its ref");
+const activeRouteIndex = micAec.indexOf("input.disconnect();\n        rawRouteConnected = false;");
+const disposedBeforeActiveRoute = micAec.lastIndexOf("if (disposed)", activeRouteIndex);
+assert.ok(activeRouteIndex >= 0 && disposedBeforeActiveRoute >= 0 && disposedBeforeActiveRoute < activeRouteIndex,
+  "activation must check disposed before replacing the raw output with the AEC route");
 assert.match(micAec, /if \(feed\.status\.overflows !== lastReferenceOverflowCount\)/);
 assert.match(micAec, /recovery\.noteOverflows\(newOverflows\)/);
 assert.match(micAec, /const gap = feed\.consumeGap\(\)/);
