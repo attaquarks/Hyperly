@@ -24,7 +24,16 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
         return;
       }
 
-      if (event.data.samples.byteLength !== AEC_HOP_SAMPLES * Float32Array.BYTES_PER_ELEMENT) {
+      if (event.data.type === "dropped") {
+        for (let i = 0; i < AEC_HOP_SAMPLES; i += 1) this.playback.push(0);
+        if (this.playback.length > AEC_SAMPLE_RATE * 0.25) {
+          this.bypass = true;
+          this.port.postMessage({ type: "fault", reason: "output-queue-overrun" });
+        }
+        return;
+      }
+
+      if (!event.data.samples || event.data.samples.byteLength !== AEC_HOP_SAMPLES * Float32Array.BYTES_PER_ELEMENT) {
         this.bypass = true;
         this.port.postMessage({ type: "fault", reason: "invalid-worker-frame" });
         return;

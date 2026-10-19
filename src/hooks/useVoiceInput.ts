@@ -10,6 +10,7 @@ import { micRedemptionMs } from "@/lib/turn-boundary";
 import { audioContextPool } from "@/lib/audio-context";
 import { speechThresholds } from "@/lib/vad-sensitivity";
 import { createMicAec, readAecEnabled, type AecStatus, type MicAecSession } from "@/lib/aec";
+import { releaseMicAecSession } from "@/lib/aec/release";
 import { getActiveAecReferenceFeed } from "@/lib/aec/reference";
 import { useApp } from "@/contexts";
 
@@ -356,6 +357,11 @@ export const useVoiceInput = ({
       // recognise — passing it straight to getUserMedia threw
       // OverconstrainedError and the mic captured nothing at all.
       const source = await getMicrophoneStream(micDeviceId, micDeviceName);
+      const previousSession = micAecRef.current;
+      if (previousSession) {
+        releaseMicAecSession(previousSession);
+        if (micAecRef.current === previousSession) micAecRef.current = null;
+      }
       const session = createMicAec(source, readAecEnabled());
       micAecRef.current = session;
       setAecStatus(session.status);
@@ -442,8 +448,7 @@ export const useVoiceInput = ({
           pauseStream: async (stream: MediaStream) => {
             const session = micAecRef.current;
             if (session?.output === stream) {
-              session.source.getTracks().forEach((track) => track.stop());
-              session.dispose();
+              releaseMicAecSession(session);
               setAecStatus(undefined);
               setAecStatusState(undefined);
               if (micAecRef.current === session) micAecRef.current = null;
@@ -516,8 +521,7 @@ export const useVoiceInput = ({
         // Model/worklet load failed. This is recoverable: the effect re-runs on
         // a device change, and nothing here latches the mic off.
         const session = micAecRef.current;
-        session?.source.getTracks().forEach((track) => track.stop());
-        session?.dispose();
+        releaseMicAecSession(session);
         setAecStatus(undefined);
         setAecStatusState(undefined);
         micAecRef.current = null;
@@ -551,8 +555,7 @@ export const useVoiceInput = ({
       if (vad) void safeDestroy(vad);
       const micAec = micAecRef.current;
       micAecRef.current = null;
-      micAec?.source.getTracks().forEach((track) => track.stop());
-      micAec?.dispose();
+      releaseMicAecSession(micAec);
       setAecStatus(undefined);
       setAecStatusState(undefined);
       // We supplied the context, so vad-web's own close — guarded by

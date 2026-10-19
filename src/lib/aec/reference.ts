@@ -57,6 +57,7 @@ export class AecReferenceFeed {
   private connected = false;
   private closed = false;
   private lastReadoutMs = 0;
+  private pendingGap = false;
 
   /** Buffered reference samples available to the single active mic consumer. */
   get bufferedSamples(): number {
@@ -136,6 +137,13 @@ export class AecReferenceFeed {
     }
   }
 
+  /** Consume one discontinuity marker after a complete reference hop is read. */
+  consumeGap(): boolean {
+    if (!this.pendingGap) return false;
+    this.pendingGap = false;
+    return true;
+  }
+
   /** Closes the Channel and discards buffered audio without throwing. */
   async close(): Promise<void> {
     if (this.closed) return;
@@ -180,7 +188,8 @@ export class AecReferenceFeed {
       }
       if (this.lastReceivedSeq !== null && frame.seq !== this.lastReceivedSeq + 1) {
         this.status.sequenceGaps += 1;
-        this.degrade("sequence-gap");
+        this.pendingGap = true;
+        this.frames.clear();
       }
       this.lastReceivedSeq = frame.seq;
       this.recordRelativeTransit(frame);
@@ -191,6 +200,7 @@ export class AecReferenceFeed {
         if (oldestSeq !== undefined) this.frames.delete(oldestSeq);
         // Drop the oldest buffered frame so the FIFO tracks recent playback.
         this.status.overflows += 1;
+        this.pendingGap = true;
       }
 
       this.frames.set(frame.seq, { seq: frame.seq, samples, offset: 0 });
