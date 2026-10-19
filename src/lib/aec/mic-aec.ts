@@ -1,5 +1,6 @@
 import { createLocalVqeWorker } from "./localvqe-worker-factory.ts";
 import { getActiveAecReferenceFeed, type AecReferenceFeed } from "./reference.ts";
+import { AecRecoveryPolicy } from "./recovery.ts";
 import {
   readAecEnabled,
   type AecStatus,
@@ -109,6 +110,8 @@ export const createMicAec = (
   let nextExpectedMicId = 0;
   let nextExpectedOutputId = 0;
   let lastReferenceOverflowCount = 0;
+  const recovery = new AecRecoveryPolicy();
+  let removeTrackMonitor = (): void => {};
 
   const publish = (next: AecStatus): void => {
     const changed = status.state !== next.state ||
@@ -127,6 +130,11 @@ export const createMicAec = (
       currentWorker.onmessageerror = null;
       currentWorker.terminate();
     }
+  };
+
+  const detachTrackMonitor = (): void => {
+    removeTrackMonitor();
+    removeTrackMonitor = () => {};
   };
 
   const disconnectGraph = (): void => {
@@ -164,6 +172,7 @@ export const createMicAec = (
   const bypass = (reason: "no-reference" | "init-failed" | "overload", error?: unknown): void => {
     if (disposed || status.state === "bypass" && status.reason === reason) return;
     if (error) console.warn(`[aec] bypass (${reason}):`, error);
+    detachTrackMonitor();
     if (bridgeNode) restoreRawRoute();
     stopWorker();
     publish({ state: "bypass", reason });
@@ -202,6 +211,17 @@ export const createMicAec = (
         input.connect(destinationNode);
         rawRouteConnected = true;
         output = destinationNode.stream;
+
+        const micTrack = source.getAudioTracks()[0];
+        if (!micTrack) throw new Error("Microphone stream has no audio track");
+        const initialSettings = micTrack.getSettings();
+        const initialDeviceId = initialSettings.deviceId;
+        const initialTrackSampleRate = initialSettings.sampleRate;
+        const onTrackEnded = (): void => {
+          bypass("overload", new Error("Microphone track ended; AEC session torn down"));
+        };
+        micTrack.addEventListener("ended", onTrackEnded);
+        removeTrackMonitor = () => micTrack.removeEventListener("ended", onTrackEnded);
 
         worker = createLocalVqeWorker();
         const ready = await waitForWorker(worker);
@@ -251,8 +271,12 @@ export const createMicAec = (
             return;
           }
           if (feed.status.overflows !== lastReferenceOverflowCount) {
-            bypass("overload", new Error("Reference FIFO overflowed"));
-            return;
+            const newOverflows = feed.status.overflows - lastReferenceOverflowCount;
+            lastReferenceOverflowCount = feed.status.overflows;
+            if (recovery.noteOverflows(newOverflows) === "bypass") {
+              bypass("overload", new Error("Reference FIFO overflow recurred"));
+              return;
+            }
           }
           if (pending.size >= 2) {
             bypass("overload", new Error("LocalVQE worker queue overrun"));
@@ -266,10 +290,19 @@ export const createMicAec = (
           }
 
           const mic = new Float32Array(message.samples);
+          const settings = micTrack.getSettings();
+          if (
+            (initialDeviceId !== undefined && settings.deviceId !== initialDeviceId) ||
+            (initialTrackSampleRate !== undefined && settings.sampleRate !== initialTrackSampleRate)
+          ) {
+            bypass("overload", new Error("Microphone device or sample rate changed; AEC session torn down"));
+            return;
+          }
+          const gap = feed.consumeGap();
           pending.add(message.id);
           try {
             worker?.postMessage(
-              { type: "process", id: message.id, mic, ref: reference },
+              { type: "process", id: message.id, mic, ref: reference, gap },
               [mic.buffer, reference.buffer]
             );
           } catch (error) {
@@ -280,7 +313,19 @@ export const createMicAec = (
         worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
           const message = event.data;
           if (message.type === "error") {
-            bypass("overload", new Error((message as WorkerFailure).message));
+            const failure = message as WorkerFailure;
+            if (failure.id === undefined || !pending.delete(failure.id) || failure.id !== nextExpectedOutputId) {
+              bypass("overload", new Error(failure.message));
+              return;
+            }
+            nextExpectedOutputId += 1;
+            bridge.port.postMessage({ type: "dropped", id: failure.id });
+            const action = recovery.noteWorkerFailure();
+            if (action === "reset") {
+              worker?.postMessage({ type: "reset" });
+            } else if (action === "bypass") {
+              bypass("overload", new Error(`LocalVQE failed after its recovery reset: ${failure.message}`));
+            }
             return;
           }
           if (message.type !== "processed") return;
@@ -294,6 +339,7 @@ export const createMicAec = (
             return;
           }
 
+          recovery.noteWorkerSuccess();
           bridge.port.postMessage(
             { type: "processed", id: processed.id, samples: processed.samples },
             [processed.samples]
@@ -322,6 +368,7 @@ export const createMicAec = (
           hops: 0,
         });
       } catch (error) {
+        detachTrackMonitor();
         if (bridgeNode) restoreRawRoute();
         stopWorker();
         output = rawRouteConnected ? destination?.stream ?? source : source;
@@ -334,6 +381,7 @@ export const createMicAec = (
     dispose: () => {
       if (disposed) return;
       disposed = true;
+      detachTrackMonitor();
       disconnectGraph();
       stopWorker();
       output = source;
