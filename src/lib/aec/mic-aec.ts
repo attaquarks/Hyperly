@@ -376,13 +376,6 @@ export const createMicAec = (
         worker.onmessageerror = () => bypass("overload", new Error("LocalVQE worker message could not be decoded"));
         bridge.addEventListener("processorerror", () => bypass("overload", new Error("Mic AEC worklet failed")));
 
-        if (disposed) {
-          bridge.port.close();
-          bridge.disconnect();
-          if (bridgeNode === bridge) bridgeNode = null;
-          stopWorker();
-          return;
-        }
         input.disconnect();
         rawRouteConnected = false;
         input.connect(bridge);
@@ -395,6 +388,7 @@ export const createMicAec = (
           hops: 0,
         });
       } catch (error) {
+        if (disposed) return;
         detachTrackMonitor();
         if (bridgeNode) restoreRawRoute();
         stopWorker();

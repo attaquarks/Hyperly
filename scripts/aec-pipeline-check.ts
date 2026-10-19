@@ -76,6 +76,11 @@ const activeRouteIndex = micAec.indexOf("input.disconnect();\n        rawRouteCo
 const disposedBeforeActiveRoute = micAec.lastIndexOf("if (disposed)", activeRouteIndex);
 assert.ok(activeRouteIndex >= 0 && disposedBeforeActiveRoute >= 0 && disposedBeforeActiveRoute < activeRouteIndex,
   "activation must check disposed before replacing the raw output with the AEC route");
+const activationCatchIndex = micAec.indexOf("} catch (error) {", activeRouteIndex);
+const disposedCatchIndex = micAec.indexOf("if (disposed) return;", activationCatchIndex);
+const catchCleanupIndex = micAec.indexOf("detachTrackMonitor();", activationCatchIndex);
+assert.ok(activationCatchIndex > activeRouteIndex && disposedCatchIndex > activationCatchIndex && disposedCatchIndex < catchCleanupIndex,
+  "activation catch must leave output and status untouched when disposal already completed");
 assert.match(micAec, /if \(feed\.status\.overflows !== lastReferenceOverflowCount\)/);
 assert.match(micAec, /recovery\.noteOverflows\(newOverflows\)/);
 assert.match(micAec, /const gap = feed\.consumeGap\(\)/);
