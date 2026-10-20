@@ -4,7 +4,7 @@ import {
 } from "./reference-channel.ts";
 
 const REFERENCE_SAMPLE_RATE = 16_000;
-const FIFO_CAPACITY = 40;
+const FIFO_CAPACITY = 20;
 const TRANSIT_HISTORY_CAPACITY = 128;
 
 interface QueuedFrame {
@@ -197,9 +197,10 @@ export class AecReferenceFeed {
       const samples = Float32Array.from(frame.samples);
       if (this.frames.size >= FIFO_CAPACITY) {
         const oldestSeq = this.frames.keys().next().value as number | undefined;
-        // Drop the oldest buffered frame so the FIFO tracks recent playback, not a discontinuity.
+        // Overflow drops oldest but is also a discontinuity — gap -> reset per blueprint §13.5.
         if (oldestSeq !== undefined) this.frames.delete(oldestSeq);
         this.status.overflows += 1;
+        this.pendingGap = true;
       }
 
       this.frames.set(frame.seq, { seq: frame.seq, samples, offset: 0 });

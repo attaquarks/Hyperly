@@ -22,6 +22,7 @@ export class AecRecoveryPolicy {
   }
 
   noteWorkerSuccess(): void {
+    if (this.overflowCount > 0) this.overflowCount -= 1;
     if (!this.resetSent) this.consecutiveFailures = 0;
   }
 }

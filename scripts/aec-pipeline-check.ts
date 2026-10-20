@@ -90,10 +90,10 @@ assert.match(micAec, /worker\?\.postMessage\(\{ type: "reset" \}\)/);
 assert.match(micAec, /LocalVQE failed after its recovery reset/);
 assert.match(reference, /this\.pendingGap = true;\s*this\.frames\.clear\(\);/);
 assert.match(reference, /consumeGap\(\): boolean/);
-assert.match(reference, /const FIFO_CAPACITY = 40/);
+assert.match(reference, /const FIFO_CAPACITY = 20/);
 const referenceOverflowBlock = reference.slice(reference.indexOf("if (this.frames.size >= FIFO_CAPACITY)"), reference.indexOf("this.frames.set(frame.seq"));
-assert.ok(referenceOverflowBlock.includes("this.status.overflows += 1;") && !referenceOverflowBlock.includes("pendingGap"),
-  "FIFO overflow must count and drop the oldest without signaling a sequence discontinuity");
+assert.ok(referenceOverflowBlock.includes("this.status.overflows += 1;") && referenceOverflowBlock.includes("this.pendingGap = true;"),
+  "FIFO overflow must count, drop oldest, and signal a discontinuity for filter reset");
 assert.match(worker, /if \(gap\) currentApi\.reset\(context\)/);
 assert.match(micAec, /micTrack\.addEventListener\("ended"/);
 assert.match(micAec, /settings\.deviceId !== initialDeviceId/);
@@ -109,6 +109,8 @@ console.log("  ok    ended/device/rate changes release source and graph; rejecte
 
 const recovery = new AecRecoveryPolicy();
 assert.equal(recovery.noteOverflows(4), "gap");
+recovery.noteWorkerSuccess();
+assert.equal(recovery.noteOverflows(1), "gap");
 assert.equal(recovery.noteOverflows(1), "bypass");
 const failureRecovery = new AecRecoveryPolicy();
 assert.equal(failureRecovery.noteWorkerFailure(), "continue");
@@ -121,7 +123,7 @@ resetOnSuccess.noteWorkerFailure();
 resetOnSuccess.noteWorkerFailure();
 resetOnSuccess.noteWorkerSuccess();
 assert.equal(resetOnSuccess.noteWorkerFailure(), "continue");
-console.log("  ok    recovery policy tolerates one overflow, resets after four failures, then bypasses on failure");
+console.log("  ok    recovery policy tolerates four overflows with healthy-hop decay, resets after four failures, then bypasses on failure");
 
 assert.match(micAec, /import \{ createLocalVqeWorker \} from "\.\/localvqe-worker-factory\.ts"/);
 assert.match(hook, /await session\.activate\(context, getActiveAecReferenceFeed\(\)/);

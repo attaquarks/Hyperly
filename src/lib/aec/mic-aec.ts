@@ -297,6 +297,7 @@ export const createMicAec = (
               bypass("overload", new Error("Reference FIFO overflow recurred"));
               return;
             }
+            // A tolerated overflow remains a gap; consumeGap() below sends it to the worker reset path.
           }
           if (pending.size >= 2) {
             bypass("overload", new Error("LocalVQE worker queue overrun"));
