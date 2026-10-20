@@ -115,6 +115,26 @@ for (let i = 0; i < 5; i++) {
   assert.equal(spacedOverflowRecovery.noteOverflows(1), "gap");
   for (let hop = 0; hop < 20; hop++) spacedOverflowRecovery.noteWorkerSuccess();
 }
+// Distinguishing: threshold is exactly 20. 19 healthy hops must NOT decay, 20 must.
+// Setup: 4 rapid overflows (no decay) -> count 4. Then test next overflow after 19 vs 20.
+const thresholdRecovery = new AecRecoveryPolicy();
+for (let i = 0; i < 4; i++) thresholdRecovery.noteOverflows(1); // count 4 (no successes)
+for (let h = 0; h < 19; h++) thresholdRecovery.noteWorkerSuccess(); // healthyHops 19, no decay
+assert.equal(thresholdRecovery.noteOverflows(1), "bypass", "19 successes must NOT decay: 5th rapid overflow must bypass");
+const thresholdRecovery2 = new AecRecoveryPolicy();
+for (let i = 0; i < 4; i++) thresholdRecovery2.noteOverflows(1); // count 4
+for (let h = 0; h < 20; h++) thresholdRecovery2.noteWorkerSuccess(); // healthyHops 20 -> count 3
+assert.equal(thresholdRecovery2.noteOverflows(1), "gap", "20 successes must decay: next overflow must be gap");
+// Distinguishing streak-reset: overflow resets healthyHops=0.
+// Without reset, two 10-success gaps would sum to 20 and decay once.
+const streakRecovery = new AecRecoveryPolicy();
+assert.equal(streakRecovery.noteOverflows(1), "gap"); // c1
+for (let h = 0; h < 10; h++) streakRecovery.noteWorkerSuccess(); // hops 10
+assert.equal(streakRecovery.noteOverflows(1), "gap"); // c2
+for (let h = 0; h < 10; h++) streakRecovery.noteWorkerSuccess(); // with reset: hops 10, not 20
+assert.equal(streakRecovery.noteOverflows(1), "gap"); // c3
+assert.equal(streakRecovery.noteOverflows(1), "gap"); // c4
+assert.equal(streakRecovery.noteOverflows(1), "bypass"); // c5
 const failureRecovery = new AecRecoveryPolicy();
 assert.equal(failureRecovery.noteWorkerFailure(), "continue");
 assert.equal(failureRecovery.noteWorkerFailure(), "continue");
