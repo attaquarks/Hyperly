@@ -108,10 +108,13 @@ console.log("  ok    acquire disposes overwritten sessions; gaps reset; repeated
 console.log("  ok    ended/device/rate changes release source and graph; rejected module load can retry");
 
 const recovery = new AecRecoveryPolicy();
-assert.equal(recovery.noteOverflows(4), "gap");
-recovery.noteWorkerSuccess();
-assert.equal(recovery.noteOverflows(1), "gap");
+for (let i = 0; i < 4; i++) assert.equal(recovery.noteOverflows(1), "gap");
 assert.equal(recovery.noteOverflows(1), "bypass");
+const spacedOverflowRecovery = new AecRecoveryPolicy();
+for (let i = 0; i < 5; i++) {
+  assert.equal(spacedOverflowRecovery.noteOverflows(1), "gap");
+  for (let hop = 0; hop < 20; hop++) spacedOverflowRecovery.noteWorkerSuccess();
+}
 const failureRecovery = new AecRecoveryPolicy();
 assert.equal(failureRecovery.noteWorkerFailure(), "continue");
 assert.equal(failureRecovery.noteWorkerFailure(), "continue");
@@ -123,7 +126,7 @@ resetOnSuccess.noteWorkerFailure();
 resetOnSuccess.noteWorkerFailure();
 resetOnSuccess.noteWorkerSuccess();
 assert.equal(resetOnSuccess.noteWorkerFailure(), "continue");
-console.log("  ok    recovery policy tolerates four overflows with healthy-hop decay, resets after four failures, then bypasses on failure");
+console.log("  ok    recovery bypasses on five rapid overflows, decays spaced overflows after 20 healthy hops, and resets after four failures");
 
 assert.match(micAec, /import \{ createLocalVqeWorker \} from "\.\/localvqe-worker-factory\.ts"/);
 assert.match(hook, /await session\.activate\(context, getActiveAecReferenceFeed\(\)/);
