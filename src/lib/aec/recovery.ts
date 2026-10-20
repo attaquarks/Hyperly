@@ -1,14 +1,16 @@
 /** Session-scoped recovery limits for reference loss and worker inference faults. */
 export class AecRecoveryPolicy {
   private overflowCount = 0;
+  private healthyHops = 0;
   private consecutiveFailures = 0;
   private resetSent = false;
 
-  /** The first FIFO overflow requests a filter gap; later ones are fatal. */
+  /** Tolerate short FIFO backpressure bursts; bypass after sustained overflow. */
   noteOverflows(count: number): "gap" | "bypass" {
     if (!Number.isSafeInteger(count) || count <= 0) return "gap";
     this.overflowCount += count;
-    return this.overflowCount === 1 ? "gap" : "bypass";
+    this.healthyHops = 0;
+    return this.overflowCount <= 4 ? "gap" : "bypass";
   }
 
   /** Three consecutive failures are tolerated; the fourth resets once. */
@@ -23,5 +25,10 @@ export class AecRecoveryPolicy {
 
   noteWorkerSuccess(): void {
     if (!this.resetSent) this.consecutiveFailures = 0;
+    this.healthyHops += 1;
+    if (this.healthyHops >= 20 && this.overflowCount > 0) {
+      this.overflowCount -= 1;
+      this.healthyHops = 0;
+    }
   }
 }
