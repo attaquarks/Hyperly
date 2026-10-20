@@ -90,6 +90,10 @@ assert.match(micAec, /worker\?\.postMessage\(\{ type: "reset" \}\)/);
 assert.match(micAec, /LocalVQE failed after its recovery reset/);
 assert.match(reference, /this\.pendingGap = true;\s*this\.frames\.clear\(\);/);
 assert.match(reference, /consumeGap\(\): boolean/);
+assert.match(reference, /const FIFO_CAPACITY = 40/);
+const referenceOverflowBlock = reference.slice(reference.indexOf("if (this.frames.size >= FIFO_CAPACITY)"), reference.indexOf("this.frames.set(frame.seq"));
+assert.ok(referenceOverflowBlock.includes("this.status.overflows += 1;") && !referenceOverflowBlock.includes("pendingGap"),
+  "FIFO overflow must count and drop the oldest without signaling a sequence discontinuity");
 assert.match(worker, /if \(gap\) currentApi\.reset\(context\)/);
 assert.match(micAec, /micTrack\.addEventListener\("ended"/);
 assert.match(micAec, /settings\.deviceId !== initialDeviceId/);
@@ -104,7 +108,7 @@ console.log("  ok    acquire disposes overwritten sessions; gaps reset; repeated
 console.log("  ok    ended/device/rate changes release source and graph; rejected module load can retry");
 
 const recovery = new AecRecoveryPolicy();
-assert.equal(recovery.noteOverflows(1), "gap");
+assert.equal(recovery.noteOverflows(4), "gap");
 assert.equal(recovery.noteOverflows(1), "bypass");
 const failureRecovery = new AecRecoveryPolicy();
 assert.equal(failureRecovery.noteWorkerFailure(), "continue");

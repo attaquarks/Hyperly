@@ -4,11 +4,11 @@ export class AecRecoveryPolicy {
   private consecutiveFailures = 0;
   private resetSent = false;
 
-  /** The first FIFO overflow requests a filter gap; later ones are fatal. */
+  /** Tolerate short FIFO backpressure bursts; bypass after sustained overflow. */
   noteOverflows(count: number): "gap" | "bypass" {
     if (!Number.isSafeInteger(count) || count <= 0) return "gap";
     this.overflowCount += count;
-    return this.overflowCount === 1 ? "gap" : "bypass";
+    return this.overflowCount <= 4 ? "gap" : "bypass";
   }
 
   /** Three consecutive failures are tolerated; the fourth resets once. */
