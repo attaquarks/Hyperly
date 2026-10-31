@@ -5,6 +5,8 @@ import {
 
 const REFERENCE_SAMPLE_RATE = 16_000;
 const FIFO_CAPACITY = 20;
+/** Episode trim target: 10 frames = 200 ms, the top of the declared 100–200 ms refDelayMs band. */
+const FIFO_TARGET_DEPTH = 10;
 const TRANSIT_HISTORY_CAPACITY = 128;
 
 interface QueuedFrame {
@@ -196,9 +198,17 @@ export class AecReferenceFeed {
 
       const samples = Float32Array.from(frame.samples);
       if (this.frames.size >= FIFO_CAPACITY) {
-        const oldestSeq = this.frames.keys().next().value as number | undefined;
-        // Overflow drops oldest but is also a discontinuity — gap -> reset per blueprint §13.5.
-        if (oldestSeq !== undefined) this.frames.delete(oldestSeq);
+        // One full-FIFO episode = one overflow + one gap. Delivery and consumption
+        // share the WebView main thread, so a stall flushes a burst onto the standing
+        // backlog; dropping one frame per arriving frame counted ~11 strikes for a
+        // single 336 ms burst and bypassed. Trim to the declared 200 ms band instead:
+        // the backlog is rate-matched (zero drift), so this also lazily bounds any
+        // oversized pre-activation accumulation. Gap -> reset per blueprint §13.5.
+        while (this.frames.size >= FIFO_TARGET_DEPTH) {
+          const oldestSeq = this.frames.keys().next().value as number | undefined;
+          if (oldestSeq === undefined) break;
+          this.frames.delete(oldestSeq);
+        }
         this.status.overflows += 1;
         this.pendingGap = true;
       }
