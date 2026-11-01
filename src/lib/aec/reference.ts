@@ -7,6 +7,13 @@ const REFERENCE_SAMPLE_RATE = 16_000;
 const FIFO_CAPACITY = 20;
 /** Episode trim target: 10 frames = 200 ms, the top of the declared 100–200 ms refDelayMs band. */
 const FIFO_TARGET_DEPTH = 10;
+/**
+ * Burst headroom above the target. Delivery bursts (a stalled main thread
+ * flushing queued IPC frames) briefly exceed the target; shedding the surplus
+ * here keeps wake bursts from drawing the FIFO dry before the reference
+ * frames catch up. Consumed backlog still returns to 200 ms.
+ */
+const FIFO_HIGH_WATER = 14;
 const TRANSIT_HISTORY_CAPACITY = 128;
 
 interface QueuedFrame {
@@ -154,6 +161,11 @@ export class AecReferenceFeed {
    * dropped span, so the stream the AEC reads stays internally contiguous.
    */
   trimExcess(): void {
+    this.trimToTarget();
+  }
+
+  /** Shared shed loop: drop the oldest frames until the episode target. */
+  private trimToTarget(): void {
     while (this.frames.size > FIFO_TARGET_DEPTH) {
       const oldestSeq = this.frames.keys().next().value as number | undefined;
       if (oldestSeq === undefined) break;
@@ -217,6 +229,14 @@ export class AecReferenceFeed {
       this.recordRelativeTransit(frame);
 
       const samples = Float32Array.from(frame.samples);
+      // Flow shaping: shed burst surplus above the high-water mark. This is
+      // not an overflow — no frame was lost to pressure — so it does not
+      // count against the recovery ladder; it marks the discontinuity so the
+      // filter resets on the next consumed hop.
+      if (this.frames.size > FIFO_HIGH_WATER) {
+        this.trimToTarget();
+        this.pendingGap = true;
+      }
       if (this.frames.size >= FIFO_CAPACITY) {
         // One full-FIFO episode = one overflow + one gap. Delivery and consumption
         // share the WebView main thread, so a stall flushes a burst onto the standing

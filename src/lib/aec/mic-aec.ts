@@ -23,6 +23,10 @@ const WORKER_INFLIGHT_LIMIT = 16;
 /** Concealed hops within WORKER_DROP_BYPASS_WINDOW_MS that mean the pipeline
  * genuinely cannot keep up; anything below is scheduling jitter to absorb. */
 const WORKER_DROP_BYPASS_COUNT = 16;
+/** Reference underruns are transient by nature (the FIFO refills in ~20ms and
+ * a dead feed is caught by the ready-state check), so they get a far larger
+ * budget before the honest bypass: ~1s of consecutive silence in 5s. */
+const REF_UNDERRUN_BYPASS_COUNT = 64;
 const WORKER_DROP_BYPASS_WINDOW_MS = 5_000;
 const HOP_RTT_HISTORY = 64;
 const HOP_TELEMETRY_INTERVAL_MS = 1_000;
@@ -170,6 +174,7 @@ export const createMicAec = (
   const hopRttsMs: number[] = [];
   const skippedOutputIds = new Set<number>();
   const dropTimesMs: number[] = [];
+  const refUnderrunTimesMs: number[] = [];
   let pendingMicGap = false;
   let lastHopTelemetryMs = 0;
   const recovery = new AecRecoveryPolicy();
@@ -189,6 +194,7 @@ export const createMicAec = (
     hopPostedAtMs.clear();
     skippedOutputIds.clear();
     dropTimesMs.length = 0;
+    refUnderrunTimesMs.length = 0;
     pendingMicGap = false;
     if (currentWorker) {
       currentWorker.onmessage = null;
@@ -275,24 +281,29 @@ export const createMicAec = (
 
   /**
    * Conceal one hop: silence for its id, filter reset on the next posted hop,
-   * one strike against the sustained-failure budget. Transient starvation
-   * (in-flight backlog, momentary reference emptiness) recovers within tens of
-   * milliseconds; only sustained inability to keep up bypasses.
+   * one strike against the matching budget. Transient starvation (in-flight
+   * backlog, momentary reference emptiness) recovers within tens of
+   * milliseconds; only a sustained drain of either budget bypasses — engine
+   * slowdowns and reference-delivery failures are different pathologies with
+   * different budgets.
    */
-  const concealHop = (id: number, why: string): void => {
+  const concealHop = (
+    id: number,
+    why: string,
+    ring: number[],
+    budgetCount: number,
+    budgetLabel: string
+  ): void => {
     skippedOutputIds.add(id);
     pendingMicGap = true;
     const nowMs = performance.now();
-    dropTimesMs.push(nowMs);
-    while (
-      dropTimesMs.length > 0 &&
-      nowMs - dropTimesMs[0] > WORKER_DROP_BYPASS_WINDOW_MS
-    ) {
-      dropTimesMs.shift();
+    ring.push(nowMs);
+    while (ring.length > 0 && nowMs - ring[0] > WORKER_DROP_BYPASS_WINDOW_MS) {
+      ring.shift();
     }
     console.warn(`[aec] concealing mic hop ${id}; ${why}`);
-    if (dropTimesMs.length >= WORKER_DROP_BYPASS_COUNT) {
-      bypass("overload", new Error("AEC cannot sustain realtime"));
+    if (ring.length >= budgetCount) {
+      bypass("overload", new Error(budgetLabel));
     }
   };
 
@@ -396,7 +407,12 @@ export const createMicAec = (
             return;
           }
           if (feed.status.state !== "ready") {
-            bypass("no-reference", new Error("Reference feed is unavailable or has a sequence gap"));
+            bypass(
+              "no-reference",
+              new Error(
+                `Reference feed is unavailable (state=${feed.status.state}, reason=${feed.status.reason ?? "none"})`
+              )
+            );
             return;
           }
           if (feed.status.overflows !== lastReferenceOverflowCount) {
@@ -414,7 +430,13 @@ export const createMicAec = (
             // thread, not engine slowness. Conceal this hop (the worklet
             // inserts silence for it) and reset the filter on the next posted
             // hop; sustained inability to keep up still bypasses below.
-            concealHop(message.id, `in flight ${pending.size}`);
+            concealHop(
+              message.id,
+              `in flight ${pending.size}`,
+              dropTimesMs,
+              WORKER_DROP_BYPASS_COUNT,
+              "AEC cannot sustain realtime"
+            );
             return;
           }
 
@@ -423,7 +445,13 @@ export const createMicAec = (
             // A dead feed is caught above by the ready-state check; reaching
             // here means the FIFO was momentarily empty (delivery burst drew
             // it dry). The backlog refills in ~20ms — conceal, don't bypass.
-            concealHop(message.id, "reference underrun");
+            concealHop(
+              message.id,
+              "reference underrun",
+              refUnderrunTimesMs,
+              REF_UNDERRUN_BYPASS_COUNT,
+              "Reference delivery cannot sustain realtime"
+            );
             return;
           }
 
@@ -503,7 +531,7 @@ export const createMicAec = (
               : 0;
             const worst = hopRttsMs.length ? Math.max(...hopRttsMs) : 0;
             console.info(
-              `[aec] hop rtt avg ${avg.toFixed(1)}ms max ${worst.toFixed(1)}ms in-flight ${pending.size} concealed ${dropTimesMs.length}/5s`
+              `[aec] hop rtt avg ${avg.toFixed(1)}ms max ${worst.toFixed(1)}ms in-flight ${pending.size} concealed ${dropTimesMs.length}/5s ref-concealed ${refUnderrunTimesMs.length}/5s`
             );
           }
           const hops = status.state === "active" ? status.hops + 1 : 1;

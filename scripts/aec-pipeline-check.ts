@@ -88,6 +88,16 @@ assert.match(micAec, /ref: reference, gap/);
 assert.match(micAec, /recovery\.noteWorkerFailure\(\)/);
 assert.match(micAec, /worker\?\.postMessage\(\{ type: "reset" \}\)/);
 assert.match(micAec, /LocalVQE failed after its recovery reset/);
+const referenceWaterBlock = reference.slice(
+  reference.indexOf("if (this.frames.size > FIFO_HIGH_WATER)"),
+  reference.indexOf("if (this.frames.size >= FIFO_CAPACITY)")
+);
+assert.ok(
+  referenceWaterBlock.includes("this.pendingGap = true;") &&
+    !referenceWaterBlock.includes("this.status.overflows += 1;") &&
+    reference.indexOf("const FIFO_HIGH_WATER = 14") >= 0,
+  "burst shaping above the high-water mark must shed surplus, mark the discontinuity, and NOT count against the overflow ladder"
+);
 const referenceGapBlock = reference.slice(
   reference.indexOf("frame.seq !== this.lastReceivedSeq + 1"),
   reference.indexOf("this.lastReceivedSeq = frame.seq;")
