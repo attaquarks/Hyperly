@@ -273,6 +273,29 @@ export const createMicAec = (
     }
   };
 
+  /**
+   * Conceal one hop: silence for its id, filter reset on the next posted hop,
+   * one strike against the sustained-failure budget. Transient starvation
+   * (in-flight backlog, momentary reference emptiness) recovers within tens of
+   * milliseconds; only sustained inability to keep up bypasses.
+   */
+  const concealHop = (id: number, why: string): void => {
+    skippedOutputIds.add(id);
+    pendingMicGap = true;
+    const nowMs = performance.now();
+    dropTimesMs.push(nowMs);
+    while (
+      dropTimesMs.length > 0 &&
+      nowMs - dropTimesMs[0] > WORKER_DROP_BYPASS_WINDOW_MS
+    ) {
+      dropTimesMs.shift();
+    }
+    console.warn(`[aec] concealing mic hop ${id}; ${why}`);
+    if (dropTimesMs.length >= WORKER_DROP_BYPASS_COUNT) {
+      bypass("overload", new Error("AEC cannot sustain realtime"));
+    }
+  };
+
   const session: MicAecSession = {
     get output() {
       return output;
@@ -391,26 +414,16 @@ export const createMicAec = (
             // thread, not engine slowness. Conceal this hop (the worklet
             // inserts silence for it) and reset the filter on the next posted
             // hop; sustained inability to keep up still bypasses below.
-            skippedOutputIds.add(message.id);
-            pendingMicGap = true;
-            const nowMs = performance.now();
-            dropTimesMs.push(nowMs);
-            while (
-              dropTimesMs.length > 0 &&
-              nowMs - dropTimesMs[0] > WORKER_DROP_BYPASS_WINDOW_MS
-            ) {
-              dropTimesMs.shift();
-            }
-            console.warn(`[aec] concealing mic hop ${message.id}; in flight ${pending.size}`);
-            if (dropTimesMs.length >= WORKER_DROP_BYPASS_COUNT) {
-              bypass("overload", new Error("LocalVQE worker cannot sustain realtime"));
-            }
+            concealHop(message.id, `in flight ${pending.size}`);
             return;
           }
 
           const reference = feed.takeRef(AEC_HOP_SAMPLES);
           if (!reference) {
-            bypass("no-reference", new Error("Reference FIFO underrun"));
+            // A dead feed is caught above by the ready-state check; reaching
+            // here means the FIFO was momentarily empty (delivery burst drew
+            // it dry). The backlog refills in ~20ms — conceal, don't bypass.
+            concealHop(message.id, "reference underrun");
             return;
           }
 

@@ -88,7 +88,16 @@ assert.match(micAec, /ref: reference, gap/);
 assert.match(micAec, /recovery\.noteWorkerFailure\(\)/);
 assert.match(micAec, /worker\?\.postMessage\(\{ type: "reset" \}\)/);
 assert.match(micAec, /LocalVQE failed after its recovery reset/);
-assert.match(reference, /this\.pendingGap = true;\s*this\.frames\.clear\(\);/);
+const referenceGapBlock = reference.slice(
+  reference.indexOf("frame.seq !== this.lastReceivedSeq + 1"),
+  reference.indexOf("this.lastReceivedSeq = frame.seq;")
+);
+assert.ok(
+  referenceGapBlock.includes("this.status.sequenceGaps += 1;") &&
+    referenceGapBlock.includes("this.pendingGap = true;") &&
+    !referenceGapBlock.includes("this.frames.clear()"),
+  "a sequence gap must mark the discontinuity for filter reset and KEEP the contiguous buffered audio — clearing the FIFO threw away ~200ms of valid audio and the next hop underran into a fatal bypass"
+);
 assert.match(reference, /consumeGap\(\): boolean/);
 assert.match(reference, /const FIFO_CAPACITY = 20/);
 const referenceOverflowBlock = reference.slice(reference.indexOf("if (this.frames.size >= FIFO_CAPACITY)"), reference.indexOf("this.frames.set(frame.seq"));

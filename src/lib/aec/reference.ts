@@ -206,8 +206,12 @@ export class AecReferenceFeed {
       }
       if (this.lastReceivedSeq !== null && frame.seq !== this.lastReceivedSeq + 1) {
         this.status.sequenceGaps += 1;
+        // A sequence gap is a reference discontinuity, not a reason to discard
+        // the contiguous backlog in front of it: clearing the FIFO threw away
+        // ~200ms of valid audio and the next hop underran into a fatal bypass.
+        // Keep the backlog; the gap flag resets the filter on the next
+        // consumed hop (mic-aec feeds consumeGap() to the worker).
         this.pendingGap = true;
-        this.frames.clear();
       }
       this.lastReceivedSeq = frame.seq;
       this.recordRelativeTransit(frame);
@@ -282,7 +286,7 @@ export class AecReferenceFeed {
     const jitter = this.status.relativeTransitJitterMs;
     const jitterText = jitter === null ? "warming" : `σ=${jitter.toFixed(1)}ms`;
     console.info(
-      `[aec] ref 16k, transit relative ${jitterText}, depth ${this.frames.size}`
+      `[aec] ref 16k, transit relative ${jitterText}, depth ${this.frames.size}, gaps ${this.status.sequenceGaps}, overflows ${this.status.overflows}, underruns ${this.status.underruns}`
     );
   }
 
