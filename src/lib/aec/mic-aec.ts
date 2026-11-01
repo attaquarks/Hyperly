@@ -14,6 +14,15 @@ const WORKER_LOAD_TIMEOUT_MS = 20_000;
 const REFERENCE_START_TIMEOUT_MS = 500;
 const WARMUP_HOPS = 3;
 const WARMUP_TIMEOUT_MS = 10_000;
+/** In-flight process hops before a new hop is concealed. The engine bench at
+ * ~3.3 ms/hop gives 10x headroom at 4; the cap only guards unbounded posting. */
+const WORKER_INFLIGHT_LIMIT = 4;
+/** Concealed hops within WORKER_DROP_BYPASS_WINDOW_MS that mean the pipeline
+ * genuinely cannot keep up; anything below is scheduling jitter to absorb. */
+const WORKER_DROP_BYPASS_COUNT = 16;
+const WORKER_DROP_BYPASS_WINDOW_MS = 5_000;
+const HOP_RTT_HISTORY = 64;
+const HOP_TELEMETRY_INTERVAL_MS = 1_000;
 
 interface WorkerReady {
   type: "ready";
@@ -154,6 +163,12 @@ export const createMicAec = (
   let nextExpectedMicId = 0;
   let nextExpectedOutputId = 0;
   let lastReferenceOverflowCount = 0;
+  const hopPostedAtMs = new Map<number, number>();
+  const hopRttsMs: number[] = [];
+  const skippedOutputIds = new Set<number>();
+  const dropTimesMs: number[] = [];
+  let pendingMicGap = false;
+  let lastHopTelemetryMs = 0;
   const recovery = new AecRecoveryPolicy();
   let removeTrackMonitor = (): void => {};
 
@@ -168,6 +183,10 @@ export const createMicAec = (
     const currentWorker = worker;
     worker = null;
     pending.clear();
+    hopPostedAtMs.clear();
+    skippedOutputIds.clear();
+    dropTimesMs.length = 0;
+    pendingMicGap = false;
     if (currentWorker) {
       currentWorker.onmessage = null;
       currentWorker.onerror = null;
@@ -240,6 +259,15 @@ export const createMicAec = (
     if (bridgeNode) restoreRawRoute();
     stopWorker();
     publish({ state: "bypass", reason });
+  };
+
+  /** Forward concealment markers in strict id order, exactly when their turn comes. */
+  const flushSkippedOutputs = (): void => {
+    while (skippedOutputIds.has(nextExpectedOutputId)) {
+      skippedOutputIds.delete(nextExpectedOutputId);
+      bridgeNode?.port.postMessage({ type: "dropped", id: nextExpectedOutputId });
+      nextExpectedOutputId += 1;
+    }
   };
 
   const session: MicAecSession = {
@@ -354,8 +382,26 @@ export const createMicAec = (
             }
             // A tolerated overflow remains a gap; consumeGap() below sends it to the worker reset path.
           }
-          if (pending.size >= 2) {
-            bypass("overload", new Error("LocalVQE worker queue overrun"));
+          if (pending.size >= WORKER_INFLIGHT_LIMIT) {
+            // The engine bench runs at ~3.3 ms/hop (4.9x realtime), so depth
+            // beyond the cap is result-pickup delay on the contended main
+            // thread, not engine slowness. Conceal this hop (the worklet
+            // inserts silence for it) and reset the filter on the next posted
+            // hop; sustained inability to keep up still bypasses below.
+            skippedOutputIds.add(message.id);
+            pendingMicGap = true;
+            const nowMs = performance.now();
+            dropTimesMs.push(nowMs);
+            while (
+              dropTimesMs.length > 0 &&
+              nowMs - dropTimesMs[0] > WORKER_DROP_BYPASS_WINDOW_MS
+            ) {
+              dropTimesMs.shift();
+            }
+            console.warn(`[aec] concealing mic hop ${message.id}; in flight ${pending.size}`);
+            if (dropTimesMs.length >= WORKER_DROP_BYPASS_COUNT) {
+              bypass("overload", new Error("LocalVQE worker cannot sustain realtime"));
+            }
             return;
           }
 
@@ -374,8 +420,10 @@ export const createMicAec = (
             teardownForSourceChange(new Error("Microphone device or sample rate changed"));
             return;
           }
-          const gap = feed.consumeGap();
+          const gap = feed.consumeGap() || pendingMicGap;
+          pendingMicGap = false;
           pending.add(message.id);
+          hopPostedAtMs.set(message.id, performance.now());
           try {
             worker?.postMessage(
               { type: "process", id: message.id, mic, ref: reference, gap },
@@ -394,7 +442,9 @@ export const createMicAec = (
               bypass("overload", new Error(failure.message));
               return;
             }
+            hopPostedAtMs.delete(failure.id);
             nextExpectedOutputId += 1;
+            flushSkippedOutputs();
             bridge.port.postMessage({ type: "dropped", id: failure.id });
             const action = recovery.noteWorkerFailure();
             if (action === "reset") {
@@ -406,6 +456,13 @@ export const createMicAec = (
           }
           if (message.type !== "processed") return;
           const processed = message as WorkerProcessed;
+          const postedAtMs = hopPostedAtMs.get(processed.id);
+          if (postedAtMs !== undefined) {
+            hopPostedAtMs.delete(processed.id);
+            hopRttsMs.push(performance.now() - postedAtMs);
+            if (hopRttsMs.length > HOP_RTT_HISTORY) hopRttsMs.shift();
+          }
+          flushSkippedOutputs();
           if (!pending.delete(processed.id) || processed.id !== nextExpectedOutputId++) {
             bypass("overload", new Error("LocalVQE worker response sequence gap"));
             return;
@@ -420,6 +477,19 @@ export const createMicAec = (
             { type: "processed", id: processed.id, samples: processed.samples },
             [processed.samples]
           );
+          if (
+            import.meta.env.DEV &&
+            performance.now() - lastHopTelemetryMs >= HOP_TELEMETRY_INTERVAL_MS
+          ) {
+            lastHopTelemetryMs = performance.now();
+            const avg = hopRttsMs.length
+              ? hopRttsMs.reduce((sum, value) => sum + value, 0) / hopRttsMs.length
+              : 0;
+            const worst = hopRttsMs.length ? Math.max(...hopRttsMs) : 0;
+            console.info(
+              `[aec] hop rtt avg ${avg.toFixed(1)}ms max ${worst.toFixed(1)}ms in-flight ${pending.size} concealed ${dropTimesMs.length}/5s`
+            );
+          }
           const hops = status.state === "active" ? status.hops + 1 : 1;
           status = {
             state: "active",

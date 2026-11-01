@@ -15,7 +15,6 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
     this.playback = [];
     this.playbackPosition = 0;
     this.playbackStarted = false;
-    this.underrunSent = false;
 
     this.port.onmessage = (event) => {
       if (event.data.type === "bypass") {
@@ -68,17 +67,20 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
 
     if (!this.playbackStarted) {
       output.fill(0);
+      if (input) output.set(input.subarray(0, output.length));
       return true;
     }
 
     if (this.playback.length - Math.floor(this.playbackPosition) < samplesNeeded) {
-      this.bypass = true;
-      if (!this.underrunSent) {
-        this.underrunSent = true;
-        this.port.postMessage({ type: "fault", reason: "output-queue-underrun" });
-      }
+      // Output starved (a main-thread stall delayed worker results). Pass the
+      // raw mic through for this render and let the queue refill instead of
+      // killing the session — that is byte-identical to a temporary bypass.
+      // Sustained failure still bypasses upstream (worker errors, sequence
+      // gaps, the session's concealment counter).
+      this.playbackStarted = false;
       output.fill(0);
       if (input) output.set(input.subarray(0, output.length));
+      console.warn("[aec] worklet output starved; passing raw mic until the queue refills");
       return true;
     }
 
