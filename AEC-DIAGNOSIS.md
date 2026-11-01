@@ -154,3 +154,44 @@ the zero-drift FIFO would keep it — and its misalignment — forever.
 
 Both keep `recovery.ts`, the ladder, the Rust tap, and the byte-identical bypass path
 untouched. Runtime round 2 still required: same three checks as §6.
+
+---
+
+## 8. Runtime round 2 + engine bench (2026-11-01) — delivery starvation identified
+
+Round 2 failed identically: `LocalVQE worker queue overrun` at `hops:0` in all three
+sessions, *after* a successful warmup (no `init-failed`; `refDelayMs` 220/200/200
+confirms `trimExcess` ran). Since the first-call cost was already paid, the bypass was
+not warmup and — per the bench below — not the engine.
+
+**Engine bench (Node, this machine, vendored assets, engine framing mirrored):**
+`avg 3.27 ms/hop, p50 3.05, p95 4.95, max 10.82` vs a 16 ms hop budget → **4.90×
+realtime at 1 thread**. The offline 4.39× claim holds. The engine is exonerated
+definitively; the bench script lives outside the repo (temp) and can be re-run on
+demand.
+
+**Remaining kill-switches, both driven by main-thread contention (log σ = 62–200 ms,
+sustained — React renders, Tauri IPC, b64 WAV encoding for partial transcripts):**
+
+1. `pending.size >= 2` (2-deep in-flight cap, 32 ms) — with the engine fast, in-flight
+   depth beyond 2 is result-*pickup* delay on the main thread. Any adverse interleaving
+   of hop-port vs worker-port tasks during a stall trips it.
+2. Worklet output underrun: a stall > ~80 ms drains the 64 ms output preroll →
+   `output-queue-underrun` fault → session bypass. Same disease: scheduling jitter
+   treated as fatal.
+
+**Round-3 fix (flow, not policy; bypass kept for real failures):**
+
+- In-flight cap 2 → 4; beyond it, the hop is **concealed** (worklet inserts silence for
+  the id, `skippedOutputIds` flushed in strict id order, `pendingMicGap` resets the
+  filter on the next posted hop) instead of bypassing. Bypass only at **16 concealed
+  hops within 5 s** — a genuinely slow engine drops ~37 hops/s and dies honestly in
+  under a second; a stall burst stays far below.
+- Worklet output underrun → **raw mic pass-through for that render + preroll re-arm**
+  (byte-identical to a temporary bypass) instead of latching bypass; startup preroll
+  also passes raw mic instead of dead air.
+- New 1 Hz dev telemetry: `[aec] hop rtt avg Xms max Yms in-flight N concealed K/5s` —
+  round 3's log will show which regime is actually running.
+
+Ladder and reference episode-trim untouched; guards unchanged (nothing pinned the 2-cap
+or the underrun fault).
