@@ -224,3 +224,27 @@ FIFO and bypassed. `sequenceGaps` was never logged, so the wipe was invisible.
 near 0; the ref line's `gaps`/`underruns` counters reveal whether frame loss still
 occurs (harmless now, but if `gaps` climbs steadily the upstream drop source — Rust
 tap or IPC — deserves its own investigation).
+
+---
+
+## 10. Runtime round 5 → 6 (2026-11-02) — last transient kill-switch removed
+
+Round-5 log: ~7 s clean (`gaps 0`, depth pinned 10–12, rtt healthy), 3
+reference-underrun conceals absorbed at a wake burst, then death via the worklet's
+`output-queue-overrun` fault — the catch-up burst after a ~200 ms stall (rtt max
+199 ms) pushed the output queue past its 250 ms bound. A transient *recovery
+overshoot* was still fatal.
+
+**Round-6 fix (`7cebfba`):** the worklet now sheds the **oldest** output down to the
+bound when it overshoots (standard jitter-buffer resync — the backlog exists because
+the pipeline fell behind; the oldest output is the least valuable) instead of
+bypassing. Position bookkeeping follows the splice; both the processed and dropped
+message paths use the same shed. Guard unchanged (nothing pinned the overrun fault).
+
+**Post-bypass `overflows 1→34` in the log is expected:** with no consumer, the
+episode trim cycles at capacity once per fill; the counts are harmless.
+
+**Remaining bypass triggers after this fix are all genuine faults:** worker errors
+after the recovery reset, mic-hop sequence gaps, a dead reference feed (ready-state
+check), the sustained concealment budget (16 in 5 s), mic source changes, and
+activation failures. No transient scheduling event should be able to kill a session.
