@@ -6,6 +6,7 @@ import "./global.css";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppRoutes from "./routes";
+import { HistoryWing } from "./pages/HistoryWing";
 import { MicConsentDialog } from "./components/mic-consent/MicConsentDialog";
 import { syncMicConsentToBackend } from "./lib/mic-consent";
 
@@ -50,7 +51,18 @@ try {
     throw new Error("#root is missing");
   }
 
-  if (windowLabel.startsWith("capture-overlay-")) {
+  if (windowLabel === "history-wing") {
+    // The Listen history "wing": its own always-on-top bubble window docked
+    // next to the overlay (Rust positions it), so history never covers the
+    // live room.
+    ReactDOM.createRoot(rootEl).render(
+      <React.StrictMode>
+        <ThemeProvider>
+          <HistoryWing />
+        </ThemeProvider>
+      </React.StrictMode>
+    );
+  } else if (windowLabel.startsWith("capture-overlay-")) {
     const monitorIndex = parseInt(windowLabel.split("-")[2], 10) || 0;
     ReactDOM.createRoot(rootEl).render(
       <React.StrictMode>

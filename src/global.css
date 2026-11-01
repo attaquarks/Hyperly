@@ -228,9 +228,16 @@ body {
   color: var(--hyperly-text);
   background: var(--hyperly-surface);
   border: 1px solid var(--hyperly-line);
-  border-radius: 14px;
+  border-radius: 22px;
   overflow: hidden;
   box-shadow: 0 18px 50px rgb(0 0 0 / 0.25);
+}
+
+@keyframes hyperly-wing-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.97);
+  }
 }
 
 .hyperly-overlay-header {
@@ -732,6 +739,19 @@ body {
   border-top: 1px solid var(--hyperly-line);
 }
 
+/* Follow-up chips wrap with conversation length; cap the section and scroll
+   the chip rows so they cannot push the action row and footer off-screen. */
+.hyperly-followups-section {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 24%;
+}
+
+.hyperly-followups-section .hyperly-action-row {
+  overflow-y: auto;
+  min-height: 0;
+}
+
 .hyperly-section-heading {
   display: flex;
   align-items: center;
@@ -764,6 +784,10 @@ body {
 .hyperly-answer-section {
   flex: 0 1 auto;
   min-height: 0;
+  /* A long suggested answer scrolls inside its slot: without this cap the
+     answer grew until the transcript vanished and the footer was clipped
+     past the window edge. */
+  max-height: 45%;
 }
 
 .hyperly-icon-btn {
@@ -783,15 +807,78 @@ body {
   background: var(--hyperly-surface-muted);
 }
 
-/* Chat history occupies the transcript slot rather than floating above it.
-   It swaps in for the thread list, so there is never a second scrolling
-   surface stacked over the first. */
-.hyperly-history-overlay {
+/* ---- History wing ---------------------------------------------------------
+   A separate transparent window docked next to the overlay's top-right (Rust
+   owns the geometry and move sync), styled as its own bubble: a hairline gap
+   separates it from the main bubble, and it moves with the main block. */
+.hyperly-wing-shell {
+  width: 100%;
+  height: 100vh;
   display: flex;
   flex-direction: column;
-  flex: 1 1 0%;
-  min-height: 0;
+  background: transparent;
+}
+
+.hyperly-wing-bubble {
+  --hyperly-surface: rgb(16 16 18 / 0.94);
+  --hyperly-surface-muted: rgb(255 255 255 / 0.055);
+  --hyperly-line: rgb(255 255 255 / 0.1);
+  --hyperly-text: rgb(248 248 248);
+  --hyperly-text-muted: rgb(248 248 248 / 0.58);
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  color: var(--hyperly-text);
   background: var(--hyperly-surface);
+  border: 1px solid var(--hyperly-line);
+  border-radius: 22px;
+  overflow: hidden;
+  box-shadow: 0 18px 50px rgb(0 0 0 / 0.25);
+  animation: hyperly-wing-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hyperly-wing-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--hyperly-line);
+  background: rgb(255 255 255 / 0.018);
+}
+
+.hyperly-wing-title {
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hyperly-text-muted);
+}
+
+.hyperly-wing-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  width: 20px;
+  color: var(--hyperly-text-muted);
+  border-radius: 6px;
+  transition: color 140ms ease-out, background-color 140ms ease-out;
+}
+
+.hyperly-wing-close:hover {
+  color: var(--hyperly-text);
+  background: var(--hyperly-surface-muted);
+}
+
+.hyperly-wing-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 4px 6px;
 }
 
 /* Between the prompt tabs and the transcript: hairline above and below. */

@@ -118,6 +118,8 @@ pub fn run() {
             get_app_version,
             window::set_window_size,
             window::open_dashboard,
+            window::open_history_wing,
+            window::close_history_wing,
             window::toggle_dashboard,
             window::move_window,
             window::log_frontend,
@@ -153,6 +155,8 @@ pub fn run() {
             startup::remove_legacy_autostart();
             // Setup main window positioning
             window::setup_main_window(app).expect("Failed to setup main window");
+            // Keep the history wing glued to the overlay while it is dragged.
+            window::setup_history_wing_sync(app.handle());
             // Convert the overlay window into a floating NSPanel (macOS only).
             #[cfg(target_os = "macos")]
             init(app.app_handle());

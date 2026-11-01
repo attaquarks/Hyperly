@@ -36,7 +36,7 @@ export const FollowUps = ({
   );
 
   return (
-    <section className="hyperly-section" aria-label="Follow-ups">
+    <section className="hyperly-section hyperly-followups-section" aria-label="Follow-ups">
       <div className="hyperly-section-heading">
         <span>Follow-ups</span>
         <button

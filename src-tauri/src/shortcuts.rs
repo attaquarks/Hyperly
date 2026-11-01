@@ -7,6 +7,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tokio::time::{sleep, Duration};
 
+use crate::window;
+
 #[cfg(target_os = "macos")]
 use tauri_nspanel::ManagerExt;
 
@@ -265,10 +267,14 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
         if let Err(e) = window.hide() {
             eprintln!("Failed to hide window: {}", e);
         }
+        // The wing is a separate window; an orphaned bubble above the meeting
+        // would defeat the hide. Restore-on-show uses the Rust-side open flag.
+        window::hide_history_wing_with_main(app);
         return;
     }
 
     show_main_window(app);
+    window::restore_history_wing_with_main(app);
 
     if let Err(e) = window.emit("focus-text-input", json!({})) {
         eprintln!("Failed to emit focus-text-input event: {}", e);
