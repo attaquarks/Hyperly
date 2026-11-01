@@ -146,6 +146,22 @@ export class AecReferenceFeed {
     return true;
   }
 
+  /**
+   * Drops the oldest buffered frames down to the episode target. Used at
+   * activation: audio accumulated before the consumer existed is stale beyond
+   * the declared refDelayMs band, and the rate-matched FIFO never sheds it on
+   * its own. Not an overflow — no count, no gap: the consumer never saw the
+   * dropped span, so the stream the AEC reads stays internally contiguous.
+   */
+  trimExcess(): void {
+    while (this.frames.size > FIFO_TARGET_DEPTH) {
+      const oldestSeq = this.frames.keys().next().value as number | undefined;
+      if (oldestSeq === undefined) break;
+      this.frames.delete(oldestSeq);
+    }
+    this.refreshDepth();
+  }
+
   /** Closes the Channel and discards buffered audio without throwing. */
   async close(): Promise<void> {
     if (this.closed) return;

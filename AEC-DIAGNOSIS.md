@@ -115,3 +115,42 @@ Static checks cannot prove this (that is how we got here). The human must run
 2. `[aec] ref 16k, ... depth ≤ 10` with σ not exploding to 300+ ms persistently.
 3. The acceptance test: play system audio while speaking → **no System text under the
    `User` label**.
+
+---
+
+## 7. Runtime validation round 1 (live log, 2026-11-01) — reference fix CONFIRMED, next layer exposed
+
+The human ran a live session with the episode-trim fix. Results:
+
+**The reference overflow bypass is gone.** No `Reference FIFO overflow recurred` in the
+entire log. Depth now sawtooths 10↔20 (burst → episode trim → refill) instead of pinning,
+and σ recovers to ~7–10 ms once startup contention passes — the flow fix behaves as
+designed. The user's headphone test also confirms routing/labels are correct end to end:
+with no acoustic path (headphones), `User` and `System` separate perfectly.
+
+**New failure layer: `LocalVQE worker queue overrun` at `hops:0`** (`mic-aec.ts`,
+`pending.size >= 2`). `loadModel()` posts `"ready"` once the model is *constructed*
+(`localvqe-worker.ts:150`), but the **first** `processFrame` call pays one-time WASM
+lazy-init/JIT cost far above the two-deep queue's 32 ms budget (2 × 16 ms hops). Hop 0
+starts a slow first inference, hop 1 queues behind it, hop 2 arrives → instant bypass.
+This layer was previously unreachable — the reference overflow killed the session first.
+
+**Band violation at activation:** `refDelayMs` was 220 ms and 340 ms across the two
+sessions (band: 100–200 ms). The pre-activation backlog scales with startup latency and
+the zero-drift FIFO would keep it — and its misalignment — forever.
+
+**Fixes for this layer (same principles: flow, not policy; bypass untouched):**
+
+1. **Engine warmup during activation** (`mic-aec.ts`): after `"ready"` and before the
+   live bridge is wired, drive 3 silent hops through the worker and await the results.
+   The first-call JIT cost is paid while the mic route is still raw pass-through, so the
+   wait is free and `pending.size >= 2` gets its full 32 ms budget at steady state
+   (~3.6 ms/hop measured offline → ~9× headroom). Warmup failure → `init-failed`
+   bypass, as with any other activation failure.
+2. **`AecReferenceFeed.trimExcess()`** (`reference.ts`): clamps the buffered backlog to
+   `FIFO_TARGET_DEPTH` (10 frames = 200 ms). Called once at activation after
+   `waitForReferenceBuffer`. Not an overflow — no count, no gap: the consumer never saw
+   the dropped span, so the reference the AEC reads stays internally contiguous.
+
+Both keep `recovery.ts`, the ladder, the Rust tap, and the byte-identical bypass path
+untouched. Runtime round 2 still required: same three checks as §6.

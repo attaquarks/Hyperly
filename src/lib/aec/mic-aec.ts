@@ -12,6 +12,8 @@ const AEC_HOP_SAMPLES = 256;
 const MODEL_NAME = "LocalVQE GTCRN-AEC compact";
 const WORKER_LOAD_TIMEOUT_MS = 20_000;
 const REFERENCE_START_TIMEOUT_MS = 500;
+const WARMUP_HOPS = 3;
+const WARMUP_TIMEOUT_MS = 10_000;
 
 interface WorkerReady {
   type: "ready";
@@ -82,6 +84,48 @@ const waitForWorker = (worker: Worker): Promise<WorkerReady> =>
       reject(new Error(event.message || "LocalVQE worker failed to load"));
     };
     worker.postMessage({ type: "load" });
+  });
+
+/**
+ * Drives silent hops through the engine before the live bridge is wired. The
+ * first processFrame call pays one-time WASM lazy-init/JIT cost far above the
+ * two-deep queue budget, which bypassed the AEC within ~3 hops of activation.
+ * The mic route is still raw pass-through here, so the wait is free.
+ */
+const warmUpWorker = (worker: Worker): Promise<void> =>
+  new Promise((resolve, reject) => {
+    let sent = 0;
+    let done = 0;
+    const finish = (error?: Error): void => {
+      clearTimeout(timer);
+      worker.onmessage = null;
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(
+      () => finish(new Error("LocalVQE warmup timed out")),
+      WARMUP_TIMEOUT_MS
+    );
+    worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
+      const message = event.data;
+      if (message.type === "error") {
+        finish(new Error((message as WorkerFailure).message));
+        return;
+      }
+      if (message.type !== "processed") return;
+      done += 1;
+      if (done >= sent) finish();
+    };
+    for (; sent < WARMUP_HOPS; sent += 1) {
+      const mic = new Float32Array(AEC_HOP_SAMPLES);
+      const ref = new Float32Array(AEC_HOP_SAMPLES);
+      // Negative ids cannot collide with the live bridge's monotonically
+      // increasing mic-hop ids, and warmup fully drains before it is wired.
+      worker.postMessage(
+        { type: "process", id: -(sent + 1), mic, ref, gap: false },
+        [mic.buffer, ref.buffer]
+      );
+    }
   });
 
 /**
@@ -253,9 +297,20 @@ export const createMicAec = (
         if (ready.sampleRate !== AEC_SAMPLE_RATE || ready.hop !== AEC_HOP_SAMPLES) {
           throw new Error(`Unexpected LocalVQE format ${ready.sampleRate} Hz/${ready.hop}-sample hop`);
         }
+        await warmUpWorker(worker);
+        if (disposed) {
+          stopWorker();
+          activating = false;
+          return;
+        }
         if (!(await waitForReferenceBuffer(feed))) {
           throw new Error("Reference feed did not provide two contiguous 16 kHz hops");
         }
+        // Audio accumulated before this consumer existed is stale beyond the
+        // declared refDelayMs band, and the rate-matched FIFO never sheds it on
+        // its own. Clamp before the first hop; not an overflow — no count, no
+        // gap, the AEC never saw the dropped span.
+        feed.trimExcess();
         lastReferenceOverflowCount = feed.status.overflows;
 
         const workletUrl = new URL("/aec/mic-aec-worklet.js", location.origin);
