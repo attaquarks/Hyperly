@@ -8,11 +8,12 @@ interface WorkerScope {
 }
 
 interface WorkerRequest {
-  type: "load" | "process" | "reset" | "dispose";
+  type: "load" | "init" | "process" | "reset" | "dispose";
   id?: number;
   mic?: Float32Array;
   ref?: Float32Array;
   gap?: boolean;
+  port?: MessagePort;
 }
 
 type WorkerResponse =
@@ -66,6 +67,14 @@ let modulePromise: Promise<LocalVqeModule> | null = null;
 let moduleInstance: LocalVqeModule | null = null;
 let api: LocalVqeApi | null = null;
 let context = 0;
+/**
+ * The AudioWorklet's direct engine port. Live hops travel worklet → worker →
+ * worklet without touching the main thread; this stays null until "init"
+ * arrives, so pre-wiring warmup can use the legacy scope messages.
+ */
+let audioPort: MessagePort | null = null;
+
+type WorkerResponder = (message: WorkerResponse, transfer?: Transferable[]) => void;
 
 const bind = <T extends (...args: never[]) => unknown>(
   module: LocalVqeModule,
@@ -155,7 +164,13 @@ async function loadModel(): Promise<void> {
   });
 }
 
-function processFrame(id: number, mic: Float32Array, ref: Float32Array, gap: boolean): void {
+function processFrame(
+  id: number,
+  mic: Float32Array,
+  ref: Float32Array,
+  gap: boolean,
+  respond: WorkerResponder
+): void {
   const module = moduleInstance;
   const currentApi = api;
   if (!module || !currentApi || !context) throw new Error("LocalVQE model is not loaded");
@@ -185,7 +200,7 @@ function processFrame(id: number, mic: Float32Array, ref: Float32Array, gap: boo
     }
     const output = new Float32Array(hop);
     output.set(module.HEAPF32.subarray(pOut >> 2, (pOut >> 2) + hop));
-    scope.postMessage({ type: "processed", id, samples: output.buffer, rc: 0 }, [output.buffer]);
+    respond({ type: "processed", id, samples: output.buffer, rc: 0 }, [output.buffer]);
   } finally {
     module._free(pMic);
     module._free(pRef);
@@ -199,16 +214,55 @@ scope.onmessage = async (event) => {
     const message = event.data;
     if (message.type === "load") {
       await loadModel();
+    } else if (message.type === "init") {
+      // Wire the direct worklet↔engine port. Messages posted to the port
+      // before this handler assigns onmessage queue and then drain in order.
+      if (!(message.port instanceof MessagePort)) {
+        throw new Error("An engine MessagePort is required");
+      }
+      audioPort = message.port;
+      audioPort.onmessage = (portEvent) => {
+        const audioMessage = portEvent.data as WorkerRequest;
+        const audioId = audioMessage.id;
+        try {
+          if (audioMessage.type !== "process") return;
+          if (!audioMessage.mic || !audioMessage.ref) {
+            throw new Error("Mic and reference frames are required");
+          }
+          if (!Number.isSafeInteger(audioMessage.id)) {
+            throw new Error("A mic frame id is required");
+          }
+          processFrame(
+            audioMessage.id!,
+            audioMessage.mic,
+            audioMessage.ref,
+            Boolean(audioMessage.gap),
+            (response, transfer) => audioPort?.postMessage(response, transfer ?? [])
+          );
+        } catch (error) {
+          audioPort?.postMessage({
+            type: "error",
+            ...(audioId === undefined ? {} : { id: audioId }),
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      };
     } else if (message.type === "process") {
+      // Legacy scope path, used only by pre-wiring warmup. Live hops travel
+      // through the audio port so the main thread is never in their path.
       if (!message.mic || !message.ref) throw new Error("Mic and reference frames are required");
       if (!Number.isSafeInteger(message.id)) throw new Error("A mic frame id is required");
-      processFrame(message.id!, message.mic, message.ref, Boolean(message.gap));
+      processFrame(message.id!, message.mic, message.ref, Boolean(message.gap), (response, transfer) =>
+        scope.postMessage(response, transfer ?? [])
+      );
     } else if (message.type === "reset") {
       if (context && api) api.reset(context);
       scope.postMessage({ type: "reset" });
     } else if (message.type === "dispose") {
       if (context && api) api.free(context);
       context = 0;
+      audioPort?.close();
+      audioPort = null;
       scope.postMessage({ type: "disposed" });
       scope.close();
     }

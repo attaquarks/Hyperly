@@ -81,38 +81,39 @@ const disposedCatchIndex = micAec.indexOf("if (disposed) return;", activationCat
 const catchCleanupIndex = micAec.indexOf("detachTrackMonitor();", activationCatchIndex);
 assert.ok(activationCatchIndex > activeRouteIndex && disposedCatchIndex > activationCatchIndex && disposedCatchIndex < catchCleanupIndex,
   "activation catch must leave output and status untouched when disposal already completed");
-assert.match(micAec, /if \(feed\.status\.overflows !== lastReferenceOverflowCount\)/);
+assert.match(micAec, /if \(stats\.overflows !== lastReferenceOverflowCount\)/);
 assert.match(micAec, /recovery\.noteOverflows\(newOverflows\)/);
-assert.match(micAec, /const gap = feed\.consumeGap\(\)/);
-assert.match(micAec, /ref: reference, gap/);
 assert.match(micAec, /recovery\.noteWorkerFailure\(\)/);
 assert.match(micAec, /worker\?\.postMessage\(\{ type: "reset" \}\)/);
 assert.match(micAec, /LocalVQE failed after its recovery reset/);
-const referenceWaterBlock = reference.slice(
-  reference.indexOf("if (this.frames.size > FIFO_HIGH_WATER)"),
-  reference.indexOf("if (this.frames.size >= FIFO_CAPACITY)")
+assert.ok(!micAec.includes("takeRef"),
+  "the main thread must never touch per-hop reference consumption — the AudioWorklet owns the realtime path");
+const workletWaterBlock = worklet.slice(
+  worklet.indexOf("if (this.refFrames.size > FIFO_HIGH_WATER)"),
+  worklet.indexOf("if (this.refFrames.size >= FIFO_CAPACITY)")
 );
 assert.ok(
-  referenceWaterBlock.includes("this.pendingGap = true;") &&
-    !referenceWaterBlock.includes("this.status.overflows += 1;") &&
-    reference.indexOf("const FIFO_HIGH_WATER = 14") >= 0,
+  workletWaterBlock.includes("this.refPendingGap = true;") &&
+    !workletWaterBlock.includes("this.refOverflows += 1;") &&
+    worklet.indexOf("const FIFO_HIGH_WATER = 14") >= 0,
   "burst shaping above the high-water mark must shed surplus, mark the discontinuity, and NOT count against the overflow ladder"
 );
-const referenceGapBlock = reference.slice(
-  reference.indexOf("frame.seq !== this.lastReceivedSeq + 1"),
-  reference.indexOf("this.lastReceivedSeq = frame.seq;")
+const workletGapBlock = worklet.slice(
+  worklet.indexOf("frame.seq !== this.refLastSeq + 1"),
+  worklet.indexOf("this.refLastSeq = frame.seq;")
 );
 assert.ok(
-  referenceGapBlock.includes("this.status.sequenceGaps += 1;") &&
-    referenceGapBlock.includes("this.pendingGap = true;") &&
-    !referenceGapBlock.includes("this.frames.clear()"),
+  workletGapBlock.includes("this.refSequenceGaps += 1;") &&
+    workletGapBlock.includes("this.refPendingGap = true;") &&
+    !workletGapBlock.includes("this.refFrames.clear()"),
   "a sequence gap must mark the discontinuity for filter reset and KEEP the contiguous buffered audio — clearing the FIFO threw away ~200ms of valid audio and the next hop underran into a fatal bypass"
 );
-assert.match(reference, /consumeGap\(\): boolean/);
-assert.match(reference, /const FIFO_CAPACITY = 20/);
-const referenceOverflowBlock = reference.slice(reference.indexOf("if (this.frames.size >= FIFO_CAPACITY)"), reference.indexOf("this.frames.set(frame.seq"));
-assert.ok(referenceOverflowBlock.includes("this.status.overflows += 1;") && referenceOverflowBlock.includes("this.pendingGap = true;"),
+assert.match(worklet, /const FIFO_CAPACITY = 20/);
+const workletOverflowBlock = worklet.slice(worklet.indexOf("if (this.refFrames.size >= FIFO_CAPACITY)"), worklet.indexOf("this.refFrames.set(frame.seq"));
+assert.ok(workletOverflowBlock.includes("this.refOverflows += 1;") && workletOverflowBlock.includes("this.refPendingGap = true;"),
   "FIFO overflow must count, drop oldest, and signal a discontinuity for filter reset");
+assert.match(reference, /attachForwarder\(port: MessagePort\): void/);
+assert.match(reference, /const FORWARD_BUFFER_FRAMES = 20/);
 assert.match(worker, /if \(gap\) currentApi\.reset\(context\)/);
 assert.match(micAec, /micTrack\.addEventListener\("ended"/);
 assert.match(micAec, /settings\.deviceId !== initialDeviceId/);
@@ -122,7 +123,7 @@ assert.match(micAec, /disposeSession\(true\)/);
 assert.match(micAec, /const disposeSession = \(preserveOutput = false\): void => \{[\s\S]*?disconnectGraph\(\);[\s\S]*?stopWorker\(\);[\s\S]*?source\.getTracks\(\)\.forEach\(\(track\) => track\.stop\(\)\)/);
 assert.match(worker, /if \(!modulePromise\)/);
 assert.match(worker, /pending\.catch\(\(\) => \{[\s\S]*?modulePromise === pending[\s\S]*?modulePromise = null/);
-assert.match(worklet, /event\.data\.type === "dropped"[\s\S]*this\.playback\.push\(0\)/);
+assert.match(worklet, /pushSilence\(samples\) \{[\s\S]*?this\.playback\.push\(0\)/);
 console.log("  ok    acquire disposes overwritten sessions; gaps reset; repeated overflow/failures bypass");
 console.log("  ok    ended/device/rate changes release source and graph; rejected module load can retry");
 
@@ -171,8 +172,10 @@ assert.match(micAec, /import \{ createLocalVqeWorker \} from "\.\/localvqe-worke
 assert.match(hook, /await session\.activate\(context, getActiveAecReferenceFeed\(\)/);
 assert.match(micAec, /if \(!enabled \|\| disposed \|\| activating\) return/);
 assert.match(micAec, /if \(!feed \|\| feed\.status\.state === "degraded"/);
-assert.match(micAec, /feed\.takeRef\(AEC_HOP_SAMPLES\)/);
-assert.match(micAec, /worker\?\.postMessage\([\s\S]*type: "process"/);
+assert.match(micAec, /worker\.postMessage\(\{ type: "init", port: workerChannel\.port1 \}, \[workerChannel\.port1\]\)/);
+assert.match(micAec, /feed\.attachForwarder\(refChannel\.port1\)/);
+assert.match(worklet, /this\.takeRef\(AEC_HOP_SAMPLES\)/);
+assert.match(worklet, /type: "process", id, mic: frame, ref: reference, gap/);
 assert.match(worklet, /const AEC_SAMPLE_RATE = 16000/);
 assert.match(worker, /localvqe_process_frame_f32/);
 assert.match(systemAudio, /if \(!readAecEnabled\(\)\) return/);
@@ -198,6 +201,8 @@ runInNewContext(shippedWorklet, {
   AudioWorkletProcessor: WorkletHarnessBase,
   Float32Array,
   sampleRate: 16_000,
+  currentTime: 0,
+  console: { warn: () => {} },
   registerProcessor: (name: string, processor: typeof registeredProcessor) => {
     registeredProcessorName = name;
     registeredProcessor = processor;

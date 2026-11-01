@@ -279,3 +279,46 @@ the AudioWorklet, which pairs hops with reference and talks to the engine worker
 directly; the main thread only sets channels up and forwards frames fire-and-forget.
 That removes main-thread stalls from the realtime path entirely and is the natural
 next step if the layered mitigations are exhausted.
+
+---
+
+## 12. Architecture change — the audio thread owns the realtime path (2026-11-02)
+
+Round 7's log completed the evidence: with σ at 100–600 ms and reference sequence
+gaps appearing under system load, even the engine's own worker thread went unserved
+for ~0.5 s (in-flight pegged at 16, zero processed results). No buffering survives a
+starved CPU; the remaining exposure was structural — every realtime hop crossed the
+main thread four times (worklet → main → feed FIFO → worker → main → worklet).
+
+**The refactor (this commit):**
+
+- **Worklet owns the realtime path.** The reference FIFO (capacity 20, target 10,
+  high-water 14), sequence-gap keep-audio semantics, overflow episode counting,
+  takeRef, hop pairing, engine transport, in-flight cap, concealment, silence
+  insertion, output shed, and RTT tracking all live in `mic-aec-worklet.js` on the
+  audio rendering thread. Hops never touch the main thread.
+- **Direct engine port.** A MessageChannel is created per session: one side is
+  transferred into the worker (`init`), the other into the worklet. The worker
+  routes `process`/`processed`/`error` over that port; the legacy scope path
+  remains only for pre-wiring warmup.
+- **Main thread = forwarder + policy.** `AecReferenceFeed` becomes a thin forwarder:
+  it owns the Tauri Channel, buffers the newest 20 frames pre-attach (priming the
+  worklet's zero-drift FIFO), forwards each frame fire-and-forget with transferred
+  sample buffers, and detaches on session end (bounding post-bypass memory). The
+  recovery ladder, conceal budgets (engine 16/5s, reference 64/5s), device monitor
+  (stats cadence now that hops don't pass through), and bypass decisions read the
+  worklet's 1 Hz stats and event reports.
+- **Every special case has one owner:** warmup (main, pre-wiring), priming + trim
+  (feed → worklet `ref-ready` → `trim`), gap/water/overflow (worklet FIFO),
+  underrun/in-flight concealment (worklet), budget bypass (main), device/track
+  changes (ended listener + stats cadence), faults (worklet → main bypass).
+- Guards migrated with the code: the FIFO/gap/water/shed pins now target the
+  worklet source, a new pin forbids `takeRef` on the main thread, and the harness
+  instantiates the new processor shape. All 21 guards pass; `tsc` and the production
+  build are clean.
+
+**Runtime validation is still required** — the refactor is statically verified only.
+What to expect in the log: the same `[aec]` lines (fed by worklet stats now), with
+`refDelayMs` reading 0 at activation until the first stats batch. The failure modes
+this removes: every per-hop main-thread stall (hops 1–8's entire failure history
+lived in that path). What it cannot remove: sustained system-wide CPU starvation.

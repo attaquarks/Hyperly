@@ -3,79 +3,39 @@ import {
   type AecReferenceFrame,
 } from "./reference-channel.ts";
 
-const REFERENCE_SAMPLE_RATE = 16_000;
-const FIFO_CAPACITY = 20;
-/** Episode trim target: 10 frames = 200 ms, the top of the declared 100–200 ms refDelayMs band. */
-const FIFO_TARGET_DEPTH = 10;
 /**
- * Burst headroom above the target. Delivery bursts (a stalled main thread
- * flushing queued IPC frames) briefly exceed the target; shedding the surplus
- * here keeps wake bursts from drawing the FIFO dry before the reference
- * frames catch up. Consumed backlog still returns to 200 ms.
+ * Pre-attach buffer bound, newest frames kept. System capture starts before
+ * the mic AEC activates; buffering here (instead of dropping) means the
+ * worklet's reference FIFO starts primed. That matters because the FIFO is
+ * rate-matched — production equals consumption on average — so a FIFO that
+ * starts empty would hover empty forever.
  */
-const FIFO_HIGH_WATER = 14;
-const TRANSIT_HISTORY_CAPACITY = 128;
-
-interface QueuedFrame {
-  seq: number;
-  samples: Float32Array;
-  offset: number;
-}
+const FORWARD_BUFFER_FRAMES = 20;
 
 export interface AecReferenceStatus {
   state: "waiting" | "ready" | "degraded" | "closed";
-  reason?: "channel-unavailable" | "invalid-frame" | "sequence-gap" | "duplicate-frame" | "internal-error";
-  sampleRate: 16_000;
-  depth: number;
-  sequenceGaps: number;
-  overflows: number;
-  underruns: number;
-  /** Histogram of arrival/capture deltas relative to the first received frame. */
-  relativeTransitHistogramMs: Record<string, number>;
-  relativeTransitSamples: number;
-  relativeTransitJitterMs: number | null;
-  /** Rust tsNs and performance.now() have no shared origin in this protocol. */
-  absoluteTransitMs: null;
+  reason?: "channel-unavailable" | "internal-error";
+  bufferedFrames: number;
 }
 
 /**
- * Receives the Step 1 reference Channel and buffers 16 kHz frames for a later
- * AEC consumer. Timestamp diagnostics are relative only: Rust tsNs is rooted
- * at tap start while performance.now() is rooted at the WebView time origin.
+ * Owns the raw-loopback Tauri Channel on the main thread and forwards frames
+ * to the AudioWorklet, which owns the realtime reference FIFO. Frames are
+ * forwarded fire-and-forget with transferred sample buffers — the main thread
+ * is never in the per-hop path, only in the per-frame delivery path, where a
+ * stall merely delays the next frame instead of stalling the pipeline.
  */
 export class AecReferenceFeed {
   status: AecReferenceStatus = {
     state: "waiting",
-    sampleRate: REFERENCE_SAMPLE_RATE,
-    depth: 0,
-    sequenceGaps: 0,
-    overflows: 0,
-    underruns: 0,
-    relativeTransitHistogramMs: {},
-    relativeTransitSamples: 0,
-    relativeTransitJitterMs: null,
-    absoluteTransitMs: null,
+    bufferedFrames: 0,
   };
 
-  private readonly frames = new Map<number, QueuedFrame>();
-  private readonly transitHistory: number[] = [];
+  private buffered: AecReferenceFrame[] = [];
+  private forwarder: MessagePort | null = null;
   private stopChannel: (() => Promise<void>) | null = null;
-  private lastReceivedSeq: number | null = null;
-  private firstCaptureTsNs: number | null = null;
-  private firstArrivalMs: number | null = null;
   private connected = false;
   private closed = false;
-  private lastReadoutMs = 0;
-  private pendingGap = false;
-
-  /** Buffered reference samples available to the single active mic consumer. */
-  get bufferedSamples(): number {
-    let buffered = 0;
-    for (const frame of this.frames.values()) {
-      buffered += frame.samples.length - frame.offset;
-    }
-    return buffered;
-  }
 
   /** Opens the Channel. Failure is recorded in status and never rethrown. */
   async connect(): Promise<void> {
@@ -99,87 +59,32 @@ export class AecReferenceFeed {
   }
 
   /**
-   * Returns exactly hopSamples in FIFO order, or null until enough reference
-   * audio has arrived. This method is safe to call from an audio callback.
+   * Attaches the worklet side of the reference MessagePort and flushes any
+   * pre-attach backlog first, in sequence order.
    */
-  takeRef(hopSamples: number): Float32Array | null {
-    try {
-      if (this.closed || !Number.isSafeInteger(hopSamples) || hopSamples <= 0) {
-        return null;
-      }
-
-      let available = 0;
-      for (const frame of this.frames.values()) {
-        available += frame.samples.length - frame.offset;
-        if (available >= hopSamples) break;
-      }
-      if (available < hopSamples) {
-        this.status.underruns += 1;
-        this.refreshDepth();
-        return null;
-      }
-
-      const output = new Float32Array(hopSamples);
-      let written = 0;
-      while (written < hopSamples) {
-        const first = this.frames.entries().next().value as
-          | [number, QueuedFrame]
-          | undefined;
-        if (!first) break;
-
-        const [seq, frame] = first;
-        const count = Math.min(
-          hopSamples - written,
-          frame.samples.length - frame.offset
-        );
-        output.set(frame.samples.subarray(frame.offset, frame.offset + count), written);
-        frame.offset += count;
-        written += count;
-        if (frame.offset >= frame.samples.length) this.frames.delete(seq);
-      }
-
-      this.refreshDepth();
-      return written === hopSamples ? output : null;
-    } catch {
-      this.degrade("internal-error");
-      return null;
+  attachForwarder(port: MessagePort): void {
+    this.forwarder = port;
+    for (const frame of this.buffered.splice(0)) {
+      this.forward(frame);
     }
-  }
-
-  /** Consume one discontinuity marker after a complete reference hop is read. */
-  consumeGap(): boolean {
-    if (!this.pendingGap) return false;
-    this.pendingGap = false;
-    return true;
+    this.status.bufferedFrames = 0;
   }
 
   /**
-   * Drops the oldest buffered frames down to the episode target. Used at
-   * activation: audio accumulated before the consumer existed is stale beyond
-   * the declared refDelayMs band, and the rate-matched FIFO never sheds it on
-   * its own. Not an overflow — no count, no gap: the consumer never saw the
-   * dropped span, so the stream the AEC reads stays internally contiguous.
+   * Stops forwarding (session bypassed or torn down) and returns to the
+   * bounded pre-attach buffer, so frames queue to a dead worklet port can
+   * never accumulate without bound.
    */
-  trimExcess(): void {
-    this.trimToTarget();
-  }
-
-  /** Shared shed loop: drop the oldest frames until the episode target. */
-  private trimToTarget(): void {
-    while (this.frames.size > FIFO_TARGET_DEPTH) {
-      const oldestSeq = this.frames.keys().next().value as number | undefined;
-      if (oldestSeq === undefined) break;
-      this.frames.delete(oldestSeq);
-    }
-    this.refreshDepth();
+  detachForwarder(): void {
+    this.forwarder = null;
   }
 
   /** Closes the Channel and discards buffered audio without throwing. */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.frames.clear();
-    this.refreshDepth();
+    this.buffered = [];
+    this.status.bufferedFrames = 0;
 
     const stop = this.stopChannel;
     this.stopChannel = null;
@@ -194,124 +99,40 @@ export class AecReferenceFeed {
   }
 
   private receive(frame: AecReferenceFrame): void {
-    try {
-      if (this.closed) return;
-      if (
-        !Number.isSafeInteger(frame.seq) ||
-        !Number.isFinite(frame.tsNs) ||
-        frame.tsNs < 0 ||
-        frame.sampleRate !== REFERENCE_SAMPLE_RATE ||
-        !Array.isArray(frame.samples) ||
-        frame.samples.length === 0
-      ) {
-        this.degrade("invalid-frame");
-        return;
-      }
-
-      if (
-        (this.lastReceivedSeq !== null && frame.seq <= this.lastReceivedSeq) ||
-        this.frames.has(frame.seq)
-      ) {
-        this.status.sequenceGaps += 1;
-        this.degrade("duplicate-frame");
-        return;
-      }
-      if (this.lastReceivedSeq !== null && frame.seq !== this.lastReceivedSeq + 1) {
-        this.status.sequenceGaps += 1;
-        // A sequence gap is a reference discontinuity, not a reason to discard
-        // the contiguous backlog in front of it: clearing the FIFO threw away
-        // ~200ms of valid audio and the next hop underran into a fatal bypass.
-        // Keep the backlog; the gap flag resets the filter on the next
-        // consumed hop (mic-aec feeds consumeGap() to the worker).
-        this.pendingGap = true;
-      }
-      this.lastReceivedSeq = frame.seq;
-      this.recordRelativeTransit(frame);
-
-      const samples = Float32Array.from(frame.samples);
-      // Flow shaping: shed burst surplus above the high-water mark. This is
-      // not an overflow — no frame was lost to pressure — so it does not
-      // count against the recovery ladder; it marks the discontinuity so the
-      // filter resets on the next consumed hop.
-      if (this.frames.size > FIFO_HIGH_WATER) {
-        this.trimToTarget();
-        this.pendingGap = true;
-      }
-      if (this.frames.size >= FIFO_CAPACITY) {
-        // One full-FIFO episode = one overflow + one gap. Delivery and consumption
-        // share the WebView main thread, so a stall flushes a burst onto the standing
-        // backlog; dropping one frame per arriving frame counted ~11 strikes for a
-        // single 336 ms burst and bypassed. Trim to the declared 200 ms band instead:
-        // the backlog is rate-matched (zero drift), so this also lazily bounds any
-        // oversized pre-activation accumulation. Gap -> reset per blueprint §13.5.
-        while (this.frames.size >= FIFO_TARGET_DEPTH) {
-          const oldestSeq = this.frames.keys().next().value as number | undefined;
-          if (oldestSeq === undefined) break;
-          this.frames.delete(oldestSeq);
-        }
-        this.status.overflows += 1;
-        this.pendingGap = true;
-      }
-
-      this.frames.set(frame.seq, { seq: frame.seq, samples, offset: 0 });
-      this.refreshDepth();
-      if (this.status.state === "waiting") this.status.state = "ready";
-      this.maybeLogReadout();
-    } catch {
-      this.degrade("internal-error");
-    }
-  }
-
-  private recordRelativeTransit(frame: AecReferenceFrame): void {
-    const arrivalMs = performance.now();
-    if (this.firstCaptureTsNs === null || this.firstArrivalMs === null) {
-      this.firstCaptureTsNs = frame.tsNs;
-      this.firstArrivalMs = arrivalMs;
+    if (this.closed) return;
+    if (this.forwarder) {
+      this.forward(frame);
       return;
     }
 
-    const captureElapsedMs = (frame.tsNs - this.firstCaptureTsNs) / 1_000_000;
-    const arrivalElapsedMs = arrivalMs - this.firstArrivalMs;
-    const relativeTransitMs = arrivalElapsedMs - captureElapsedMs;
-    if (!Number.isFinite(relativeTransitMs)) return;
-
-    this.transitHistory.push(relativeTransitMs);
-    if (this.transitHistory.length > TRANSIT_HISTORY_CAPACITY) {
-      this.transitHistory.shift();
+    // No consumer wired yet: keep only the newest frames so the worklet
+    // starts primed with recent audio, not stale audio.
+    this.buffered.push(frame);
+    if (this.buffered.length > FORWARD_BUFFER_FRAMES) {
+      this.buffered.shift();
     }
-
-    const histogram: Record<string, number> = {};
-    for (const sample of this.transitHistory) {
-      const bucket = String(Math.floor(sample));
-      histogram[bucket] = (histogram[bucket] ?? 0) + 1;
-    }
-    const mean = this.transitHistory.reduce((sum, value) => sum + value, 0) /
-      this.transitHistory.length;
-    const variance = this.transitHistory.reduce(
-      (sum, value) => sum + (value - mean) ** 2,
-      0
-    ) / this.transitHistory.length;
-
-    this.status.relativeTransitHistogramMs = histogram;
-    this.status.relativeTransitSamples = this.transitHistory.length;
-    this.status.relativeTransitJitterMs = Math.sqrt(variance);
+    this.status.bufferedFrames = this.buffered.length;
+    if (this.status.state === "waiting") this.status.state = "ready";
   }
 
-  private maybeLogReadout(): void {
-    if (!import.meta.env.DEV) return;
-    const now = performance.now();
-    if (now - this.lastReadoutMs < 1_000) return;
-    this.lastReadoutMs = now;
-
-    const jitter = this.status.relativeTransitJitterMs;
-    const jitterText = jitter === null ? "warming" : `σ=${jitter.toFixed(1)}ms`;
-    console.info(
-      `[aec] ref 16k, transit relative ${jitterText}, depth ${this.frames.size}, gaps ${this.status.sequenceGaps}, overflows ${this.status.overflows}, underruns ${this.status.underruns}`
-    );
-  }
-
-  private refreshDepth(): void {
-    this.status.depth = this.frames.size;
+  private forward(frame: AecReferenceFrame): void {
+    const samples = Float32Array.from(frame.samples);
+    try {
+      this.forwarder?.postMessage(
+        {
+          type: "ref",
+          frame: {
+            seq: frame.seq,
+            tsNs: frame.tsNs,
+            sampleRate: frame.sampleRate,
+            samples,
+          },
+        },
+        [samples.buffer]
+      );
+    } catch {
+      this.degrade("internal-error");
+    }
   }
 
   private degrade(
