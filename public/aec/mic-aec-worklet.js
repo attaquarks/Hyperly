@@ -25,10 +25,7 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
 
       if (event.data.type === "dropped") {
         for (let i = 0; i < AEC_HOP_SAMPLES; i += 1) this.playback.push(0);
-        if (this.playback.length > AEC_SAMPLE_RATE * 0.25) {
-          this.bypass = true;
-          this.port.postMessage({ type: "fault", reason: "output-queue-overrun" });
-        }
+        this.shedOutputBacklog();
         return;
       }
 
@@ -40,11 +37,24 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
 
       const samples = new Float32Array(event.data.samples);
       for (const sample of samples) this.playback.push(sample);
-      if (this.playback.length > AEC_SAMPLE_RATE * 0.25) {
-        this.bypass = true;
-        this.port.postMessage({ type: "fault", reason: "output-queue-overrun" });
-      }
+      this.shedOutputBacklog();
     };
+  }
+
+  /**
+   * A catch-up burst after a main-thread stall can push the output queue past
+   * its latency bound. The backlog exists because the pipeline momentarily
+   * fell behind, so shed the oldest output to resync latency instead of
+   * bypassing the session; sustained inability to keep up still bypasses
+   * upstream via the session's concealment budget.
+   */
+  shedOutputBacklog() {
+    const limit = Math.floor(AEC_SAMPLE_RATE * 0.25);
+    if (this.playback.length <= limit) return;
+    const excess = this.playback.length - limit;
+    this.playback.splice(0, excess);
+    this.playbackPosition = Math.max(0, this.playbackPosition - excess);
+    console.warn(`[aec] shed ${excess} stale output samples to resync latency`);
   }
 
   process(inputs, outputs) {
