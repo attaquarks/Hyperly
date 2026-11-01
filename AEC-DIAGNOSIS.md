@@ -195,3 +195,32 @@ sustained — React renders, Tauri IPC, b64 WAV encoding for partial transcripts
 
 Ladder and reference episode-trim untouched; guards unchanged (nothing pinned the 2-cap
 or the underrun fault).
+
+---
+
+## 9. Runtime rounds 4 (cap raise) and 5 (gap-wipe) — 2026-11-02
+
+**Round 4 log (cap 16):** sessions ran clean (`concealed 0/5s`, depth stable 10–12,
+rtt healthy) then died via `Reference FIFO underrun`. One session died at hop ~1 with
+an 11-frame backlog — only an instant FIFO wipe explains that. The wipe existed:
+`receive()` called `frames.clear()` on a **sequence gap**, discarding ~200 ms of
+contiguous buffered audio because one frame went missing; the next hop found an empty
+FIFO and bypassed. `sequenceGaps` was never logged, so the wipe was invisible.
+
+**Round-5 fix (`19b3c22`):**
+
+- `receive()`: a sequence gap no longer clears the FIFO. The pre-gap backlog is
+  contiguous and valid; the gap flag resets the filter when the next hop consumes.
+- `takeRef` underrun conceals the hop (silence + next-hop filter reset) instead of
+  bypassing; a genuinely dead feed is still caught by the ready-state check. Both
+  concealment paths share a single `concealHop()` and the 16-in-5s honest bypass.
+- Ref telemetry now prints `gaps/overflows/underruns` counts.
+- Guard updated: the old pin required `pendingGap = true; frames.clear();` — it now
+  pins that a gap marks the discontinuity **and keeps** the buffered audio. The
+  guard's intent (discontinuity → filter reset) is unchanged; its mechanism contract
+  now encodes this defect.
+
+**Round-5 validation targets:** `[mic] aec:` stays `active` for minutes; `concealed`
+near 0; the ref line's `gaps`/`underruns` counters reveal whether frame loss still
+occurs (harmless now, but if `gaps` climbs steadily the upstream drop source — Rust
+tap or IPC — deserves its own investigation).
