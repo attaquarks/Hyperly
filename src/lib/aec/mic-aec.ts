@@ -14,9 +14,12 @@ const WORKER_LOAD_TIMEOUT_MS = 20_000;
 const REFERENCE_START_TIMEOUT_MS = 500;
 const WARMUP_HOPS = 3;
 const WARMUP_TIMEOUT_MS = 10_000;
-/** In-flight process hops before a new hop is concealed. The engine bench at
- * ~3.3 ms/hop gives 10x headroom at 4; the cap only guards unbounded posting. */
-const WORKER_INFLIGHT_LIMIT = 4;
+/** In-flight process hops before a new hop is concealed. Live telemetry: the
+ * engine drains a full queue to 0 between stalls (avg rtt 8-24ms incl. main-
+ * thread pickup, spikes to ~150ms = ~10 hops arriving at once), so the queue
+ * must absorb a stall and let the engine catch up. 16 hops = 256ms matches the
+ * worklet's 250ms output-queue bound; deeper would only overrun it. */
+const WORKER_INFLIGHT_LIMIT = 16;
 /** Concealed hops within WORKER_DROP_BYPASS_WINDOW_MS that mean the pipeline
  * genuinely cannot keep up; anything below is scheduling jitter to absorb. */
 const WORKER_DROP_BYPASS_COUNT = 16;
