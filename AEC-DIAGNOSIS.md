@@ -248,3 +248,34 @@ episode trim cycles at capacity once per fill; the counts are harmless.
 after the recovery reset, mic-hop sequence gaps, a dead reference feed (ready-state
 check), the sustained concealment budget (16 in 5 s), mic source changes, and
 activation failures. No transient scheduling event should be able to kill a session.
+
+---
+
+## 11. Runtime round 6 → 7 (2026-11-02) — reference-delivery lag vs wake bursts
+
+Round-6 log: both sessions clean until a wake burst. Session 1 died on **15
+consecutive reference underruns** (hops 605–619): a ≥240 ms stall queued ~15 hops;
+on wake they arrived in a rush while the reference IPC frames lagged (different
+transport, slower drain), drawing the FIFO dry for the whole burst. The 16-in-5s
+budget — sized for a slow *engine* — treated reference-delivery lag (which refills
+in ~20 ms) as fatal. Session 2 died on the ready-state check with the degrade reason
+unlogged.
+
+**Round-7 fix (`355cfcf`):**
+
+- `FIFO_HIGH_WATER` (14 frames): delivery bursts shed surplus back to the 200 ms
+  target, marking the discontinuity but **not** counting against the overflow ladder
+  (no frame lost to pressure — this is shaping, not overflow). Consumed backlog stays
+  at 200 ms; wake-burst draws land in headroom instead of hitting zero.
+- Two conceal budgets: engine in-flight keeps 16/5s ("AEC cannot sustain realtime");
+  reference underruns get 64/5s ("Reference delivery cannot sustain realtime"). A
+  dead feed still bypasses immediately via the ready-state check, which now reports
+  the feed's degraded state and reason.
+- Guard pins the water-shaping contract; telemetry gains `ref-concealed`.
+
+**Architectural fallback if round 7 still fails:** move the entire realtime path
+off the main thread — reference frames forwarded via a transferred MessagePort into
+the AudioWorklet, which pairs hops with reference and talks to the engine worker
+directly; the main thread only sets channels up and forwards frames fire-and-forget.
+That removes main-thread stalls from the realtime path entirely and is the natural
+next step if the layered mitigations are exhausted.
