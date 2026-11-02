@@ -33,7 +33,9 @@
     "preview": "vite preview",
     "guards": "node scripts/run-guards.mjs",
     "tauri": "node scripts/tauri-with-path.cjs",
-    "tauri:raw": "tauri"
+    "tauri:raw": "tauri",
+    "test:e2e": "npm run test --prefix e2e",
+    "test:e2e:smoke": "npm run test:smoke --prefix e2e"
   },
   "dependencies": {
     "@bany/curl-to-json": "^1.2.8",

@@ -1,0 +1,101 @@
+name: Desktop E2E
+
+# The real Windows desktop application test: build the Tauri binary, launch
+# it through WebDriver, and assert the actual interface renders, responds,
+# and navigates — with screenshots and diagnostics as artifacts on every run.
+#
+# This is the workflow that catches what static checks cannot: startup hangs,
+# boot-failure paints, blank shells, broken navigation, and post-init freezes.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "e2e/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/desktop-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "e2e/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/desktop-e2e.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-desktop-e2e:
+    name: Windows app build + launch + UI smoke
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # 22, matching ci.yml: the regression guards import node:sqlite
+          # (Node 22.5+) and rely on type-stripping (22.6+).
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build frontend bundle
+        run: npm run build
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      # Tauri embeds frontendDist (../dist) at compile time, so the frontend
+      # must be built before the binary. `custom-protocol` is what makes the
+      # binary serve the embedded bundle instead of the dev server URL (a
+      # debug build without it navigates to localhost:1420 and refuses to
+      # connect). Debug profile: fast, same code paths as release.
+      - name: Build Windows application (debug, embedded frontend)
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked --features tauri/custom-protocol
+
+      - name: Install E2E dependencies
+        working-directory: e2e
+        run: npm ci --ignore-scripts
+
+      - name: Launch the real app and run the E2E suite
+        working-directory: e2e
+        env:
+          HYPERLY_BIN: ${{ github.workspace }}\src-tauri\target\debug\hyperly.exe
+          E2E_ARTIFACTS_DIR: ${{ github.workspace }}\e2e\artifacts
+        run: npx wdio run ./wdio.conf.ts
+
+      # Always upload: a green run's screenshots are the visual baseline
+      # evidence; a red run's artifacts are the diagnosis.
+      - name: Upload screenshots, logs, and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-e2e-artifacts
+          path: |
+            e2e/artifacts/**
+            e2e/logs/**
+          if-no-files-found: warn
+          retention-days: 14
