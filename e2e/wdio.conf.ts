@@ -46,14 +46,14 @@ export const config: Options.Testrunner = {
     [
       "@wdio/tauri-service",
       {
-        // External provider: the service spawns tauri-driver (auto-installing
-        // it via cargo) which wraps the WebView2 Edge driver on Windows. The
-        // embedded provider would require tauri-plugin-wdio-webdriver inside
-        // the app — deliberately deferred to the Stage 4 IPC work so the E2E
-        // stage exercises the app exactly as it ships.
-        driverProvider: "external",
-        autoInstallTauriDriver: true,
-        autoDownloadEdgeDriver: true,
+        // Embedded provider (the service's default): the WebDriver server
+        // runs inside the app via tauri-plugin-wdio-webdriver, compiled in
+        // through the `wdio` cargo feature. This bypasses msedgedriver and
+        // the DevToolsActivePort attach handshake entirely — which failed on
+        // GitHub's Windows runners with the external tauri-driver flow while
+        // working locally. E2E builds enable the feature; production never
+        // does.
+        driverProvider: "embedded",
         captureBackendLogs: true,
         captureFrontendLogs: true,
         startTimeout: 90_000,

@@ -69,12 +69,13 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
       # Tauri embeds frontendDist (../dist) at compile time, so the frontend
-      # must be built before the binary. `custom-protocol` is what makes the
-      # binary serve the embedded bundle instead of the dev server URL (a
-      # debug build without it navigates to localhost:1420 and refuses to
-      # connect). Debug profile: fast, same code paths as release.
-      - name: Build Windows application (debug, embedded frontend)
-        run: cargo build --manifest-path src-tauri/Cargo.toml --locked --features tauri/custom-protocol
+      # must be built before the binary. `custom-protocol` makes the binary
+      # serve the embedded bundle instead of the dev-server URL. The `wdio`
+      # feature embeds the WebDriver server in the app (test-only; production
+      # builds never enable it) — the external msedgedriver attach flow
+      # failed on CI runners with "DevToolsActivePort file doesn't exist".
+      - name: Build Windows application (debug, embedded frontend + WDIO)
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked --features wdio,tauri/custom-protocol
 
       - name: Install E2E dependencies
         working-directory: e2e
