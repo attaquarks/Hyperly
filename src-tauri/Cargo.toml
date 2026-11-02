@@ -26,6 +26,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api"] }
+# Test-only WDIO plugins, compiled in exclusively via the `wdio` feature
+# (desktop E2E builds). Production builds never enable it.
+tauri-plugin-wdio = { version = "1", optional = true }
+tauri-plugin-wdio-webdriver = { version = "1", optional = true }
 tauri-plugin-opener = "2"
 tauri-plugin-http = "2.5.2"
 tauri-plugin-global-shortcut = "2"
@@ -62,3 +66,8 @@ webview2-com = "0.38.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 libpulse-binding = "2.30.1"
 libpulse-simple-binding = "2.29.0"
+
+[features]
+# Desktop E2E testing only: embeds the WebDriver server and WDIO IPC bridge.
+# Never enabled for production builds (see .github/workflows/desktop-e2e.yml).
+wdio = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]

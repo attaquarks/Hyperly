@@ -112,8 +112,16 @@ pub fn run() {
                     }
                 })
                 .build(),
-        )
-        // PostHog, keychain, and machine_uid plugins removed for the personal build.
+        );
+        // Test-only WDIO bridge, compiled in exclusively via the `wdio` cargo
+        // feature (desktop E2E builds). See Cargo.toml [features].
+        #[cfg(feature = "wdio")]
+        let builder = builder
+            .plugin(tauri_plugin_wdio_webdriver::init())
+            .plugin(tauri_plugin_wdio::init());
+        // `mut` is exercised on macOS below (NSPanel + permissions plugins).
+        #[allow(unused_mut)]
+        let mut builder = builder
         .invoke_handler(tauri::generate_handler![
             get_app_version,
             window::set_window_size,
