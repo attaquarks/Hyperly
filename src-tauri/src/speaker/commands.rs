@@ -129,9 +129,10 @@ pub async fn start_system_audio_capture(
     let _ = app_clone.emit("capture-started", sr);
 
     let state_clone = app.state::<crate::AudioState>();
+    let stop_flag = Arc::clone(&state_clone.stop_requested);
     let task = tokio::spawn(async move {
         if vad_config.enabled {
-            run_vad_capture(app_clone.clone(), stream, sr, vad_config).await;
+            run_vad_capture(app_clone.clone(), stream, sr, vad_config, stop_flag).await;
         } else {
             run_continuous_capture(app_clone.clone(), stream, sr, vad_config).await;
         }
@@ -248,6 +249,41 @@ pub(crate) fn next_silence_count(current: usize, is_speech: bool) -> usize {
 }
 
 #[cfg(test)]
+mod utterance_prepare_tests {
+    use super::*;
+
+    const SR: u32 = 48_000;
+
+    #[test]
+    fn too_short_is_discarded() {
+        // min_speech_chunks = 10 chunks ≈ 213 ms of speech at 48 kHz/1024.
+        let buffer = vec![0.5f32; 5 * 1024];
+        assert_eq!(prepare_utterance(&buffer, 0, 5, 10, SR), None);
+    }
+
+    #[test]
+    fn trailing_silence_is_trimmed_but_a_150ms_tail_is_kept() {
+        // 40 chunks of speech + 20 chunks of trailing silence; the trim keeps
+        // exactly 0.15 s (7200 samples at 48 kHz) of that silence.
+        let mut buffer = vec![0.5f32; 40 * 1024];
+        buffer.extend(std::iter::repeat(0.0f32).take(20 * 1024));
+        let out = prepare_utterance(&buffer, 20 * 1024, 40, 10, SR).expect("prepared");
+        assert_eq!(out.len(), 40 * 1024 + 7200);
+    }
+
+    #[test]
+    fn flush_on_stop_keeps_the_whole_open_utterance() {
+        // The flush path passes the CURRENT silence accumulation as the trim;
+        // mid-utterance that is smaller than the kept tail, so nothing but
+        // actual trailing silence is cut — the words the user heard are all
+        // there when the flushed utterance reaches the transcript.
+        let speech = vec![0.5f32; 30 * 1024];
+        let out = prepare_utterance(&speech, 3 * 1024, 30, 10, SR).expect("flush prepared");
+        assert_eq!(out.len(), 30 * 1024);
+    }
+}
+
+#[cfg(test)]
 mod turn_boundary_tests {
     use super::*;
 
@@ -347,11 +383,77 @@ mod turn_boundary_tests {
     }
 }
 
+/// Pure utterance preparation shared by the three emit sites (the natural
+/// silence path, the 30 s cap, and flush-on-stop): enforce the minimum speech
+/// duration, trim trailing silence down to a kept ~0.15 s tail, and
+/// normalize. Returns the utterance samples, or None when the buffer is too
+/// short to be speech. Unit-tested because the flush-on-stop path depends on
+/// exactly these rules.
+fn prepare_utterance(
+    buffer: &[f32],
+    trim_samples: usize,
+    speech_chunks: usize,
+    min_speech_chunks: usize,
+    sample_rate: u32,
+) -> Option<Vec<f32>> {
+    if speech_chunks < min_speech_chunks || buffer.is_empty() {
+        return None;
+    }
+
+    let keep_silence_samples = (sample_rate as usize) * 15 / 100; // 0.15s
+    let trim_amount = trim_samples.saturating_sub(keep_silence_samples);
+    let trimmed_len = buffer.len().saturating_sub(trim_amount);
+    Some(normalize_audio_level(&buffer[..trimmed_len.max(1)], 0.1))
+}
+
+/// Emit one utterance: prepare it (see `prepare_utterance`), encode, and send
+/// as `speech-detected`. Returns true when an utterance was emitted; a buffer
+/// that is too short sends `speech-discarded` instead so the UI knows why
+/// nothing appeared.
+fn emit_utterance(
+    app: &AppHandle,
+    sr: u32,
+    trim_samples: usize,
+    speech_chunks: usize,
+    min_speech_chunks: usize,
+    buffer: &[f32],
+) -> bool {
+    if buffer.is_empty() {
+        return false;
+    }
+    match prepare_utterance(
+        buffer,
+        trim_samples,
+        speech_chunks,
+        min_speech_chunks,
+        sr,
+    ) {
+        Some(normalized) => {
+            if let Ok(b64) = samples_to_wav_b64(sr, &normalized) {
+                let _ = app.emit("speech-detected", b64);
+                true
+            } else {
+                error!("Failed to encode speech to WAV");
+                let _ = app.emit("audio-encoding-error", "Failed to encode speech");
+                false
+            }
+        }
+        None => {
+            let _ = app.emit(
+                "speech-discarded",
+                "Audio too short (likely background noise)",
+            );
+            false
+        }
+    }
+}
+
 async fn run_vad_capture(
     app: AppHandle,
     stream: impl StreamExt<Item = f32> + Unpin,
     sr: u32,
     config: VadConfig,
+    stop: Arc<AtomicBool>,
 ) {
     let mut stream = stream;
     let mut buffer: VecDeque<f32> = VecDeque::new();
@@ -376,11 +478,22 @@ async fn run_vad_capture(
     let mut energy_init = false;
     let max_samples = sr as usize * 30; // 30s safety cap per utterance
 
-    while let Some(sample) = stream.next().await {
+    // A fresh session always starts with the cooperative stop cleared: the
+    // previous stop set it and nothing else resets it between captures.
+    stop.store(false, Ordering::Release);
+
+    // Stop checking happens per chunk (~21 ms at 48 kHz), so a stop pressed
+    // mid-utterance flushes within one hop instead of waiting out the 2 s
+    // hangover — or, worse, being aborted and dropping the tail entirely.
+    'vad_loop: while let Some(sample) = stream.next().await {
         buffer.push_back(sample);
 
         // Process in fixed chunks for VAD analysis
         while buffer.len() >= config.hop_size {
+            if stop.load(Ordering::Acquire) {
+                break 'vad_loop;
+            }
+
             let mut mono = Vec::with_capacity(config.hop_size);
             for _ in 0..config.hop_size {
                 if let Some(v) = buffer.pop_front() {
@@ -487,11 +600,14 @@ async fn run_vad_capture(
 
                 // Safety cap: force emit if exceeds 30s
                 if speech_buffer.len() > max_samples {
-                    let normalized_buffer = normalize_audio_level(&speech_buffer, 0.1);
-                    if let Ok(b64) = samples_to_wav_b64(sr, &normalized_buffer) {
-                        // let duration = speech_buffer.len() as f32 / sr as f32;
-                        let _ = app.emit("speech-detected", b64);
-                    }
+                    emit_utterance(
+                        &app,
+                        sr,
+                        0,
+                        speech_chunks,
+                        config.min_speech_chunks,
+                        &speech_buffer,
+                    );
                     speech_buffer.clear();
                     in_speech = false;
                     speech_chunks = 0;
@@ -507,33 +623,16 @@ async fn run_vad_capture(
 
                     // Check if silence duration exceeds threshold
                     if silence_chunks >= silence_needed {
-                        // Verify minimum speech duration
-                        if speech_chunks >= config.min_speech_chunks && !speech_buffer.is_empty() {
-                            // Trim trailing silence (keep ~0.15s for natural ending)
-                            let silence_duration_samples = silence_chunks * config.hop_size;
-                            let keep_silence_samples = (sr as usize) * 15 / 100; // 0.15s
-                            let trim_amount =
-                                silence_duration_samples.saturating_sub(keep_silence_samples);
-
-                            if speech_buffer.len() > trim_amount {
-                                speech_buffer.truncate(speech_buffer.len() - trim_amount);
-                            }
-
-                            // Emit complete speech segment
-                            let normalized_buffer = normalize_audio_level(&speech_buffer, 0.1);
-                            if let Ok(b64) = samples_to_wav_b64(sr, &normalized_buffer) {
-                                // let duration = speech_buffer.len() as f32 / sr as f32;
-                                let _ = app.emit("speech-detected", b64);
-                            } else {
-                                error!("Failed to encode speech to WAV");
-                                let _ = app.emit("audio-encoding-error", "Failed to encode speech");
-                            }
-                        } else {
-                            let _ = app.emit(
-                                "speech-discarded",
-                                "Audio too short (likely background noise)",
-                            );
-                        }
+                        // Trim trailing silence (keep ~0.15s for natural ending)
+                        let silence_duration_samples = silence_chunks * config.hop_size;
+                        emit_utterance(
+                            &app,
+                            sr,
+                            silence_duration_samples,
+                            speech_chunks,
+                            config.min_speech_chunks,
+                            &speech_buffer,
+                        );
 
                         // Reset for next speech detection
                         speech_buffer.clear();
@@ -558,6 +657,24 @@ async fn run_vad_capture(
                 }
             }
         }
+    }
+
+    // Flush-on-stop: the loop exited because a stop was requested while an
+    // utterance was still open. Emit what has been buffered — this is the
+    // tail that used to vanish when the task was aborted mid-speech, which
+    // is why the LLM received roughly half of what the transcript showed.
+    // The natural path's 2 s hangover does not apply here: the user ended
+    // the turn explicitly.
+    if in_speech && !speech_buffer.is_empty() {
+        let silence_duration_samples = silence_chunks * config.hop_size;
+        emit_utterance(
+            &app,
+            sr,
+            silence_duration_samples,
+            speech_chunks,
+            config.min_speech_chunks,
+            &speech_buffer,
+        );
     }
 }
 
@@ -782,22 +899,40 @@ fn samples_to_wav_b64(sample_rate: u32, mono_f32: &[f32]) -> Result<String, Stri
 pub async fn stop_system_audio_capture(app: AppHandle) -> Result<(), String> {
     let state = app.state::<crate::AudioState>();
 
-    // Abort task in separate scope (Send trait fix)
-    {
+    // Cooperative stop FIRST: the VAD loop checks the flag per chunk and
+    // flushes the in-flight utterance before exiting, so the tail the user
+    // heard is transcribed instead of vanishing with the aborted task.
+    state
+        .stop_requested
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    // Give the task up to ~1.5 s to finish on its own (flush + WAV encode),
+    // then abort as the backstop for a stalled stream.
+    let task = {
         let mut guard = state
             .stream_task
             .lock()
             .map_err(|e| format!("Failed to acquire task lock: {}", e))?;
+        guard.take()
+    };
 
-        if let Some(task) = guard.take() {
+    if let Some(task) = task {
+        for _ in 0..150 {
+            if task.is_finished() {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+        if !task.is_finished() {
             task.abort();
         }
     }
 
     stop_reference_tap(&state);
 
-    // LONGER delay for proper cleanup (300ms instead of 150ms)
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    // Short cleanup windows (the old 300 ms + 200 ms blind sleeps were the
+    // floor of the stop latency; the join above replaces their real work).
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Mark as not capturing
     *state
@@ -810,7 +945,7 @@ pub async fn stop_system_audio_capture(app: AppHandle) -> Result<(), String> {
         .map_err(|e| format!("Failed to clear capture sample rate: {}", e))? = None;
 
     // Additional cleanup delay (CRITICAL for mic indicator)
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     // Emit stopped event
     let _ = app.emit("capture-stopped", ());

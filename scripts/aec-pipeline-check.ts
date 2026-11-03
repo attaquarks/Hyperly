@@ -173,7 +173,12 @@ assert.match(hook, /await session\.activate\(context, getActiveAecReferenceFeed\
 assert.match(micAec, /if \(!enabled \|\| disposed \|\| activating\) return/);
 assert.match(micAec, /if \(!feed \|\| feed\.status\.state === "degraded"/);
 assert.match(micAec, /worker\.postMessage\(\{ type: "init", port: workerChannel\.port1 \}, \[workerChannel\.port1\]\)/);
-assert.match(micAec, /feed\.attachForwarder\(refChannel\.port1\)/);
+// The reference goes over the worklet's NODE port (its handler owns the
+// `ref`/`trim`/`bypass` types). A second init-transferred refPort was never
+// unwrapped by the worklet, so every frame was silently dropped — the
+// "did not prime two contiguous hops" init-failure that bypassed the AEC.
+assert.match(micAec, /feed\.attachForwarder\(bridge\.port\)/);
+assert.ok(!micAec.includes("refChannel"), "mic-aec must not route references through a second MessageChannel the worklet never unwraps");
 assert.match(worklet, /this\.takeRef\(AEC_HOP_SAMPLES\)/);
 assert.match(worklet, /type: "process", id, mic: frame, ref: reference, gap/);
 assert.match(worklet, /const AEC_SAMPLE_RATE = 16000/);

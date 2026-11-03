@@ -26,6 +26,12 @@ pub struct AudioState {
     is_capturing: Arc<Mutex<bool>>,
     reference_tap: Arc<Mutex<Option<ReferenceTap>>>,
     capture_sample_rate: Arc<Mutex<Option<u32>>>,
+    /// Cooperative stop for the capture task: set by
+    /// `stop_system_audio_capture` so the VAD loop can flush the in-flight
+    /// utterance (emit it as a final) instead of being aborted mid-speech,
+    /// which is what truncated the transcript the LLM received. Aborting
+    /// remains the backstop for a stalled stream.
+    stop_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[tauri::command]

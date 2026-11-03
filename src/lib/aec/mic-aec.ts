@@ -219,6 +219,9 @@ export const createMicAec = (
   };
 
   const disconnectGraph = (): void => {
+    // Detach the reference forwarder before the node port closes, so a frame
+    // in flight cannot hit a dead port and flip the shared feed to degraded.
+    activeFeed?.detachForwarder();
     bridgeNode?.port.postMessage({ type: "bypass" });
     bridgeNode?.port.close();
     bridgeNode?.disconnect();
@@ -461,22 +464,27 @@ export const createMicAec = (
         });
         bridgeNode = bridge;
 
-        // Two channels hand the realtime path to the audio thread:
-        //  - workerChannel: worklet ↔ engine worker (hops and results)
-        //  - refChannel:    main thread forwarder → worklet (reference frames)
+        // The worker channel hands the worklet ↔ engine traffic to the audio
+        // thread. Reference frames do NOT get a second MessageChannel: the
+        // worklet's node-port handler owns the `ref`/`trim`/`bypass` message
+        // types, and an init-transferred refPort would need its own onmessage
+        // the worklet never installs — which is exactly how every frame was
+        // silently dropped (ref depth 0.00s, "did not prime two contiguous
+        // hops", init-failed, raw mic). The feed posts straight to the node
+        // port; the sample buffer still transfers, so this stays off the
+        // realtime hot path.
         const workerChannel = new MessageChannel();
-        const refChannel = new MessageChannel();
         bridge.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
           handleWorkletMessage(event.data);
         };
         bridge.port.postMessage(
-          { type: "init", workerPort: workerChannel.port2, refPort: refChannel.port2 },
-          [workerChannel.port2, refChannel.port2]
+          { type: "init", workerPort: workerChannel.port2 },
+          [workerChannel.port2]
         );
         worker.postMessage({ type: "init", port: workerChannel.port1 }, [workerChannel.port1]);
         // Start frame delivery into the worklet only now: its FIFO starts
         // primed from the feed's pre-attach backlog and fills in realtime.
-        feed.attachForwarder(refChannel.port1);
+        feed.attachForwarder(bridge.port);
 
         if (!(await waitForWorkletReferenceReady())) {
           throw new Error("Reference feed did not prime two contiguous 16 kHz hops in the worklet");
