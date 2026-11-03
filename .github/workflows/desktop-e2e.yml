@@ -141,7 +141,7 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
       # No `tauri/custom-protocol`: the binary then loads tauri.conf's devUrl
-      # (http://localhost:1420) exactly like `tauri dev` does.
+      # (http://127.0.0.1:1420) exactly like `tauri dev` does.
       - name: Build Windows application (dev-server mode + WDIO)
         run: cargo build --manifest-path src-tauri/Cargo.toml --locked --features wdio
 
@@ -157,13 +157,13 @@ jobs:
           foreach ($i in 1..90) {
             Start-Sleep -Seconds 2
             try {
-              $res = Invoke-WebRequest -Uri "http://localhost:1420/" -UseBasicParsing -TimeoutSec 5
+              $res = Invoke-WebRequest -Uri "http://127.0.0.1:1420/" -UseBasicParsing -TimeoutSec 5
               if ($res.StatusCode -eq 200) { $ready = $true; break }
             } catch { }
           }
           if (-not $ready) {
             Get-Content $out, $err -ErrorAction SilentlyContinue
-            throw "Vite dev server did not become ready on http://localhost:1420"
+            throw "Vite dev server did not become ready on http://127.0.0.1:1420"
           }
 
       - name: Install E2E dependencies

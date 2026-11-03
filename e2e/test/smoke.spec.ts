@@ -114,7 +114,10 @@ describe("Hyperly startup health", () => {
     await $(".hyperly-tab:nth-child(2)").click();
     await $(".hyperly-listen-body").waitForExist({ timeout: 20_000 });
     await $('button[title="Show conversation history"]').waitForExist({
-      timeout: 20_000,
+      // Generous: each Listen remount re-probes the audio stack, and on a
+      // runner with no audio devices that path is slow — on run 4 the button
+      // was in the DOM at capture time but after the previous 20 s wait.
+      timeout: 60_000,
       timeoutMsg: "Listen room rendered but the history toolbar button did not",
     });
 

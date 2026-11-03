@@ -122,7 +122,13 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // Pin the loopback family on BOTH sides of the dev loop. `host: false`
+    // made Vite bind whichever family Node's resolver picked for "localhost"
+    // (often ::1 on CI runners), while WebView2 fetched
+    // http://localhost:1420 and could hit the other stack — the dev-mode E2E
+    // job got ERR_CONNECTION_REFUSED against a healthy, polled Vite.
+    // 127.0.0.1 is unambiguous everywhere; TAURI_DEV_HOST still overrides.
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",
