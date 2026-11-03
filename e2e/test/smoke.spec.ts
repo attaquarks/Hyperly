@@ -101,4 +101,80 @@ describe("Hyperly startup health", () => {
     }
     await shot("04-post-navigation");
   });
+
+  it("opens and closes the history wing without freezing the app", async () => {
+    // Regression net for the Windows deadlock: `open_history_wing` used to be
+    // a *synchronous* command that created the wing webview window inline,
+    // which deadlocks the Rust main thread on Windows (window creation must
+    // pump the event loop that the sync command is blocking). Symptom: the
+    // first history click froze the whole overlay. If it regresses, the wing
+    // window never appears AND the main overlay stops answering — the waits
+    // below catch both facts.
+    await focusMainWindow();
+    await $(".hyperly-tab:nth-child(2)").click();
+    await $(".hyperly-listen-body").waitForExist({ timeout: 20_000 });
+    await $('button[title="Show conversation history"]').waitForExist({
+      timeout: 20_000,
+      timeoutMsg: "Listen room rendered but the history toolbar button did not",
+    });
+
+    const mainHandle = await browser.getWindowHandle();
+    await $('button[title="Show conversation history"]').click();
+
+    // The wing is its own webview window loading index.html; the dashboard
+    // (the other non-main handle) loads /chats, so filter it out.
+    const wingHandle = await browser.waitUntil(
+      async () => {
+        for (const handle of await browser.getWindowHandles()) {
+          if (handle === mainHandle) continue;
+          await browser.switchToWindow(handle);
+          if (!(await browser.getUrl()).includes("/chats")) return handle;
+        }
+        return false;
+      },
+      {
+        timeout: 20_000,
+        timeoutMsg:
+          "history wing window never appeared — open_history_wing deadlocked or failed",
+      }
+    );
+    if (typeof wingHandle !== "string") {
+      throw new Error("history wing handle missing");
+    }
+
+    await $(".hyperly-wing-shell").waitForExist({
+      timeout: 20_000,
+      timeoutMsg: "wing window opened but the history UI never rendered",
+    });
+    const aliveFirst = await browser.execute(() => performance.now());
+    await browser.pause(150);
+    const aliveSecond = await browser.execute(() => performance.now());
+    if (!(aliveSecond > aliveFirst)) {
+      throw new Error("history wing webview is not responsive");
+    }
+    await shot("05-history-wing");
+
+    // Close from the wing's own button: it hides the wing and emits
+    // "history-wing-closed", which flips the Listen toolbar button's title
+    // back — asserting that flip proves the Rust→JS event round-trip.
+    await $(".hyperly-wing-close").click();
+    await browser.switchToWindow(mainHandle);
+    await browser.waitUntil(
+      async () =>
+        (await $('button[title$="conversation history"]').getAttribute("title")) ===
+        "Show conversation history",
+      {
+        timeout: 10_000,
+        timeoutMsg:
+          "main overlay never acknowledged the wing closing (history-wing-closed event lost)",
+      }
+    );
+
+    // And the main overlay must still be alive after the whole dance.
+    const probe = await browser.execute(() => document.title.length);
+    if (typeof probe !== "number") {
+      throw new Error("main overlay stopped answering after the history wing round-trip");
+    }
+    await shot("06-history-wing-closed");
+  });
 });

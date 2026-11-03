@@ -147,13 +147,19 @@ pub fn set_window_size(
     Ok(())
 }
 
+// Async commands: on Windows, `WebviewWindowBuilder::build()` deadlocks when
+// called from a *synchronous* command (window creation has to pump the
+// main-thread event loop, and a sync command runs on that thread). These were
+// sync once — clicking "history" in the Listen room locked the whole overlay
+// until restart, in dev AND production builds. Async commands run on the
+// runtime's thread pool instead, so creation dispatches to a live main loop.
 #[tauri::command]
-pub fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     show_dashboard_window(&app)
 }
 
 #[tauri::command]
-pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(dashboard_window) = app.get_webview_window("dashboard") {
         match dashboard_window.is_visible() {
             Ok(true) => {
@@ -385,7 +391,7 @@ fn create_history_wing_window<R: Runtime>(
 
 /// Opens (or reveals and re-docks) the history wing next to the main overlay.
 #[tauri::command]
-pub fn open_history_wing(app: AppHandle) -> Result<(), String> {
+pub async fn open_history_wing(app: AppHandle) -> Result<(), String> {
     let (x, y, _, _, _) = history_wing_geometry(&app)?;
     if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
         wing.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }))

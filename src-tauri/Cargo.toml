@@ -19,7 +19,14 @@ edition = "2021"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "hyperly_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# rlib only. The template's `staticlib`/`cdylib` exist for mobile embedding;
+# Hyperly is desktop-only and the exe statically links the rlib, so the extra
+# crate types just build a `hyperly_lib.dll` nothing ever loads — and on the
+# windows-gnu toolchain mingw's linker auto-exports every symbol from a DLL
+# (200k+ exports with the full Tauri tree, past the 65,535 ordinal limit),
+# which killed `npm run tauri dev` with "export ordinal too large: 232523".
+# MSVC only escaped it because it exports an explicit symbol list instead.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

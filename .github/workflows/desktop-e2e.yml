@@ -64,6 +64,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: hyperly-windows
 
       - name: Run Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
@@ -98,5 +99,93 @@ jobs:
           path: |
             e2e/artifacts/**
             e2e/logs/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  # The developer's actual loop is `npm run tauri dev`: the frontend served by
+  # Vite on :1420, loaded by a binary built WITHOUT `tauri/custom-protocol`.
+  # That is a different serving path from the embedded bundle above (dev
+  # module transforms, HMR client, public-asset middlewares), so it gets its
+  # own job running the same suite — including the history-wing test that
+  # caught the Windows window-creation deadlock.
+  windows-dev-mode-e2e:
+    name: Windows dev-server mode (tauri dev parity)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: hyperly-windows
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      # No `tauri/custom-protocol`: the binary then loads tauri.conf's devUrl
+      # (http://localhost:1420) exactly like `tauri dev` does.
+      - name: Build Windows application (dev-server mode + WDIO)
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked --features wdio
+
+      - name: Start Vite dev server
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE "vite-out.log"
+          $err = Join-Path $env:GITHUB_WORKSPACE "vite-err.log"
+          Start-Process -FilePath "npm.cmd" -ArgumentList "run","dev" `
+            -WorkingDirectory $env:GITHUB_WORKSPACE -PassThru -NoNewWindow `
+            -RedirectStandardOutput $out -RedirectStandardError $err |
+            ForEach-Object { $_.Id | Out-File -FilePath vite.pid }
+          $ready = $false
+          foreach ($i in 1..90) {
+            Start-Sleep -Seconds 2
+            try {
+              $res = Invoke-WebRequest -Uri "http://localhost:1420/" -UseBasicParsing -TimeoutSec 5
+              if ($res.StatusCode -eq 200) { $ready = $true; break }
+            } catch { }
+          }
+          if (-not $ready) {
+            Get-Content $out, $err -ErrorAction SilentlyContinue
+            throw "Vite dev server did not become ready on http://localhost:1420"
+          }
+
+      - name: Install E2E dependencies
+        working-directory: e2e
+        run: npm ci --ignore-scripts
+
+      - name: Launch the app against the dev server and run the E2E suite
+        working-directory: e2e
+        env:
+          HYPERLY_BIN: ${{ github.workspace }}\src-tauri\target\debug\hyperly.exe
+          E2E_ARTIFACTS_DIR: ${{ github.workspace }}\e2e\artifacts-dev
+        run: npx wdio run ./wdio.conf.ts
+
+      - name: Upload dev-mode screenshots, logs, and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-e2e-artifacts-dev-mode
+          path: |
+            e2e/artifacts-dev/**
+            e2e/logs/**
+            vite-out.log
+            vite-err.log
           if-no-files-found: warn
           retention-days: 14
