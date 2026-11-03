@@ -113,16 +113,28 @@ describe("Hyperly startup health", () => {
     await focusMainWindow();
     await $(".hyperly-tab:nth-child(2)").click();
     await $(".hyperly-listen-body").waitForExist({ timeout: 20_000 });
-    await $('button[title="Show conversation history"]').waitForExist({
+    // useTitles() strips every `title` attribute from the DOM ~100 ms after
+    // mount (moves it to data-original-title), so title-based selectors can
+    // never match. The button carries a data-testid that survives, and its
+    // React-controlled `hyperly-action-active` class is the open-state proof.
+    const historyToggle = () => $('[data-testid="listen-history-toggle"]');
+    await historyToggle().waitForExist({
       // Generous: each Listen remount re-probes the audio stack, and on a
-      // runner with no audio devices that path is slow — on run 4 the button
-      // was in the DOM at capture time but after the previous 20 s wait.
+      // runner with no audio devices that path is slow.
       timeout: 60_000,
       timeoutMsg: "Listen room rendered but the history toolbar button did not",
     });
 
     const mainHandle = await browser.getWindowHandle();
-    await $('button[title="Show conversation history"]').click();
+    await historyToggle().click();
+    // The click handler flips this React class synchronously — the wing
+    // window appearing is the Rust-side proof, this is the JS-side one.
+    const activeAfterOpen = await browser.execute(
+      () => document.querySelector('[data-testid="listen-history-toggle"]')?.classList.contains("hyperly-action-active") ?? false
+    );
+    if (!activeAfterOpen) {
+      throw new Error("history toggle did not light up after opening the wing");
+    }
 
     // The wing is its own webview window loading index.html; the dashboard
     // (the other non-main handle) loads /chats, so filter it out.
@@ -158,14 +170,15 @@ describe("Hyperly startup health", () => {
     await shot("05-history-wing");
 
     // Close from the wing's own button: it hides the wing and emits
-    // "history-wing-closed", which flips the Listen toolbar button's title
-    // back — asserting that flip proves the Rust→JS event round-trip.
+    // "history-wing-closed", which clears the Listen toggle's React class —
+    // asserting that clears proves the Rust→JS event round-trip.
     await $(".hyperly-wing-close").click();
     await browser.switchToWindow(mainHandle);
     await browser.waitUntil(
       async () =>
-        (await $('button[title$="conversation history"]').getAttribute("title")) ===
-        "Show conversation history",
+        !(await browser.execute(
+          () => document.querySelector('[data-testid="listen-history-toggle"]')?.classList.contains("hyperly-action-active") ?? true
+        )),
       {
         timeout: 10_000,
         timeoutMsg:

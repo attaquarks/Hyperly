@@ -257,6 +257,10 @@ export const SystemAudio = (props: useSystemAudioType) => {
                     "hyperly-action",
                     showHistory && "hyperly-action-active"
                   )}
+                  // E2E hook: useTitles() strips every `title` attribute at
+                  // runtime (moved to data-original-title), so tests can't
+                  // select by title. data-testid survives.
+                  data-testid="listen-history-toggle"
                   title={
                     showHistory
                       ? "Hide conversation history"

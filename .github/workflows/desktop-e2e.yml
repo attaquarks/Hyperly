@@ -145,14 +145,25 @@ jobs:
       - name: Build Windows application (dev-server mode + WDIO)
         run: cargo build --manifest-path src-tauri/Cargo.toml --locked --features wdio
 
-      - name: Start Vite dev server
+      - name: Install E2E dependencies
+        working-directory: e2e
+        run: npm ci --ignore-scripts
+
+      # Windows runners tear down a step's entire process tree when the step
+      # ends — a dev server started in an earlier step is DEAD (connection
+      # refused) by the time a later step runs. So Vite is started, polled
+      # until ready, and used all within THIS step.
+      - name: Start Vite and run the E2E suite against the dev server
+        working-directory: e2e
+        env:
+          HYPERLY_BIN: ${{ github.workspace }}\src-tauri\target\debug\hyperly.exe
+          E2E_ARTIFACTS_DIR: ${{ github.workspace }}\e2e\artifacts-dev
         run: |
           $out = Join-Path $env:GITHUB_WORKSPACE "vite-out.log"
           $err = Join-Path $env:GITHUB_WORKSPACE "vite-err.log"
           Start-Process -FilePath "npm.cmd" -ArgumentList "run","dev" `
             -WorkingDirectory $env:GITHUB_WORKSPACE -PassThru -NoNewWindow `
-            -RedirectStandardOutput $out -RedirectStandardError $err |
-            ForEach-Object { $_.Id | Out-File -FilePath vite.pid }
+            -RedirectStandardOutput $out -RedirectStandardError $err | Out-Null
           $ready = $false
           foreach ($i in 1..90) {
             Start-Sleep -Seconds 2
@@ -165,17 +176,7 @@ jobs:
             Get-Content $out, $err -ErrorAction SilentlyContinue
             throw "Vite dev server did not become ready on http://127.0.0.1:1420"
           }
-
-      - name: Install E2E dependencies
-        working-directory: e2e
-        run: npm ci --ignore-scripts
-
-      - name: Launch the app against the dev server and run the E2E suite
-        working-directory: e2e
-        env:
-          HYPERLY_BIN: ${{ github.workspace }}\src-tauri\target\debug\hyperly.exe
-          E2E_ARTIFACTS_DIR: ${{ github.workspace }}\e2e\artifacts-dev
-        run: npx wdio run ./wdio.conf.ts
+          npx wdio run ./wdio.conf.ts
 
       - name: Upload dev-mode screenshots, logs, and reports
         if: always()
