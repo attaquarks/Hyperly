@@ -895,6 +895,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           if (!engineActiveRef.current) {
             return;
           }
+          // Multiplicity probe: if a listener leak ever regresses, this logs
+          // once per leaked copy per event and the count is visible directly.
+          console.info("[listen] speech-detected delivered");
           // The stop fallback waits on this: a speech-detected enqueued while
           // a stop is pending is the engine's flush-on-stop utterance.
           if (stopRequestedRef.current) {
