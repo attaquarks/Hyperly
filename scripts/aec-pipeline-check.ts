@@ -185,6 +185,20 @@ assert.match(worklet, /const AEC_SAMPLE_RATE = 16000/);
 assert.match(worker, /localvqe_process_frame_f32/);
 assert.match(systemAudio, /if \(!readAecEnabled\(\)\) return/);
 assert.match(systemAudio, /setActiveAecReferenceFeed\(feed\)/);
+// The speech listeners register ONCE for the hook's lifetime with a
+// disposed-flag self-unlisten. The old shape re-registered on every AI
+// answer (conversation.messages.length was a dep) and its cleanup read
+// unlisten handles that were still undefined whenever cleanup beat the
+// await — every StrictMode mount and navigation stranded a listener pair
+// on the event bus, and each speech-detected event was then enqueued once
+// per leaked copy: the same utterance transcribed and sent to the model
+// two, three, N times.
+assert.match(systemAudio, /if \(disposed\) \{\s*\n\s*speechUnlisten\(\);/);
+assert.match(
+  systemAudio,
+  /unlistens\.forEach\(\(unlisten\) => unlisten\(\)\);\s*\n\s*\};\s*\n\s*\}, \[\]\);/,
+  "the speech listener effect must register once per mount (empty deps)"
+);
 assert.match(hook, /setAecStatus\(session\.status\)/);
 assert.match(hook, /releaseMicAecSession\(session\)/);
 assert.match(toggle, /does not guarantee echo removal/);

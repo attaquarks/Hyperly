@@ -226,10 +226,11 @@ check(
 
 check(
   "the hook still creates and tears down both surviving listeners",
-  /errorUnlisten = await listen\("audio-encoding-error"/.test(hookCode) &&
-    /discardedUnlisten = await listen\("speech-discarded"/.test(hookCode) &&
-    /if \(errorUnlisten\) errorUnlisten\(\);/.test(hookCode) &&
-    /if \(discardedUnlisten\) discardedUnlisten\(\);/.test(hookCode),
+  /const errorUnlisten = await listen\("audio-encoding-error"/.test(hookCode) &&
+    /const discardedUnlisten = await listen\("speech-discarded"/.test(hookCode) &&
+    /unlistens\.push\(errorUnlisten\);/.test(hookCode) &&
+    /unlistens\.push\(discardedUnlisten\);/.test(hookCode) &&
+    /unlistens\.forEach\(\(unlisten\) => unlisten\(\)\);/.test(hookCode),
   () => "an error/discard listener or its teardown is missing"
 );
 

@@ -449,37 +449,51 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // `continuous-recording-start` and `continuous-recording-stopped` listeners
   // went with the vestigial continuous-mode path, since they only ever fed
   // `recordingProgress` / `isRecordingInContinuousMode`, which nothing read.
+  // Same disposed-flag pattern as the speech listeners below: an await that
+  // resolves after cleanup must unlisten itself, not strand a copy.
   useEffect(() => {
-    let errorUnlisten: (() => void) | undefined;
-    let discardedUnlisten: (() => void) | undefined;
+    let disposed = false;
+    const unlistens: Array<() => void> = [];
 
     const setupCaptureListeners = async () => {
       try {
         // Audio encoding errors
-        errorUnlisten = await listen("audio-encoding-error", (event) => {
+        const errorUnlisten = await listen("audio-encoding-error", (event) => {
+          if (disposed) return;
           const errorMsg = event.payload as string;
           console.error("Audio encoding error:", errorMsg);
           setError(`Failed to process audio: ${errorMsg}`);
           setIsProcessing(false);
           setIsAIProcessing(false);
         });
+        if (disposed) {
+          errorUnlisten();
+          return;
+        }
+        unlistens.push(errorUnlisten);
 
         // Speech discarded (too short)
-        discardedUnlisten = await listen("speech-discarded", (event) => {
+        const discardedUnlisten = await listen("speech-discarded", (event) => {
+          if (disposed) return;
           const reason = event.payload as string;
           console.log("Speech discarded:", reason);
           // Don't show error - this is expected behavior
         });
+        if (disposed) {
+          discardedUnlisten();
+          return;
+        }
+        unlistens.push(discardedUnlisten);
       } catch (err) {
         console.error("Failed to setup capture listeners:", err);
       }
     };
 
-    setupCaptureListeners();
+    void setupCaptureListeners();
 
     return () => {
-      if (errorUnlisten) errorUnlisten();
-      if (discardedUnlisten) discardedUnlisten();
+      disposed = true;
+      unlistens.forEach((unlisten) => unlisten());
     };
   }, []);
 
@@ -792,16 +806,33 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   );
 
   // Handle single speech detection event (both VAD and continuous modes)
+  // The speech event listeners register ONCE for the hook's lifetime.
+  //
+  // This effect used to re-run on `capturing`, the STT provider and
+  // `conversation.messages.length`, and registered its listeners inside an
+  // async setup whose cleanup read unlisten handles that were still
+  // `undefined` whenever cleanup beat the await. Every such cycle stranded a
+  // listener pair on the webview event bus FOREVER: React StrictMode
+  // guarantees one leak per mount in dev, and every navigation remount adds
+  // another. The room then processed each speech-detected event once per
+  // leaked copy — the same utterance transcribed and sent to the model two,
+  // three, N times (the reported duplicate/triplicate prompts, in one merged
+  // payload in Manual and as separate prompts in Auto). The leaked partial
+  // handlers also multiplied STT load until main-thread jank starved the AEC
+  // reference delivery into burst-then-drain underruns and the honest
+  // overload bypass. Handlers therefore read ONLY refs, and the disposed
+  // flag self-unlistens a registration whose effect was torn down mid-await.
   useEffect(() => {
-    let speechUnlisten: (() => void) | undefined;
-    let partialUnlisten: (() => void) | undefined;
+    let disposed = false;
+    const unlistens: Array<() => void> = [];
 
     const setupEventListener = async () => {
       try {
         // Listen for incremental audio chunks and update the live transcript as we go.
-        partialUnlisten = await listen(
+        const partialUnlisten = await listen(
           "speech-partial",
           async (event: { payload: string }) => {
+            if (disposed) return;
             // Engine lifetime, not React state: the flush-on-stop utterance
             // arrives in the same window the state flips to false.
             if (!engineActiveRef.current) return;
@@ -814,9 +845,12 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
               }
               const audioBlob = new Blob([bytes], { type: "audio/wav" });
 
-              if (!selectedSttProvider.provider) return;
-              const providerConfig = allSttProviders.find(
-                (p) => p.id === selectedSttProvider.provider
+              // Refs, not closure state: the provider can change while this
+              // once-registered listener stays alive.
+              const { selected, providers } = sttConfigRef.current;
+              if (!selected.provider) return;
+              const providerConfig = providers.find(
+                (p) => p.id === selected.provider
               );
               if (!providerConfig) return;
 
@@ -830,7 +864,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
               // text into the live transcript.
               const partial = await fetchSTT({
                 provider: providerConfig,
-                selectedProvider: selectedSttProvider,
+                selectedProvider: selected,
                 audio: audioBlob,
               });
 
@@ -847,8 +881,16 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             }
           }
         );
+        if (disposed) {
+          // The effect was torn down while this registration was in flight;
+          // unlisten immediately instead of stranding it on the event bus.
+          partialUnlisten();
+          return;
+        }
+        unlistens.push(partialUnlisten);
 
-        speechUnlisten = await listen("speech-detected", async (event) => {
+        const speechUnlisten = await listen("speech-detected", async (event) => {
+          if (disposed) return;
           // Engine lifetime, not React state — see the partial listener.
           if (!engineActiveRef.current) {
             return;
@@ -884,24 +926,23 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           setIsProcessing(true);
           getSpeechQueue().enqueue("system", audioBlob);
         });
+        if (disposed) {
+          speechUnlisten();
+          return;
+        }
+        unlistens.push(speechUnlisten);
       } catch (err) {
-        setError("Failed to setup speech listener");
+        if (!disposed) setError("Failed to setup speech listener");
       }
     };
 
-
-    setupEventListener();
+    void setupEventListener();
 
     return () => {
-      if (speechUnlisten) speechUnlisten();
-      if (partialUnlisten) partialUnlisten();
+      disposed = true;
+      unlistens.forEach((unlisten) => unlisten());
     };
-  }, [
-    capturing,
-    selectedSttProvider,
-    allSttProviders,
-    conversation.messages?.length ?? 0,
-  ]);
+  }, []);
 
   // Phase 4 R3: bring back the transcript of the session the app was killed in.
   //
