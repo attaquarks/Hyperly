@@ -572,10 +572,17 @@ export const useChatCompletion = (
   }, [handleScreenshotSubmit]);
 
   useEffect(() => {
-    let unlisten: any;
+    // Disposed-flag pattern: an await that resolves after cleanup must
+    // unlisten itself, or a listener pair strands on the event bus forever
+    // (StrictMode guarantees one per dev mount; each dep change can add
+    // more) and every captured-selection event is then processed once per
+    // leaked copy — a screenshot submitted multiple times.
+    let disposed = false;
+    const unlistens: Array<() => void> = [];
 
     const setupListener = async () => {
-      unlisten = await listen("captured-selection", async (event: any) => {
+      const capturedUnlisten = await listen("captured-selection", async (event: any) => {
+        if (disposed) return;
         // Only process if this context initiated the screenshot
         if (!screenshotInitiatedByThisContext.current) {
           return;
@@ -607,14 +614,18 @@ export const useChatCompletion = (
           }, 100);
         }
       });
+      if (disposed) {
+        capturedUnlisten();
+        return;
+      }
+      unlistens.push(capturedUnlisten);
     };
 
-    setupListener();
+    void setupListener();
 
     return () => {
-      if (unlisten) {
-        unlisten();
-      }
+      disposed = true;
+      unlistens.forEach((unlisten) => unlisten());
     };
   }, [handleScreenshotSubmit]);
 

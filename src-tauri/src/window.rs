@@ -1,6 +1,6 @@
 #[cfg(target_os = "macos")]
 use tauri::LogicalPosition;
-use tauri::{App, AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
+use tauri::{App, AppHandle, Emitter, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 
 // The offset from the top of the screen to the window
 const TOP_OFFSET: i32 = 54;
@@ -147,13 +147,19 @@ pub fn set_window_size(
     Ok(())
 }
 
+// Async commands: on Windows, `WebviewWindowBuilder::build()` deadlocks when
+// called from a *synchronous* command (window creation has to pump the
+// main-thread event loop, and a sync command runs on that thread). These were
+// sync once — clicking "history" in the Listen room locked the whole overlay
+// until restart, in dev AND production builds. Async commands run on the
+// runtime's thread pool instead, so creation dispatches to a live main loop.
 #[tauri::command]
-pub fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     show_dashboard_window(&app)
 }
 
 #[tauri::command]
-pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(dashboard_window) = app.get_webview_window("dashboard") {
         match dashboard_window.is_visible() {
             Ok(true) => {
@@ -298,4 +304,160 @@ pub fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
             .map_err(|e| format!("Failed to focus new dashboard window: {}", e))?;
     }
     Ok(())
+}
+
+// ---- History wing ----------------------------------------------------------
+//
+// The Listen room's conversation history opens as its own small "wing" bubble
+// instead of an in-overlay sheet: a separate transparent window docked to the
+// main overlay's top-right with a hairline gap, so it reads as a separate
+// bubble that still moves with the main block.
+
+const HISTORY_WING_LABEL: &str = "history-wing";
+/// Gap between the main overlay's right edge and the wing, in logical px.
+const HISTORY_WING_GAP_LOGICAL: f64 = 10.0;
+/// Wing size as a fraction of the main overlay (top-right coverage).
+const HISTORY_WING_WIDTH_RATIO: f64 = 0.6;
+const HISTORY_WING_HEIGHT_RATIO: f64 = 0.62;
+/// Whether the user considers the wing open, so it can follow the main
+/// overlay's hide/show toggles without the Listen room re-issuing a command.
+static HISTORY_WING_OPEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Wing geometry in physical pixels, clamped inside the main overlay's
+/// monitor so a right-docked overlay still gets its wing fully on screen.
+fn history_wing_geometry<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(i32, i32, i32, i32, f64), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is missing".to_string())?;
+    let scale = main
+        .scale_factor()
+        .map_err(|e| format!("Failed to read scale factor: {}", e))?;
+    let position = main
+        .outer_position()
+        .map_err(|e| format!("Failed to read main position: {}", e))?;
+    let size = main
+        .outer_size()
+        .map_err(|e| format!("Failed to read main size: {}", e))?;
+
+    let gap = (HISTORY_WING_GAP_LOGICAL * scale).round() as i32;
+    let width = ((size.width as f64) * HISTORY_WING_WIDTH_RATIO).round() as i32;
+    let height = ((size.height as f64) * HISTORY_WING_HEIGHT_RATIO).round() as i32;
+    let mut x = position.x + size.width as i32 + gap;
+    let y = position.y;
+
+    if let Ok(Some(monitor)) = main.current_monitor() {
+        let monitor_pos = monitor.position();
+        let monitor_size = monitor.size();
+        let max_x = monitor_pos.x + monitor_size.width as i32 - width;
+        x = x.clamp(monitor_pos.x, max_x.max(monitor_pos.x));
+    }
+
+    Ok((x, y, width, height, scale))
+}
+
+fn create_history_wing_window<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<WebviewWindow<R>, String> {
+    let (x, y, width, height, scale) = history_wing_geometry(app)?;
+    // Builder geometry is logical; the measurement was physical.
+    let window = WebviewWindowBuilder::new(
+        app,
+        HISTORY_WING_LABEL,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("Hyperly History")
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .resizable(false)
+    .skip_taskbar(true)
+    .shadow(false)
+    .focused(false)
+    .content_protected(true)
+    .visible(true)
+    .inner_size(width as f64 / scale, height as f64 / scale)
+    .position(x as f64 / scale, y as f64 / scale)
+    .build()
+    .map_err(|e| format!("Failed to create history wing: {}", e))?;
+
+    // The wing shows history only; it never captures audio itself, but it
+    // shares the app origin and the same CSP, so no extra grants are needed
+    // beyond the capability entry that lets it invoke commands.
+    Ok(window)
+}
+
+/// Opens (or reveals and re-docks) the history wing next to the main overlay.
+#[tauri::command]
+pub async fn open_history_wing(app: AppHandle) -> Result<(), String> {
+    let (x, y, _, _, _) = history_wing_geometry(&app)?;
+    if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
+        wing.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }))
+            .map_err(|e| format!("Failed to position history wing: {}", e))?;
+        wing.show()
+            .map_err(|e| format!("Failed to show history wing: {}", e))?;
+    } else {
+        create_history_wing_window(&app)?;
+    }
+    HISTORY_WING_OPEN.store(true, std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+/// Hides the wing and tells the Listen room so its toolbar button un-lights.
+#[tauri::command]
+pub fn close_history_wing(app: AppHandle) -> Result<(), String> {
+    HISTORY_WING_OPEN.store(false, std::sync::atomic::Ordering::Release);
+    if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
+        wing.hide()
+            .map_err(|e| format!("Failed to hide history wing: {}", e))?;
+    }
+    let _ = app.emit("history-wing-closed", ());
+    Ok(())
+}
+
+/// Keeps the wing glued to the main overlay's top-right while it is dragged.
+pub fn setup_history_wing_sync<R: Runtime>(app: &AppHandle<R>) {
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    let handle = app.clone();
+    main.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Moved(_)) {
+            let Some(wing) = handle.get_webview_window(HISTORY_WING_LABEL) else {
+                return;
+            };
+            if !wing.is_visible().unwrap_or(false) {
+                return;
+            }
+            if let Ok((x, y, _, _, _)) = history_wing_geometry(&handle) {
+                let _ = wing.set_position(tauri::Position::Physical(
+                    tauri::PhysicalPosition { x, y },
+                ));
+            }
+        }
+    });
+}
+
+/// Hides the wing alongside the main overlay (Ctrl+\ and the Hide button).
+pub fn hide_history_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
+        let _ = wing.hide();
+    }
+}
+
+/// Re-reveals the wing after the main overlay returns, if the user had it open.
+pub fn restore_history_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
+    if !HISTORY_WING_OPEN.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
+        if let Ok((x, y, _, _, _)) = history_wing_geometry(app) {
+            let _ = wing.set_position(tauri::Position::Physical(
+                tauri::PhysicalPosition { x, y },
+            ));
+        }
+        let _ = wing.show();
+    }
 }

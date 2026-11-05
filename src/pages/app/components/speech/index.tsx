@@ -5,7 +5,6 @@ import { HistoryIcon, PlusIcon, XIcon } from "lucide-react";
 import { ErrorBoundary } from "react-error-boundary";
 import { ResultsSection } from "./ResultsSection";
 import { PermissionFlow } from "./PermissionFlow";
-import { ConversationHistory } from "./ConversationHistory";
 import { TranscriptThread } from "./TranscriptThread";
 import { ListenControls } from "./ListenControls";
 import { FollowUps } from "./FollowUps";
@@ -82,9 +81,23 @@ export const SystemAudio = (props: useSystemAudioType) => {
   // (see the effect after `handleCapture` below).
   const globalShortcuts = useGlobalShortcuts();
 
-  // Chat history overlays the transcript area; the transcript keeps running
-  // behind it and the overlay closes on pick or re-click.
+  // The history wing's open state, for the toolbar button's lit style. The
+  // wing can close itself (its X, or picking a conversation), and Rust
+  // reports that back over this event.
   const [showHistory, setShowHistory] = useState(false);
+
+  useEffect(() => {
+    const unlistenClosed = listen("history-wing-closed", () => {
+      setShowHistory(false);
+    });
+    const unlistenPick = listen("history-wing-pick", (event) => {
+      void loadConversation(event.payload as string);
+    });
+    return () => {
+      void unlistenClosed.then((off) => off());
+      void unlistenPick.then((off) => off());
+    };
+  }, [loadConversation]);
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
 
   // Screenshot state — the local previews mirror into the hook so the next
@@ -244,6 +257,10 @@ export const SystemAudio = (props: useSystemAudioType) => {
                     "hyperly-action",
                     showHistory && "hyperly-action-active"
                   )}
+                  // E2E hook: useTitles() strips every `title` attribute at
+                  // runtime (moved to data-original-title), so tests can't
+                  // select by title. data-testid survives.
+                  data-testid="listen-history-toggle"
                   title={
                     showHistory
                       ? "Hide conversation history"
@@ -251,7 +268,13 @@ export const SystemAudio = (props: useSystemAudioType) => {
                   }
                   onClick={() => {
                     setTranscriptCollapsed(false);
-                    setShowHistory((v) => !v);
+                    if (showHistory) {
+                      void invoke("close_history_wing");
+                      setShowHistory(false);
+                    } else {
+                      void invoke("open_history_wing");
+                      setShowHistory(true);
+                    }
                   }}
                 >
                   <HistoryIcon className="h-3 w-3" />
@@ -277,7 +300,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
             onToggleCapture={() => void handleToggleCapture()}
           />
 
-          {/* Transcript, with chat history overlaid on top */}
+          {/* Transcript. History no longer overlays the room: it opens as the
+              separate wing window (Rust docks it to the overlay's top-right). */}
           <TranscriptThread
             segments={transcriptSegments}
             livePartial={livePartial}
@@ -286,18 +310,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
             onToggleMic={() => setMicWithSystem(!micWithSystem)}
             collapsed={transcriptCollapsed}
             onToggleCollapsed={() => setTranscriptCollapsed((v) => !v)}
-          >
-            {showHistory && (
-              <div className="hyperly-history-overlay">
-                <ConversationHistory
-                  loadConversation={loadConversation}
-                  activeConversationId={conversation.id}
-                  onClose={() => setShowHistory(false)}
-                  className="w-full flex-1 border-r-0 bg-transparent"
-                />
-              </div>
-            )}
-          </TranscriptThread>
+          />
 
           {error && (
             <div className="hyperly-section">

@@ -16,7 +16,7 @@ use tauri_nspanel::{cocoa::appkit::NSWindowCollectionBehavior, panel_delegate, W
 use tokio::task::JoinHandle;
 mod speaker;
 use capture::CaptureState;
-use speaker::VadConfig;
+use speaker::{ReferenceTap, VadConfig};
 
 
 #[derive(Default)]
@@ -24,6 +24,14 @@ pub struct AudioState {
     stream_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     vad_config: Arc<Mutex<VadConfig>>,
     is_capturing: Arc<Mutex<bool>>,
+    reference_tap: Arc<Mutex<Option<ReferenceTap>>>,
+    capture_sample_rate: Arc<Mutex<Option<u32>>>,
+    /// Cooperative stop for the capture task: set by
+    /// `stop_system_audio_capture` so the VAD loop can flush the in-flight
+    /// utterance (emit it as a final) instead of being aborted mid-speech,
+    /// which is what truncated the transcript the LLM received. Aborting
+    /// remains the backstop for a stalled stream.
+    stop_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[tauri::command]
@@ -110,12 +118,22 @@ pub fn run() {
                     }
                 })
                 .build(),
-        )
-        // PostHog, keychain, and machine_uid plugins removed for the personal build.
+        );
+        // Test-only WDIO bridge, compiled in exclusively via the `wdio` cargo
+        // feature (desktop E2E builds). See Cargo.toml [features].
+        #[cfg(feature = "wdio")]
+        let builder = builder
+            .plugin(tauri_plugin_wdio_webdriver::init())
+            .plugin(tauri_plugin_wdio::init());
+        // `mut` is exercised on macOS below (NSPanel + permissions plugins).
+        #[allow(unused_mut)]
+        let mut builder = builder
         .invoke_handler(tauri::generate_handler![
             get_app_version,
             window::set_window_size,
             window::open_dashboard,
+            window::open_history_wing,
+            window::close_history_wing,
             window::toggle_dashboard,
             window::move_window,
             window::log_frontend,
@@ -133,6 +151,8 @@ pub fn run() {
             shortcuts::toggle_main_window,
             speaker::start_system_audio_capture,
             speaker::stop_system_audio_capture,
+            speaker::start_aec_reference,
+            speaker::stop_aec_reference,
             speaker::manual_stop_continuous,
             speaker::check_system_audio_access,
             speaker::request_system_audio_access,
@@ -149,6 +169,8 @@ pub fn run() {
             startup::remove_legacy_autostart();
             // Setup main window positioning
             window::setup_main_window(app).expect("Failed to setup main window");
+            // Keep the history wing glued to the overlay while it is dragged.
+            window::setup_history_wing_sync(app.handle());
             // Convert the overlay window into a floating NSPanel (macOS only).
             #[cfg(target_os = "macos")]
             init(app.app_handle());

@@ -1,0 +1,192 @@
+name: Desktop E2E
+
+# The real Windows desktop application test: build the Tauri binary, launch
+# it through WebDriver, and assert the actual interface renders, responds,
+# and navigates — with screenshots and diagnostics as artifacts on every run.
+#
+# This is the workflow that catches what static checks cannot: startup hangs,
+# boot-failure paints, blank shells, broken navigation, and post-init freezes.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "e2e/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/desktop-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "e2e/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/desktop-e2e.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-desktop-e2e:
+    name: Windows app build + launch + UI smoke
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # 22, matching ci.yml: the regression guards import node:sqlite
+          # (Node 22.5+) and rely on type-stripping (22.6+).
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build frontend bundle
+        run: npm run build
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: hyperly-windows
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      # Tauri embeds frontendDist (../dist) at compile time, so the frontend
+      # must be built before the binary. `custom-protocol` makes the binary
+      # serve the embedded bundle instead of the dev-server URL. The `wdio`
+      # feature embeds the WebDriver server in the app (test-only; production
+      # builds never enable it) — the external msedgedriver attach flow
+      # failed on CI runners with "DevToolsActivePort file doesn't exist".
+      - name: Build Windows application (debug, embedded frontend + WDIO)
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked --features wdio,tauri/custom-protocol
+
+      - name: Install E2E dependencies
+        working-directory: e2e
+        run: npm ci --ignore-scripts
+
+      - name: Launch the real app and run the E2E suite
+        working-directory: e2e
+        env:
+          HYPERLY_BIN: ${{ github.workspace }}\src-tauri\target\debug\hyperly.exe
+          E2E_ARTIFACTS_DIR: ${{ github.workspace }}\e2e\artifacts
+        run: npx wdio run ./wdio.conf.ts
+
+      # Always upload: a green run's screenshots are the visual baseline
+      # evidence; a red run's artifacts are the diagnosis.
+      - name: Upload screenshots, logs, and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-e2e-artifacts
+          path: |
+            e2e/artifacts/**
+            e2e/logs/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  # The developer's actual loop is `npm run tauri dev`: the frontend served by
+  # Vite on :1420, loaded by a binary built WITHOUT `tauri/custom-protocol`.
+  # That is a different serving path from the embedded bundle above (dev
+  # module transforms, HMR client, public-asset middlewares), so it gets its
+  # own job running the same suite — including the history-wing test that
+  # caught the Windows window-creation deadlock.
+  windows-dev-mode-e2e:
+    name: Windows dev-server mode (tauri dev parity)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: hyperly-windows
+
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      # No `tauri/custom-protocol`: the binary then loads tauri.conf's devUrl
+      # (http://127.0.0.1:1420) exactly like `tauri dev` does.
+      - name: Build Windows application (dev-server mode + WDIO)
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked --features wdio
+
+      - name: Install E2E dependencies
+        working-directory: e2e
+        run: npm ci --ignore-scripts
+
+      # Windows runners tear down a step's entire process tree when the step
+      # ends — a dev server started in an earlier step is DEAD (connection
+      # refused) by the time a later step runs. So Vite is started, polled
+      # until ready, and used all within THIS step.
+      - name: Start Vite and run the E2E suite against the dev server
+        working-directory: e2e
+        env:
+          HYPERLY_BIN: ${{ github.workspace }}\src-tauri\target\debug\hyperly.exe
+          E2E_ARTIFACTS_DIR: ${{ github.workspace }}\e2e\artifacts-dev
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE "vite-out.log"
+          $err = Join-Path $env:GITHUB_WORKSPACE "vite-err.log"
+          Start-Process -FilePath "npm.cmd" -ArgumentList "run","dev" `
+            -WorkingDirectory $env:GITHUB_WORKSPACE -PassThru -NoNewWindow `
+            -RedirectStandardOutput $out -RedirectStandardError $err | Out-Null
+          $ready = $false
+          foreach ($i in 1..90) {
+            Start-Sleep -Seconds 2
+            try {
+              $res = Invoke-WebRequest -Uri "http://127.0.0.1:1420/" -UseBasicParsing -TimeoutSec 5
+              if ($res.StatusCode -eq 200) { $ready = $true; break }
+            } catch { }
+          }
+          if (-not $ready) {
+            Get-Content $out, $err -ErrorAction SilentlyContinue
+            throw "Vite dev server did not become ready on http://127.0.0.1:1420"
+          }
+          npx wdio run ./wdio.conf.ts
+
+      - name: Upload dev-mode screenshots, logs, and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-e2e-artifacts-dev-mode
+          path: |
+            e2e/artifacts-dev/**
+            e2e/logs/**
+            vite-out.log
+            vite-err.log
+          if-no-files-found: warn
+          retention-days: 14

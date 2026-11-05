@@ -1,6 +1,11 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useGlobalShortcuts } from "./useGlobalShortcuts";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  AecReferenceFeed,
+  setActiveAecReferenceFeed,
+} from "@/lib/aec/reference";
+import { readAecEnabled } from "@/lib/aec";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
@@ -27,6 +32,7 @@ import { chronological } from "@/lib/message-order";
 import { PendingSave } from "@/lib/pending-save";
 import { modelSourceTag } from "@/lib/transcript-label";
 import { isMicEchoOfSystem, type DedupCandidate } from "@/lib/mic-echo-dedup";
+import { PartialTracker } from "@/lib/partial-tracking";
 import {
   CaptureBehavior,
   KnowledgeFile,
@@ -171,6 +177,39 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // Mirrors `livePartial` so a stop can include the in-progress utterance that
   // React state has not committed yet.
   const livePartialRef = useRef<string>("");
+  // Epoch gate for partial STT results: a partial whose utterance was
+  // finalized (or whose session stopped) while its STT was in flight is stale
+  // by construction — the Rust snapshot is a prefix of the audio the final
+  // came from. Without this gate the stale partial resurfaced after the
+  // final cleared it, and the stop path sent the same words to the model a
+  // second time (the reported "llm gets same transcription twice").
+  const partialTrackerRef = useRef(new PartialTracker());
+  // True from engine start until the stop invoke RESOLVES — not the React
+  // `capturing` state, which flips a render before the engine's flush event
+  // arrives. The listeners gate on this so the flush-on-stop utterance can
+  // never be dropped by a re-render race.
+  const engineActiveRef = useRef<boolean>(false);
+  // Set when a speech-detected event is enqueued while a stop is pending, so
+  // the stop fallback knows the flushed utterance is on its way.
+  const stopFlushSeenRef = useRef<boolean>(false);
+  // Always-fresh handle for the stop fallback paths (the speech queue is
+  // built once at mount, so a callback captured there would close over stale
+  // conversation history).
+  const stopAndSendRef = useRef<
+    ((text: string, source: TranscriptSource) => Promise<void>) | null
+  >(null);
+  // Mirror of conversation.id for callbacks that must not read stale state.
+  const conversationIdRef = useRef<string>("");
+  useEffect(() => {
+    conversationIdRef.current = conversation.id;
+  });
+  // The conversation id whose ROW actually exists in the conversations table.
+  // transcript_events has a real FK to conversations(id): "New" (and
+  // startCapture) generate the id in state while the row is only written by
+  // the debounced save — which skips empty conversations — so without an
+  // on-demand row every event persist failed with FOREIGN KEY constraint
+  // failed and the session's transcript/answers were lost from the log.
+  const persistedConversationIdRef = useRef<string | null>(null);
   // True while a `speech-detected` utterance is being transcribed, and set when
   // a stop arrives during that window so the stop is applied once the
   // transcript lands instead of dropping it.
@@ -178,6 +217,21 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   const stopRequestedRef = useRef<boolean>(false);
   // Guards the async spawn against a concurrent start.
   const startingRef = useRef<boolean>(false);
+  const aecReferenceFeedRef = useRef<AecReferenceFeed | null>(null);
+  const startReferenceTap = useCallback(async () => {
+    if (!readAecEnabled()) return;
+    if (aecReferenceFeedRef.current) return;
+    const feed = new AecReferenceFeed();
+    aecReferenceFeedRef.current = feed;
+    setActiveAecReferenceFeed(feed);
+    await feed.connect();
+  }, []);
+  const stopReferenceTap = useCallback(async () => {
+    const feed = aecReferenceFeedRef.current;
+    aecReferenceFeedRef.current = null;
+    if (feed) setActiveAecReferenceFeed(null);
+    if (feed) await feed.close();
+  }, []);
 
   // AI-suggested follow-ups, regenerated after each answer.
   const [suggestedFollowUps, setSuggestedFollowUps] = useState<string[]>([]);
@@ -293,6 +347,29 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     }
     return pendingSaveRef.current;
   };
+  /**
+   * The conversation row must exist before any transcript_events row can
+   * reference it (real FK). The debounced save skips empty conversations, so
+   * a session started via "New" ran its whole life with the id set but the
+   * row absent — every event persist failed with FOREIGN KEY constraint
+   * failed. This creates the row on demand (title from the first text; the
+   * debounced save upserts the full conversation afterwards).
+   */
+  const ensureConversationPersisted = useCallback(
+    async (firstText: string): Promise<void> => {
+      const id = conversationIdRef.current;
+      if (!id || persistedConversationIdRef.current === id) return;
+      await saveConversation({
+        id,
+        title: generateConversationTitle(firstText),
+        messages: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      persistedConversationIdRef.current = id;
+    },
+    []
+  );
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   // Load context settings and VAD config from localStorage on mount
@@ -407,37 +484,51 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // `continuous-recording-start` and `continuous-recording-stopped` listeners
   // went with the vestigial continuous-mode path, since they only ever fed
   // `recordingProgress` / `isRecordingInContinuousMode`, which nothing read.
+  // Same disposed-flag pattern as the speech listeners below: an await that
+  // resolves after cleanup must unlisten itself, not strand a copy.
   useEffect(() => {
-    let errorUnlisten: (() => void) | undefined;
-    let discardedUnlisten: (() => void) | undefined;
+    let disposed = false;
+    const unlistens: Array<() => void> = [];
 
     const setupCaptureListeners = async () => {
       try {
         // Audio encoding errors
-        errorUnlisten = await listen("audio-encoding-error", (event) => {
+        const errorUnlisten = await listen("audio-encoding-error", (event) => {
+          if (disposed) return;
           const errorMsg = event.payload as string;
           console.error("Audio encoding error:", errorMsg);
           setError(`Failed to process audio: ${errorMsg}`);
           setIsProcessing(false);
           setIsAIProcessing(false);
         });
+        if (disposed) {
+          errorUnlisten();
+          return;
+        }
+        unlistens.push(errorUnlisten);
 
         // Speech discarded (too short)
-        discardedUnlisten = await listen("speech-discarded", (event) => {
+        const discardedUnlisten = await listen("speech-discarded", (event) => {
+          if (disposed) return;
           const reason = event.payload as string;
           console.log("Speech discarded:", reason);
           // Don't show error - this is expected behavior
         });
+        if (disposed) {
+          discardedUnlisten();
+          return;
+        }
+        unlistens.push(discardedUnlisten);
       } catch (err) {
         console.error("Failed to setup capture listeners:", err);
       }
     };
 
-    setupCaptureListeners();
+    void setupCaptureListeners();
 
     return () => {
-      if (errorUnlisten) errorUnlisten();
-      if (discardedUnlisten) discardedUnlisten();
+      disposed = true;
+      unlistens.forEach((unlisten) => unlisten());
     };
   }, []);
 
@@ -549,10 +640,19 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // Recent finalized SYSTEM utterances, newest last, for the mic-echo dedup
   // (D1 Gap 3). Bounded: only the window matters, so old entries are dropped.
   const systemHistoryRef = useRef<DedupCandidate[]>([]);
+  // Keep the stop fallback's handle fresh on every render (no dep array).
+  useEffect(() => {
+    stopAndSendRef.current = stopAndSend;
+  });
+
   useEffect(() => {
     applyTranscriptionRef.current = async (text: string) => {
       setLastTranscription(text);
       finalizeTranscriptSegment(text);
+      // The final supersedes every partial of this utterance: bump the epoch
+      // so any in-flight partial STT for the same audio is discarded when it
+      // lands instead of resurfacing superseded text.
+      partialTrackerRef.current.finalize();
       // D1 Gap 3: the room's finalized words feed the dedup window the mic
       // path checks against. Bounded to the last 32: only an 8 s window
       // matters, so this never grows.
@@ -570,6 +670,12 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       // failure - or the app dying - can never lose the utterance. A persistence
       // error is reported but must not stop the answer.
       try {
+        // The events table has a real FK to conversations(id): an event may
+        // only reference the id AFTER the row exists. "New" generates the id
+        // in state while the row is only written by the debounced save (which
+        // skips empty conversations), so without this the whole session's
+        // events failed with FOREIGN KEY constraint failed.
+        await ensureConversationPersisted(text);
         const store = await getTranscriptStore();
         await store.addEvent({
           source: "system",
@@ -595,7 +701,19 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       stopRequestedRef.current = false;
       pendingTranscriptRef.current = plan.pending;
 
-      if (plan.kind === "hold") return;
+      if (plan.kind === "hold") {
+        // A final that lands after the capture ended cannot wait for a stop
+        // that already happened — that is the stop-during-flight race where
+        // the engine's flushed utterance (or a late block) finalizes after
+        // the deferred stop sent. Flush the held text now, or it strands
+        // unsent until the next session.
+        if (!engineActiveRef.current && pendingTranscriptRef.current) {
+          const held = pendingTranscriptRef.current;
+          pendingTranscriptRef.current = "";
+          await stopAndSend(held, "system");
+        }
+        return;
+      }
 
       if (plan.kind === "stop-and-send") {
         await stopAndSend(plan.text, "system");
@@ -695,8 +813,21 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         },
         onIdle: () => {
           sttInFlightRef.current = false;
-          stopRequestedRef.current = false;
           setIsProcessing(false);
+          // The queue drained with a stop still pending: either the flushed
+          // block was dead-lettered after retries (its audio is preserved in
+          // the dead-letter store, but no text will ever land) or a stop was
+          // requested with nothing left in flight. Whatever held text remains
+          // must go out now — the session is over.
+          if (stopRequestedRef.current && !engineActiveRef.current) {
+            stopRequestedRef.current = false;
+            stopFlushSeenRef.current = false;
+            const held = pendingTranscriptRef.current;
+            pendingTranscriptRef.current = "";
+            if (held.trim()) {
+              void stopAndSendRef.current?.(held, "system");
+            }
+          }
         },
       });
     }
@@ -716,17 +847,36 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   );
 
   // Handle single speech detection event (both VAD and continuous modes)
+  // The speech event listeners register ONCE for the hook's lifetime.
+  //
+  // This effect used to re-run on `capturing`, the STT provider and
+  // `conversation.messages.length`, and registered its listeners inside an
+  // async setup whose cleanup read unlisten handles that were still
+  // `undefined` whenever cleanup beat the await. Every such cycle stranded a
+  // listener pair on the webview event bus FOREVER: React StrictMode
+  // guarantees one leak per mount in dev, and every navigation remount adds
+  // another. The room then processed each speech-detected event once per
+  // leaked copy — the same utterance transcribed and sent to the model two,
+  // three, N times (the reported duplicate/triplicate prompts, in one merged
+  // payload in Manual and as separate prompts in Auto). The leaked partial
+  // handlers also multiplied STT load until main-thread jank starved the AEC
+  // reference delivery into burst-then-drain underruns and the honest
+  // overload bypass. Handlers therefore read ONLY refs, and the disposed
+  // flag self-unlistens a registration whose effect was torn down mid-await.
   useEffect(() => {
-    let speechUnlisten: (() => void) | undefined;
-    let partialUnlisten: (() => void) | undefined;
+    let disposed = false;
+    const unlistens: Array<() => void> = [];
 
     const setupEventListener = async () => {
       try {
         // Listen for incremental audio chunks and update the live transcript as we go.
-        partialUnlisten = await listen(
+        const partialUnlisten = await listen(
           "speech-partial",
           async (event: { payload: string }) => {
-            if (!capturing) return;
+            if (disposed) return;
+            // Engine lifetime, not React state: the flush-on-stop utterance
+            // arrives in the same window the state flips to false.
+            if (!engineActiveRef.current) return;
             const base64Audio = event.payload as string;
             try {
               const binaryString = atob(base64Audio);
@@ -736,11 +886,18 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
               }
               const audioBlob = new Blob([bytes], { type: "audio/wav" });
 
-              if (!selectedSttProvider.provider) return;
-              const providerConfig = allSttProviders.find(
-                (p) => p.id === selectedSttProvider.provider
+              // Refs, not closure state: the provider can change while this
+              // once-registered listener stays alive.
+              const { selected, providers } = sttConfigRef.current;
+              if (!selected.provider) return;
+              const providerConfig = providers.find(
+                (p) => p.id === selected.provider
               );
               if (!providerConfig) return;
+
+              // Stamp the epoch BEFORE the STT round-trip: a final (or a
+              // stop) landing during it must invalidate this result.
+              const epoch = partialTrackerRef.current.request();
 
               // R4: a partial is best-effort. Only a real transcript is shown;
               // an error/empty/cancelled result is ignored here (the final block
@@ -748,14 +905,16 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
               // text into the live transcript.
               const partial = await fetchSTT({
                 provider: providerConfig,
-                selectedProvider: selectedSttProvider,
+                selectedProvider: selected,
                 audio: audioBlob,
               });
 
               if (partial.status === "ok" && partial.text.trim()) {
-                setLivePartial(partial.text);
-                livePartialRef.current = partial.text;
-                upsertPartialSegment(partial.text);
+                if (partialTrackerRef.current.apply(epoch, partial.text)) {
+                  setLivePartial(partial.text);
+                  livePartialRef.current = partial.text;
+                  upsertPartialSegment(partial.text);
+                }
               }
             } catch (err) {
               // Swallow partial errors so they don't interrupt the recording.
@@ -763,10 +922,27 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             }
           }
         );
+        if (disposed) {
+          // The effect was torn down while this registration was in flight;
+          // unlisten immediately instead of stranding it on the event bus.
+          partialUnlisten();
+          return;
+        }
+        unlistens.push(partialUnlisten);
 
-        speechUnlisten = await listen("speech-detected", async (event) => {
-          if (!capturing) {
+        const speechUnlisten = await listen("speech-detected", async (event) => {
+          if (disposed) return;
+          // Engine lifetime, not React state — see the partial listener.
+          if (!engineActiveRef.current) {
             return;
+          }
+          // Multiplicity probe: if a listener leak ever regresses, this logs
+          // once per leaked copy per event and the count is visible directly.
+          console.info("[listen] speech-detected delivered");
+          // The stop fallback waits on this: a speech-detected enqueued while
+          // a stop is pending is the engine's flush-on-stop utterance.
+          if (stopRequestedRef.current) {
+            stopFlushSeenRef.current = true;
           }
 
           let audioBlob: Blob;
@@ -794,24 +970,23 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           setIsProcessing(true);
           getSpeechQueue().enqueue("system", audioBlob);
         });
+        if (disposed) {
+          speechUnlisten();
+          return;
+        }
+        unlistens.push(speechUnlisten);
       } catch (err) {
-        setError("Failed to setup speech listener");
+        if (!disposed) setError("Failed to setup speech listener");
       }
     };
 
-
-    setupEventListener();
+    void setupEventListener();
 
     return () => {
-      if (speechUnlisten) speechUnlisten();
-      if (partialUnlisten) partialUnlisten();
+      disposed = true;
+      unlistens.forEach((unlisten) => unlisten());
     };
-  }, [
-    capturing,
-    selectedSttProvider,
-    allSttProviders,
-    conversation.messages?.length ?? 0,
-  ]);
+  }, []);
 
   // Phase 4 R3: bring back the transcript of the session the app was killed in.
   //
@@ -1138,6 +1313,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           // session show its answers even before the conversation is saved.
           void (async () => {
             try {
+              await ensureConversationPersisted(transcription);
               const store = await getTranscriptStore();
               await store.addEvent({
                 source: "system",
@@ -1179,11 +1355,18 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // `stopCapture`, which belongs to Auto's Stop button.
   const stopAndSend = useCallback(
     async (text: string, source: TranscriptSource) => {
+      await stopReferenceTap();
       try {
         await invoke<string>("stop_system_audio_capture");
       } catch (err) {
         console.error("Failed to stop capture:", err);
       }
+      // The engine is stopped (and has flushed); events after this point are
+      // stale by definition.
+      engineActiveRef.current = false;
+      partialTrackerRef.current.stop();
+      stopRequestedRef.current = false;
+      stopFlushSeenRef.current = false;
 
       setCapturing(false);
       setIsProcessing(false);
@@ -1214,7 +1397,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         modelSourceTag(source, outbound)
       );
     },
-    [systemPrompt, contextContent, conversation.messages, processWithAI]
+    [systemPrompt, contextContent, conversation.messages, processWithAI, stopReferenceTap]
   );
 
   // A finalized microphone utterance. It is shown in the transcript under the
@@ -1236,15 +1419,28 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       if (!transcript) return;
 
       // D1 Gap 3 (dedup half): the mic frequently re-captures room audio
-      // through the speakers when WebView2 denies echoCancellation. If this
-      // utterance is a near-duplicate of a recent system utterance, it is
+      // through the speakers when echo suppression is imperfect. If this
+      // utterance is a near-duplicate of recent room text, it is
       // bleed-through, not the user — suppress it BEFORE it reaches the
-      // transcript or the AI. Suppressed copies are dropped, not held: the
-      // room's own segment already carries the words.
+      // transcript or the AI. The candidate set includes the room's LIVE
+      // partial: the mic path is fast, and its copy of the room's words
+      // often lands BEFORE the room's own final does — that ordering was
+      // exactly the "user label shows the same transcription, but faster
+      // than the system label" report (and its flip side, "sometimes it
+      // vanished on stop", was this dedup winning the race).
+      const systemCandidates = livePartialRef.current.trim()
+        ? [
+            ...systemHistoryRef.current,
+            {
+              atSeconds: elapsedSeconds(),
+              text: livePartialRef.current.trim(),
+            },
+          ]
+        : systemHistoryRef.current;
       if (
         isMicEchoOfSystem(
           transcript,
-          systemHistoryRef.current,
+          systemCandidates,
           elapsedSeconds()
         )
       ) {
@@ -1313,6 +1509,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
 
       // Set up conversation
       const conversationId = generateConversationId("sysaudio");
+      persistedConversationIdRef.current = null;
       setConversation({
         id: conversationId,
         title: "",
@@ -1321,7 +1518,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         updatedAt: 0,
       });
 
-      setCapturing(true);
       setIsPopoverOpen(true);
       setLivePartial("");
       livePartialRef.current = "";
@@ -1336,6 +1532,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       // audio was flowing while nothing was being captured.
 
       // Stop any existing capture
+      await stopReferenceTap();
       await invoke<string>("stop_system_audio_capture");
 
       const deviceId =
@@ -1352,12 +1549,20 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         vadConfig: currentSpawnVadConfig(),
         deviceId: deviceId,
       });
+      await startReferenceTap();
+      // The engine may emit events from this point on; the listeners gate on
+      // the engine lifetime, not on the React state that flips a render later.
+      engineActiveRef.current = true;
+      partialTrackerRef.current.stop();
+      stopRequestedRef.current = false;
+      stopFlushSeenRef.current = false;
+      setCapturing(true);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
       setIsPopoverOpen(true);
     }
-  }, [vadConfig, selectedAudioDevices.output?.id]);
+  }, [vadConfig, selectedAudioDevices.output?.id, startReferenceTap, stopReferenceTap]);
 
   // Start the VAD engine inside a session that is already on screen: no
   // conversation reset, no transcript wipe, no stop-then-start. Called only
@@ -1376,7 +1581,6 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         return;
       }
 
-      setCapturing(true);
       setIsPopoverOpen(true);
       setLivePartial("");
       livePartialRef.current = "";
@@ -1392,6 +1596,14 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         vadConfig: currentSpawnVadConfig(),
         deviceId: deviceId,
       });
+      await startReferenceTap();
+      // The engine may emit events from this point on; the listeners gate on
+      // the engine lifetime, not on the React state that flips a render later.
+      engineActiveRef.current = true;
+      partialTrackerRef.current.stop();
+      stopRequestedRef.current = false;
+      stopFlushSeenRef.current = false;
+      setCapturing(true);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
@@ -1399,7 +1611,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     } finally {
       startingRef.current = false;
     }
-  }, [vadConfig, selectedAudioDevices.output?.id]);
+  }, [vadConfig, selectedAudioDevices.output?.id, startReferenceTap]);
 
   const stopCapture = useCallback(async () => {
     try {
@@ -1409,7 +1621,12 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       getAiTurns().cancel();
 
       // Stop the audio capture
+      await stopReferenceTap();
       await invoke<string>("stop_system_audio_capture");
+      engineActiveRef.current = false;
+      partialTrackerRef.current.stop();
+      stopRequestedRef.current = false;
+      stopFlushSeenRef.current = false;
 
       // Reset ALL states
       setCapturing(false);
@@ -1428,41 +1645,64 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       setError(`Failed to stop capture: ${errorMessage}`);
       console.error("Stop capture error:", err);
     }
-  }, []);
+  }, [stopReferenceTap]);
 
-  // Spacebar / Stop in Manual and "Auto · On questions": stop the engine and
-  // send what was collected — held utterances plus the live partial, unless
-  // that partial is already the tail of the held text. When a transcript is
-  // mid-flight the stop is remembered and applied once it lands, so a fast
-  // press still sends the utterance instead of dropping it; a second press
-  // during that window is ignored.
+  // Spacebar / Stop in Manual and "Auto · On questions".
+  //
+  // The engine now FLUSHES an in-flight utterance when it is stopped (the
+  // Rust VAD emits the buffered speech as a final instead of dropping it),
+  // so the stop sequence is: freeze partials, request the stop, stop the
+  // engine, and let the flushed final ride the normal queue — the deferred
+  // stop policy sends held text + flushed text exactly once. The fallback
+  // covers the case where the VAD was NOT mid-utterance: no flush will ever
+  // arrive, so the held text is sent directly instead of stranding.
   const manualStopAndSend = useCallback(async () => {
     if (!capturingRef.current) return;
 
     if (sttInFlightRef.current) {
+      // A finalized utterance is mid-STT. Its landing applies the stop
+      // (planUtterance's stop-and-send), which stops the engine — whose
+      // flush then lands and is sent by the late-final rule. The UI unlocks
+      // here (capturing=false); the transcript's processing state stays
+      // honest about the STT round that is running.
       stopRequestedRef.current = true;
+      setCapturing(false);
       return;
     }
 
-    const held = pendingTranscriptRef.current;
-    const partial = livePartialRef.current.trim();
-    pendingTranscriptRef.current = "";
+    // Nothing is mid-STT. Freeze partials FIRST: from here every partial
+    // response describes audio the engine is about to flush as a final, so
+    // applying one would resurface words the final will also carry.
+    partialTrackerRef.current.stop();
+    setLivePartial("");
+    livePartialRef.current = "";
+    stopRequestedRef.current = true;
+    stopFlushSeenRef.current = false;
 
-    const combined =
-      partial && !held.endsWith(partial)
-        ? held
-          ? `${held} ${partial}`
-          : partial
-        : held;
+    await stopReferenceTap();
+    try {
+      await invoke<string>("stop_system_audio_capture");
+    } catch (err) {
+      console.error("Failed to stop capture:", err);
+    }
+    // The engine is stopped; any flush was emitted before the invoke
+    // resolved. Only now does the UI state flip — the flush event can never
+    // be dropped by a render race.
+    setCapturing(false);
+    setIsProcessing(false);
 
-    // "system", not "microphone": `held` is the Manual-mode buffer that
-    // `finalizeTranscriptSegment` (the system-audio path) fills, and `partial`
-    // is that same capture's live VAD partial. The Manual stop button is the
-    // "send me the room" action, so the model is told the words came from the
-    // room. Labelling this `User` is what made the model answer as if the user
-    // had asked.
-    await stopAndSend(combined, "system");
-  }, [stopAndSend]);
+    // Grace window for the flushed final to arrive. If none did, the VAD was
+    // not mid-utterance and nothing more will come: send the held text.
+    window.setTimeout(() => {
+      if (stopRequestedRef.current && !stopFlushSeenRef.current) {
+        stopRequestedRef.current = false;
+        stopFlushSeenRef.current = false;
+        const held = pendingTranscriptRef.current;
+        pendingTranscriptRef.current = "";
+        if (held.trim()) void stopAndSendRef.current?.(held, "system");
+      }
+    }, 600);
+  }, [stopAndSend, stopReferenceTap]);
 
   const handleSetup = useCallback(async () => {
     try {
@@ -1518,9 +1758,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   useEffect(() => {
     return () => {
       getAiTurns().cancel();
+      void stopReferenceTap();
       invoke("stop_system_audio_capture").catch(() => {});
     };
-  }, []);
+  }, [stopReferenceTap]);
 
   // Debounced save (Phase 4 R9): coalescing, and it never drops the newest state.
   useEffect(() => {
@@ -1549,6 +1790,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   );
 
   const startNewConversation = useCallback(() => {
+    persistedConversationIdRef.current = null;
     setConversation({
       id: generateConversationId("sysaudio"),
       title: "",

@@ -300,7 +300,52 @@ export const useGlobalShortcuts = () => {
       }
     };
 
-    setupEventListeners();
+    // Disposed-flag teardown: without a cleanup, every mount leaked the whole
+    // listener set on the event bus (StrictMode doubles it in dev) and each
+    // hotkey event then fired once per leaked copy. An await that resolves
+    // after cleanup unlistens itself.
+    let disposed = false;
+    const unlistens: Array<() => void> = [];
+
+    const track = (unlisten: () => void): void => {
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      unlistens.push(unlisten);
+    };
+
+    void setupEventListeners().then(() => {
+      // The setup stored each handle in globalEventListeners; snapshot them
+      // under the disposed-flag tracker.
+      const handles = [
+        globalEventListeners.audio,
+        globalEventListeners.screenshot,
+        globalEventListeners.systemAudio,
+        globalEventListeners.customShortcut,
+        globalEventListeners.registrationError,
+      ];
+      for (const handle of handles) {
+        if (handle) track(handle);
+      }
+    });
+
+    return () => {
+      disposed = true;
+      for (const unlisten of unlistens) {
+        try {
+          unlisten();
+        } catch {
+          // Already gone.
+        }
+      }
+      unlistens.length = 0;
+      globalEventListeners.audio = undefined;
+      globalEventListeners.screenshot = undefined;
+      globalEventListeners.systemAudio = undefined;
+      globalEventListeners.customShortcut = undefined;
+      globalEventListeners.registrationError = undefined;
+    };
   }, []);
 
   return {

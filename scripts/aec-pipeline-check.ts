@@ -1,0 +1,241 @@
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
+import { createMicAec } from "../src/lib/aec/index.ts";
+import { releaseMicAecSession } from "../src/lib/aec/release.ts";
+import { AecRecoveryPolicy } from "../src/lib/aec/recovery.ts";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const hook = readFileSync(join(ROOT, "src/hooks/useVoiceInput.ts"), "utf8");
+const worker = readFileSync(join(ROOT, "src/lib/aec/localvqe-worker.ts"), "utf8");
+const micAec = readFileSync(join(ROOT, "src/lib/aec/mic-aec.ts"), "utf8");
+const reference = readFileSync(join(ROOT, "src/lib/aec/reference.ts"), "utf8");
+const refScheduler = readFileSync(join(ROOT, "src/lib/aec/ref-scheduler.ts"), "utf8");
+const releaseSource = readFileSync(join(ROOT, "src/lib/aec/release.ts"), "utf8");
+const worklet = readFileSync(join(ROOT, "public/aec/mic-aec-worklet.js"), "utf8");
+const shippedWorklet = worklet;
+const systemAudio = readFileSync(join(ROOT, "src/hooks/useSystemAudio.ts"), "utf8");
+const toggle = readFileSync(join(ROOT, "src/pages/audio/components/AecToggle.tsx"), "utf8");
+
+console.log("AEC pipeline - Step 0 bypass preserves the original mic stream");
+
+const source = {} as MediaStream;
+const enabled = createMicAec(source, true);
+assert.strictEqual(enabled.output, source, "enabled bypass must return source identity");
+assert.strictEqual(enabled.source, source, "session must retain the original source");
+assert.deepEqual(enabled.status, { state: "bypass", reason: "no-reference" });
+console.log("  ok    enabled bypass returns the exact source stream object");
+
+const disabled = createMicAec(source, false);
+assert.strictEqual(disabled.output, source, "disabled path must return source identity");
+assert.strictEqual(disabled.source, source, "disabled session must retain the source");
+assert.deepEqual(disabled.status, { state: "off" });
+console.log("  ok    disabled path returns the exact source stream object");
+
+assert.match(hook, /createMicAec\(source, readAecEnabled\(\)\)/);
+const sessionReleaseCalls = hook.match(/releaseMicAecSession\(session\)/g) ?? [];
+assert.ok(sessionReleaseCalls.length >= 2,
+  `expected releaseMicAecSession(session) in pause and setup cleanup, found ${sessionReleaseCalls.length}`);
+assert.match(hook, /releaseMicAecSession\(micAec\)/);
+assert.match(releaseSource, /session\.source\.getTracks\(\)\.forEach\(\(track\) => track\.stop\(\)\)/);
+assert.match(releaseSource, /session\.dispose\(\)/);
+const releaseOrder: string[] = [];
+releaseMicAecSession({
+  source: { getTracks: () => [{ stop: () => releaseOrder.push("track-stop") }] },
+  dispose: () => releaseOrder.push("dispose"),
+} as unknown as Parameters<typeof releaseMicAecSession>[0]);
+assert.deepEqual(releaseOrder, ["track-stop", "dispose"]);
+console.log("  ok    microphone acquisition uses the saved toggle and teardown stops source");
+console.log("  ok    mic-release helper stops the owned source before disposing the AEC session");
+
+const assetPaths = [
+  "public/localvqe/localvqe.js",
+  "public/localvqe/localvqe-glue.mjs",
+  "public/localvqe/localvqe.wasm",
+  "public/localvqe/localvqe-pi-aec-v1-49k-f32.gguf",
+];
+for (const assetPath of assetPaths) {
+  assert.ok(existsSync(join(ROOT, assetPath)), `missing bundled LocalVQE asset: ${assetPath}`);
+}
+assert.match(worker, /import localVqeGlueUrl from "\/localvqe\/localvqe-glue\.mjs\?url"/);
+assert.match(worker, /import\(\/\* @vite-ignore \*\/ localVqeGlueUrl\)/);
+assert.match(worker, /new URL\(MODEL_URL, scope\.location\.origin\)/);
+assert.match(worker, /const MODEL_URL = "\/localvqe\/localvqe-pi-aec-v1-49k-f32\.gguf"/);
+assert.match(worker, /if \(!context\)/, "worker must reject a null LocalVQE context");
+assert.match(worker, /if \(gap\) currentApi\.reset\(context\)/);
+console.log("  ok    pinned worker assets exist; worker checks null context and resets on a gap");
+
+const acquireStart = hook.indexOf("const acquire = async () => {");
+const acquireEnd = hook.indexOf("const track = source.getAudioTracks()[0];", acquireStart);
+const acquireBody = hook.slice(acquireStart, acquireEnd);
+assert.ok(acquireStart >= 0 && acquireEnd > acquireStart, "could not locate microphone acquire block");
+assert.ok(acquireBody.indexOf("releaseMicAecSession(previousSession)") < acquireBody.indexOf("createMicAec(source"),
+  "acquire must release the previous mic session before replacing its ref");
+const activeRouteIndex = micAec.indexOf("input.disconnect();\n        rawRouteConnected = false;");
+const disposedBeforeActiveRoute = micAec.lastIndexOf("if (disposed)", activeRouteIndex);
+assert.ok(activeRouteIndex >= 0 && disposedBeforeActiveRoute >= 0 && disposedBeforeActiveRoute < activeRouteIndex,
+  "activation must check disposed before replacing the raw output with the AEC route");
+const activationCatchIndex = micAec.indexOf("} catch (error) {", activeRouteIndex);
+const disposedCatchIndex = micAec.indexOf("if (disposed) return;", activationCatchIndex);
+const catchCleanupIndex = micAec.indexOf("detachTrackMonitor();", activationCatchIndex);
+assert.ok(activationCatchIndex > activeRouteIndex && disposedCatchIndex > activationCatchIndex && disposedCatchIndex < catchCleanupIndex,
+  "activation catch must leave output and status untouched when disposal already completed");
+// Drift sheds are TELEMETRY ONLY in mic-aec — the first cut of the
+// scheduled-reference architecture wired a bypass ladder to them, and it
+// fired on a startup transient (mic delay node settling, schedule-ahead
+// priming) within the first stats tick of EVERY activation. The honest
+// arbiter is the engine conceal budget; the shed/starved counters ride the
+// telemetry line and the bypass error strings.
+assert.ok(!micAec.includes("noteOverflows("),
+  "shed counts must never gate a bypass — that ladder killed the AEC on its own startup transient");
+assert.match(micAec, /lastStats = stats;/);
+assert.match(micAec, /recovery\.noteWorkerFailure\(\)/);
+assert.match(micAec, /worker\?\.postMessage\(\{ type: "reset" \}\)/);
+assert.match(micAec, /LocalVQE failed after its recovery reset/);
+assert.ok(!micAec.includes("takeRef"),
+  "the main thread must never touch per-hop reference consumption — the AudioWorklet owns the realtime path");
+// The reference is a SCHEDULED AUDIO STREAM, not main-thread messages. The
+// old design forwarded every frame across the UI thread; each UI stall
+// drained the worklet's FIFO dry (the live log showed ref depth swinging
+// 0.20 s ↔ 0.01 s, 65 underruns per 5 s) and the honest bypass fired — the
+// AEC never got to run long enough on steady audio to cancel anything.
+assert.match(worklet, /collectRefHops\(input\) \{/);
+assert.match(worklet, /const refInput = inputs\[1\]\?\.\[0\];/);
+assert.match(worklet, /takeRefHop\(\) \{/);
+assert.ok(!worklet.includes("refFrames") && !worklet.includes("trimToTarget") && !worklet.includes("onRefFrame"),
+  "the FIFO machinery is gone: the reference arrives as a live second audio input");
+assert.match(reference, /attach\(context: AudioContext, destination: AudioNode\): void/);
+assert.match(reference, /source\.start\(when\);/);
+assert.match(refScheduler, /const SCHEDULE_AHEAD_SECONDS = 0\.4/);
+assert.match(refScheduler, /this\.target\.createBuffer\(1, chunk\.length, 16000\)/);
+assert.match(refScheduler, /this\.target\.play\(buffer, this\.nextStartTime\);/);
+assert.match(micAec, /numberOfInputs: 2/);
+assert.match(micAec, /micDelay\.delayTime\.value = MIC_DELAY_SECONDS;/);
+assert.match(micAec, /refBus\.connect\(bridge, 0, 1\);/);
+assert.match(micAec, /feed\.attach\(audioContext, refBus\);/);
+assert.ok(!micAec.includes("attachForwarder"),
+  "frame forwarding across the UI thread is the failure mode this architecture removes");
+assert.match(worker, /if \(gap\) currentApi\.reset\(context\)/);
+assert.match(micAec, /micTrack\.addEventListener\("ended"/);
+assert.match(micAec, /settings\.deviceId !== initialDeviceId/);
+assert.match(micAec, /settings\.sampleRate !== initialTrackSampleRate/);
+assert.match(micAec, /const teardownForSourceChange = \(error: Error\)/);
+assert.match(micAec, /disposeSession\(true\)/);
+assert.match(micAec, /const disposeSession = \(preserveOutput = false\): void => \{[\s\S]*?disconnectGraph\(\);[\s\S]*?stopWorker\(\);[\s\S]*?source\.getTracks\(\)\.forEach\(\(track\) => track\.stop\(\)\)/);
+assert.match(worker, /if \(!modulePromise\)/);
+assert.match(worker, /pending\.catch\(\(\) => \{[\s\S]*?modulePromise === pending[\s\S]*?modulePromise = null/);
+assert.match(worklet, /pushSilence\(samples\) \{[\s\S]*?this\.playback\.push\(0\)/);
+console.log("  ok    acquire disposes overwritten sessions; gaps reset; repeated overflow/failures bypass");
+console.log("  ok    ended/device/rate changes release source and graph; rejected module load can retry");
+
+const recovery = new AecRecoveryPolicy();
+for (let i = 0; i < 4; i++) assert.equal(recovery.noteOverflows(1), "gap");
+assert.equal(recovery.noteOverflows(1), "bypass");
+const spacedOverflowRecovery = new AecRecoveryPolicy();
+for (let i = 0; i < 5; i++) {
+  assert.equal(spacedOverflowRecovery.noteOverflows(1), "gap");
+  for (let hop = 0; hop < 20; hop++) spacedOverflowRecovery.noteWorkerSuccess();
+}
+// Distinguishing: threshold is exactly 20. 19 healthy hops must NOT decay, 20 must.
+// Setup: 4 rapid overflows (no decay) -> count 4. Then test next overflow after 19 vs 20.
+const thresholdRecovery = new AecRecoveryPolicy();
+for (let i = 0; i < 4; i++) thresholdRecovery.noteOverflows(1); // count 4 (no successes)
+for (let h = 0; h < 19; h++) thresholdRecovery.noteWorkerSuccess(); // healthyHops 19, no decay
+assert.equal(thresholdRecovery.noteOverflows(1), "bypass", "19 successes must NOT decay: 5th rapid overflow must bypass");
+const thresholdRecovery2 = new AecRecoveryPolicy();
+for (let i = 0; i < 4; i++) thresholdRecovery2.noteOverflows(1); // count 4
+for (let h = 0; h < 20; h++) thresholdRecovery2.noteWorkerSuccess(); // healthyHops 20 -> count 3
+assert.equal(thresholdRecovery2.noteOverflows(1), "gap", "20 successes must decay: next overflow must be gap");
+// Distinguishing streak-reset: overflow resets healthyHops=0.
+// Without reset, two 10-success gaps would sum to 20 and decay once.
+const streakRecovery = new AecRecoveryPolicy();
+assert.equal(streakRecovery.noteOverflows(1), "gap"); // c1
+for (let h = 0; h < 10; h++) streakRecovery.noteWorkerSuccess(); // hops 10
+assert.equal(streakRecovery.noteOverflows(1), "gap"); // c2
+for (let h = 0; h < 10; h++) streakRecovery.noteWorkerSuccess(); // with reset: hops 10, not 20
+assert.equal(streakRecovery.noteOverflows(1), "gap"); // c3
+assert.equal(streakRecovery.noteOverflows(1), "gap"); // c4
+assert.equal(streakRecovery.noteOverflows(1), "bypass"); // c5
+const failureRecovery = new AecRecoveryPolicy();
+assert.equal(failureRecovery.noteWorkerFailure(), "continue");
+assert.equal(failureRecovery.noteWorkerFailure(), "continue");
+assert.equal(failureRecovery.noteWorkerFailure(), "continue");
+assert.equal(failureRecovery.noteWorkerFailure(), "reset");
+assert.equal(failureRecovery.noteWorkerFailure(), "bypass");
+const resetOnSuccess = new AecRecoveryPolicy();
+resetOnSuccess.noteWorkerFailure();
+resetOnSuccess.noteWorkerFailure();
+resetOnSuccess.noteWorkerSuccess();
+assert.equal(resetOnSuccess.noteWorkerFailure(), "continue");
+console.log("  ok    recovery bypasses on five rapid overflows, decays spaced overflows after 20 healthy hops, and resets after four failures");
+
+assert.match(micAec, /import \{ createLocalVqeWorker \} from "\.\/localvqe-worker-factory\.ts"/);
+assert.match(hook, /await session\.activate\(context, getActiveAecReferenceFeed\(\)/);
+assert.match(micAec, /if \(!enabled \|\| disposed \|\| activating\) return/);
+assert.match(micAec, /if \(!feed \|\| feed\.status\.state === "degraded"/);
+assert.match(micAec, /worker\.postMessage\(\{ type: "init", port: workerChannel\.port1 \}, \[workerChannel\.port1\]\)/);
+// The reference reaches the worklet as a scheduled audio stream on input 1 —
+// NOT as port messages (an init-transferred refPort was once never unwrapped
+// and every frame was silently dropped) and NOT as per-frame UI-thread
+// forwarding (UI stalls starved the FIFO into the bypass).
+assert.match(worklet, /const reference = this\.takeRefHop\(\);/);
+assert.match(worklet, /type: "process", id, mic: frame, ref: reference, gap/);
+assert.match(worklet, /const AEC_SAMPLE_RATE = 16000/);
+assert.match(worker, /localvqe_process_frame_f32/);
+assert.match(systemAudio, /if \(!readAecEnabled\(\)\) return/);
+assert.match(systemAudio, /setActiveAecReferenceFeed\(feed\)/);
+// The speech listeners register ONCE for the hook's lifetime with a
+// disposed-flag self-unlisten. The old shape re-registered on every AI
+// answer (conversation.messages.length was a dep) and its cleanup read
+// unlisten handles that were still undefined whenever cleanup beat the
+// await — every StrictMode mount and navigation stranded a listener pair
+// on the event bus, and each speech-detected event was then enqueued once
+// per leaked copy: the same utterance transcribed and sent to the model
+// two, three, N times.
+assert.match(systemAudio, /if \(disposed\) \{\s*\n\s*speechUnlisten\(\);/);
+assert.match(
+  systemAudio,
+  /unlistens\.forEach\(\(unlisten\) => unlisten\(\)\);\s*\n\s*\};\s*\n\s*\}, \[\]\);/,
+  "the speech listener effect must register once per mount (empty deps)"
+);
+assert.match(hook, /setAecStatus\(session\.status\)/);
+assert.match(hook, /releaseMicAecSession\(session\)/);
+assert.match(toggle, /does not guarantee echo removal/);
+console.log("  ok    enabled mic path consumes the shared reference, resamples to 16 kHz, and sends hops to the worker");
+console.log("  ok    failures bypass, AEC status is separate, teardown stops source, and toggle copy makes no efficacy claim");
+
+let registeredProcessorName = "";
+let registeredProcessor: (new () => {
+  port: { onmessage: ((event: { data: { type: string } }) => void) | null };
+  process: (inputs: Float32Array[][], outputs: Float32Array[][]) => boolean;
+}) | undefined;
+class WorkletHarnessBase {
+  port = {
+    onmessage: null as ((event: { data: { type: string } }) => void) | null,
+    postMessage: () => {},
+  };
+}
+runInNewContext(shippedWorklet, {
+  AudioWorkletProcessor: WorkletHarnessBase,
+  Float32Array,
+  sampleRate: 16_000,
+  currentTime: 0,
+  console: { warn: () => {} },
+  registerProcessor: (name: string, processor: typeof registeredProcessor) => {
+    registeredProcessorName = name;
+    registeredProcessor = processor;
+  },
+});
+assert.equal(registeredProcessorName, "hyperly-mic-aec-bridge");
+assert.ok(registeredProcessor, "shipped worklet must register a processor");
+const workletInstance = new registeredProcessor();
+workletInstance.port.onmessage?.({ data: { type: "bypass" } });
+const bypassInput = new Float32Array([0.1, -0.2, 0.3, -0.4]);
+const bypassOutput = new Float32Array(bypassInput.length);
+assert.equal(workletInstance.process([[bypassInput]], [[bypassOutput]]), true);
+assert.deepEqual(Array.from(bypassOutput), Array.from(bypassInput));
+console.log("  ok    shipped AudioWorklet registers and copies mic samples in bypass mode");
+
+console.log("PASS - the Step 0 AEC bypass is an identity-preserving no-op.");

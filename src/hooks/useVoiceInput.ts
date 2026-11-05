@@ -5,10 +5,13 @@ import { SpeechBlockQueue } from "@/lib/speech-block-queue";
 import { getTranscriptStore } from "@/lib/database/transcript-adapter";
 import { floatArrayToWav } from "@/lib/utils";
 import { readStoredVadConfig } from "@/lib/vad-config";
-import { getMicrophoneStream } from "@/lib/microphone";
+import { getMicrophoneStream, setAecStatus } from "@/lib/microphone";
 import { micRedemptionMs } from "@/lib/turn-boundary";
 import { audioContextPool } from "@/lib/audio-context";
 import { speechThresholds } from "@/lib/vad-sensitivity";
+import { createMicAec, readAecEnabled, type AecStatus, type MicAecSession } from "@/lib/aec";
+import { releaseMicAecSession } from "@/lib/aec/release";
+import { getActiveAecReferenceFeed } from "@/lib/aec/reference";
 import { useApp } from "@/contexts";
 
 /**
@@ -70,6 +73,8 @@ export interface VoiceInputState {
   listening: boolean;
   loading: boolean;
   errored: string | false;
+  /** AEC telemetry is separate from the browser-applied processing report. */
+  aecStatus?: AecStatus;
 }
 
 // How often a live partial transcript is produced mid-utterance.
@@ -166,12 +171,14 @@ export const useVoiceInput = ({
   const [listening, setListening] = useState(false);
   const [loading, setLoading] = useState(true);
   const [errored, setErrored] = useState<string | false>(false);
+  const [aecStatus, setAecStatusState] = useState<AecStatus | undefined>();
   // Flips true once an instance exists and can be started. `active` is applied
   // against this rather than against mount, so a start requested while the
   // model is still loading is applied when it finishes instead of being lost.
   const [ready, setReady] = useState(false);
 
   const vadRef = useRef<MicVAD | null>(null);
+  const micAecRef = useRef<MicAecSession | null>(null);
   // Bumped by every teardown. Async work captures the value it began with and
   // discards its result if the instance it was acting on has since been
   // replaced — otherwise a `start()` that resolves late would report state for
@@ -349,14 +356,41 @@ export const useVoiceInput = ({
       // Core Audio / PulseAudio) endpoint id, which the WebView does not
       // recognise — passing it straight to getUserMedia threw
       // OverconstrainedError and the mic captured nothing at all.
-      const stream = await getMicrophoneStream(micDeviceId, micDeviceName);
-      const track = stream.getAudioTracks()[0];
+      const source = await getMicrophoneStream(micDeviceId, micDeviceName);
+      const previousSession = micAecRef.current;
+      if (previousSession) {
+        releaseMicAecSession(previousSession);
+        if (micAecRef.current === previousSession) micAecRef.current = null;
+      }
+      const session = createMicAec(source, readAecEnabled());
+      micAecRef.current = session;
+      setAecStatus(session.status);
+      setAecStatusState(session.status);
+      const context = audioContextRef.current;
+      if (context) {
+        // Do not hold up vad-web startup while the local worker loads. activate
+        // installs a raw pass-through output graph synchronously, then replaces
+        // it with the AEC route only after the worker and worklet are ready.
+        void (async () => {
+          await session.activate(context, getActiveAecReferenceFeed(), (nextStatus) => {
+            setAecStatus(nextStatus);
+            setAecStatusState(nextStatus);
+          });
+          setAecStatus(session.status);
+          setAecStatusState(session.status);
+        })().catch((error) => {
+          console.warn("[aec] background activation failed; microphone startup continues:", error);
+          setAecStatus(session.status);
+          setAecStatusState(session.status);
+        });
+      }
+      const track = source.getAudioTracks()[0];
       console.info(
-        `[voice] mic acquired: ${stream.getAudioTracks().length} track(s), ` +
+        `[voice] mic acquired: ${source.getAudioTracks().length} track(s), ` +
           `muted=${track?.muted}, enabled=${track?.enabled}, ` +
           `settings=${JSON.stringify(track?.getSettings?.() ?? {})}`
       );
-      return stream;
+      return session.output;
     };
 
     // Built here rather than in `acquire` because `MicVAD.start()` reads it
@@ -412,6 +446,14 @@ export const useVoiceInput = ({
           // dropped the gain and echo settings. Both directions go through
           // `acquire`, so the mic that comes back is the one the user selected.
           pauseStream: async (stream: MediaStream) => {
+            const session = micAecRef.current;
+            if (session?.output === stream) {
+              releaseMicAecSession(session);
+              setAecStatus(undefined);
+              setAecStatusState(undefined);
+              if (micAecRef.current === session) micAecRef.current = null;
+              return;
+            }
             stream.getTracks().forEach((track) => track.stop());
           },
           resumeStream: acquire,
@@ -478,6 +520,11 @@ export const useVoiceInput = ({
       } catch (error) {
         // Model/worklet load failed. This is recoverable: the effect re-runs on
         // a device change, and nothing here latches the mic off.
+        const session = micAecRef.current;
+        releaseMicAecSession(session);
+        setAecStatus(undefined);
+        setAecStatusState(undefined);
+        micAecRef.current = null;
         if (disposed) return;
         setLoading(false);
         setErrored(messageOf(error));
@@ -506,6 +553,11 @@ export const useVoiceInput = ({
       const vad = vadRef.current;
       vadRef.current = null;
       if (vad) void safeDestroy(vad);
+      const micAec = micAecRef.current;
+      micAecRef.current = null;
+      releaseMicAecSession(micAec);
+      setAecStatus(undefined);
+      setAecStatusState(undefined);
       // We supplied the context, so vad-web's own close — guarded by
       // `ownsAudioContext` — never runs. The pool owns the close now (Phase 4
       // R11): it closes only when the LAST holder releases, so this instance
@@ -590,5 +642,6 @@ export const useVoiceInput = ({
     listening,
     loading,
     errored,
+    aecStatus,
   };
 };

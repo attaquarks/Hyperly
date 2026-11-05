@@ -33,7 +33,9 @@
     "preview": "vite preview",
     "guards": "node scripts/run-guards.mjs",
     "tauri": "node scripts/tauri-with-path.cjs",
-    "tauri:raw": "tauri"
+    "tauri:raw": "tauri",
+    "test:e2e": "npm run test --prefix e2e",
+    "test:e2e:smoke": "npm run test:smoke --prefix e2e"
   },
   "dependencies": {
     "@bany/curl-to-json": "^1.2.8",
@@ -65,11 +67,11 @@
     "react-error-boundary": "^6.0.0",
     "react-router-dom": "^7.9.5",
     "recharts": "^2.15.4",
-    "rehype-katex": "^7.0.1",
+    "rehype-katex": "^1.2.0",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0",
+    "remark-math": "^3.0.1",
     "shiki": "^3.12.2",
-    "streamdown": "^1.6.10",
+    "streamdown": "^2.7.1",
     "tailwind-merge": "^3.3.1",
     "tailwindcss": "^4.1.12"
   },

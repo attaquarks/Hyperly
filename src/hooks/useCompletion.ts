@@ -1025,10 +1025,15 @@ export const useCompletion = (capturing: boolean = false) => {
   }, [captureFullScreen, captureRegion]);
 
   useEffect(() => {
-    let unlisten: any;
+    // Disposed-flag pattern (see useChatCompletion): without it, a listener
+    // whose await resolves after cleanup strands on the event bus and every
+    // captured-selection event is processed once per leaked copy.
+    let disposed = false;
+    const unlistens: Array<() => void> = [];
 
     const setupListener = async () => {
-      unlisten = await listen("captured-selection", async (event: any) => {
+      const capturedUnlisten = await listen("captured-selection", async (event: any) => {
+        if (disposed) return;
         if (!screenshotInitiatedByThisContext.current) {
           return;
         }
@@ -1059,14 +1064,18 @@ export const useCompletion = (capturing: boolean = false) => {
           }, 100);
         }
       });
+      if (disposed) {
+        capturedUnlisten();
+        return;
+      }
+      unlistens.push(capturedUnlisten);
     };
 
-    setupListener();
+    void setupListener();
 
     return () => {
-      if (unlisten) {
-        unlisten();
-      }
+      disposed = true;
+      unlistens.forEach((unlisten) => unlisten());
     };
   }, [handleScreenshotSubmit]);
 

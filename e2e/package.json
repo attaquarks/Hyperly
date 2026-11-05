@@ -1,0 +1,19 @@
+{
+  "name": "hyperly-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "wdio run ./wdio.conf.ts",
+    "test:smoke": "wdio run ./wdio.conf.ts --spec ./test/smoke.spec.ts"
+  },
+  "devDependencies": {
+    "@wdio/cli": "^9.32.0",
+    "@wdio/junit-reporter": "^9.32.0",
+    "@wdio/local-runner": "^9.32.0",
+    "@wdio/mocha-framework": "^9.32.0",
+    "@wdio/spec-reporter": "^9.32.0",
+    "@wdio/tauri-service": "^1.5.1",
+    "typescript": "^5.9.3",
+    "webdriverio": "^9.32.0"
+  }
+}
