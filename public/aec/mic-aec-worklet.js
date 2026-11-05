@@ -10,10 +10,14 @@ const OUTPUT_PREROLL_SAMPLES = AEC_SAMPLE_RATE * 0.064;
  * with every UI stall, which starved the engine into the bypass.
  */
 const REF_QUEUE_LIMIT = 8;
-/** In-flight process hops before a new hop is concealed. The engine drains a
- * full queue between stalls, so the queue must absorb a stall and let the
- * engine catch up; 16 hops = 256 ms matches the output-queue bound. */
-const WORKER_INFLIGHT_LIMIT = 16;
+/** In-flight process hops before a new hop is concealed. The queue is the
+ * stall absorber: 64 hops ≈ 1 s of worker lag rides here while the engine
+ * catches up (it runs ~5× realtime when not CPU-starved); the main thread's
+ * output shed resyncs latency after the catch-up. The old cap of 16 let a
+ * single 300 ms machine hiccup convert into concealed hops — and with the
+ * old reference FIFO that cascaded into the bypass. Sustained inability past
+ * this absorber still surfaces through the concealment budget (96/5 s). */
+const WORKER_INFLIGHT_LIMIT = 64;
 /** Conceal-budget window in context seconds; the budgets themselves
  * (engine 16, reference 64) are main-thread policy fed by "concealed". */
 const CONCEAL_WINDOW_SECONDS = 5;

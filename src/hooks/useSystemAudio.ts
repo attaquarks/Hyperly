@@ -1419,15 +1419,28 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       if (!transcript) return;
 
       // D1 Gap 3 (dedup half): the mic frequently re-captures room audio
-      // through the speakers when WebView2 denies echoCancellation. If this
-      // utterance is a near-duplicate of a recent system utterance, it is
+      // through the speakers when echo suppression is imperfect. If this
+      // utterance is a near-duplicate of recent room text, it is
       // bleed-through, not the user — suppress it BEFORE it reaches the
-      // transcript or the AI. Suppressed copies are dropped, not held: the
-      // room's own segment already carries the words.
+      // transcript or the AI. The candidate set includes the room's LIVE
+      // partial: the mic path is fast, and its copy of the room's words
+      // often lands BEFORE the room's own final does — that ordering was
+      // exactly the "user label shows the same transcription, but faster
+      // than the system label" report (and its flip side, "sometimes it
+      // vanished on stop", was this dedup winning the race).
+      const systemCandidates = livePartialRef.current.trim()
+        ? [
+            ...systemHistoryRef.current,
+            {
+              atSeconds: elapsedSeconds(),
+              text: livePartialRef.current.trim(),
+            },
+          ]
+        : systemHistoryRef.current;
       if (
         isMicEchoOfSystem(
           transcript,
-          systemHistoryRef.current,
+          systemCandidates,
           elapsedSeconds()
         )
       ) {

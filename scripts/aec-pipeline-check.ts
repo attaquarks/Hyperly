@@ -82,8 +82,15 @@ const disposedCatchIndex = micAec.indexOf("if (disposed) return;", activationCat
 const catchCleanupIndex = micAec.indexOf("detachTrackMonitor();", activationCatchIndex);
 assert.ok(activationCatchIndex > activeRouteIndex && disposedCatchIndex > activationCatchIndex && disposedCatchIndex < catchCleanupIndex,
   "activation catch must leave output and status untouched when disposal already completed");
-assert.match(micAec, /if \(stats\.overflows !== lastReferenceOverflowCount\)/);
-assert.match(micAec, /recovery\.noteOverflows\(newOverflows\)/);
+// Drift sheds are TELEMETRY ONLY in mic-aec — the first cut of the
+// scheduled-reference architecture wired a bypass ladder to them, and it
+// fired on a startup transient (mic delay node settling, schedule-ahead
+// priming) within the first stats tick of EVERY activation. The honest
+// arbiter is the engine conceal budget; the shed/starved counters ride the
+// telemetry line and the bypass error strings.
+assert.ok(!micAec.includes("noteOverflows("),
+  "shed counts must never gate a bypass — that ladder killed the AEC on its own startup transient");
+assert.match(micAec, /lastStats = stats;/);
 assert.match(micAec, /recovery\.noteWorkerFailure\(\)/);
 assert.match(micAec, /worker\?\.postMessage\(\{ type: "reset" \}\)/);
 assert.match(micAec, /LocalVQE failed after its recovery reset/);

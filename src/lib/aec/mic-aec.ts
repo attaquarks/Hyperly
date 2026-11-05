@@ -23,14 +23,19 @@ const WARMUP_TIMEOUT_MS = 10_000;
  * The cost is 200 ms of latency on the user's own transcript path.
  */
 const MIC_DELAY_SECONDS = 0.2;
-/** Engine-conceal budget: concealed hops within the window that mean the
- * pipeline genuinely cannot keep up; anything below is scheduling jitter. */
-const ENGINE_CONCEAL_BYPASS_COUNT = 16;
-/** Reference-conceal budget: reference underruns are transient by nature (the
- * FIFO refills in ~20ms and a dead feed reports feed-degraded immediately),
- * so they tolerate ~1s of consecutive silence in 5s before the honest bypass. */
-const REF_CONCEAL_BYPASS_COUNT = 64;
+/**
+ * Engine-conceal budget: concealed hops within the window that mean the
+ * pipeline genuinely cannot keep up. 96 over 5 s absorbs a full ~1.5 s
+ * worker stall (a saturated machine hiccup) without abandoning the session;
+ * anything SUSTAINED past that still bypasses honestly. The in-flight queue
+ * (64 hops ≈ 1 s) absorbs the stall before concealment even starts.
+ */
+const ENGINE_CONCEAL_BYPASS_COUNT = 96;
 const CONCEAL_BYPASS_WINDOW_MS = 5_000;
+/** Latest worklet stats, attached to bypass errors so a failure names its
+ * numbers (the worker once sat at 0.15× realtime under machine load — the
+ * message must say so instead of guessing). */
+let lastStats: WorkletStats | null = null;
 const HOP_TELEMETRY_INTERVAL_MS = 1_000;
 
 interface WorkerReady {
@@ -187,14 +192,12 @@ export const createMicAec = (
   let micDelayNode: DelayNode | null = null;
   let refBusNode: GainNode | null = null;
   let rawRouteConnected = false;
-  let lastReferenceOverflowCount = 0;
   let lastStatsHops = 0;
   let lastTelemetryMs = 0;
   let resolveReferenceReady: (() => void) | null = null;
   let monitorMicDevice: (() => void) | null = null;
   let activeFeed: AecReferenceFeed | null = null;
   const engineConcealTimesMs: number[] = [];
-  const refConcealTimesMs: number[] = [];
   const recovery = new AecRecoveryPolicy();
   let removeTrackMonitor = (): void => {};
 
@@ -209,9 +212,8 @@ export const createMicAec = (
     const currentWorker = worker;
     worker = null;
     engineConcealTimesMs.length = 0;
-    refConcealTimesMs.length = 0;
-    lastReferenceOverflowCount = 0;
     lastStatsHops = 0;
+    lastStats = null;
     resolveReferenceReady = null;
     monitorMicDevice = null;
     activeFeed?.detach();
@@ -334,21 +336,29 @@ export const createMicAec = (
     }
     if (message.type === "concealed") {
       const nowMs = performance.now();
-      const isEngine = message.kind === "engine";
-      const ring = isEngine ? engineConcealTimesMs : refConcealTimesMs;
+      // The only conceal source left is ENGINE saturation (in-flight cap).
+      // Reference "conceals" no longer exist: the reference is a live audio
+      // input on the audio thread; starvation pairs silent refs and logs.
+      const ring = engineConcealTimesMs;
       ring.push(nowMs);
       while (ring.length > 0 && nowMs - ring[0] > CONCEAL_BYPASS_WINDOW_MS) {
         ring.shift();
       }
-      console.warn(`[aec] concealing mic hop; ${message.kind}: ${message.why}`);
-      const budget = isEngine ? ENGINE_CONCEAL_BYPASS_COUNT : REF_CONCEAL_BYPASS_COUNT;
-      if (ring.length >= budget) {
+      console.warn(
+        `[aec] concealing mic hop; ${message.kind}: ${message.why} | engine sits at ` +
+          `${ring.length}/${ENGINE_CONCEAL_BYPASS_COUNT} within ${CONCEAL_BYPASS_WINDOW_MS / 1000}s` +
+          (lastStats
+            ? ` (in-flight ${lastStats.inFlight}, sheds ${lastStats.overflows}, starved ${lastStats.underruns}, hops ${lastStats.hops})`
+            : "")
+      );
+      if (ring.length >= ENGINE_CONCEAL_BYPASS_COUNT) {
         bypass(
           "overload",
           new Error(
-            isEngine
-              ? "AEC cannot sustain realtime"
-              : "Reference delivery cannot sustain realtime"
+            "AEC cannot sustain realtime" +
+              (lastStats
+                ? ` (rtt avg ${lastStats.rttAvgMs.toFixed(1)}ms, in-flight ${lastStats.inFlight}, sheds ${lastStats.overflows}, starved ${lastStats.underruns})`
+                : "")
           )
         );
       }
@@ -357,21 +367,28 @@ export const createMicAec = (
     if (message.type !== "stats") return;
     const stats = message as WorkletStats;
 
-    // The stats' overflows are now CLOCK-DRIFT sheds (the ref queue shedding
-    // its oldest hop or two per minute of loopback-vs-mic clock skew) — a
-    // maintenance event, not pressure. The ladder stays for safety: a flood
-    // of sheds would still mean something is structurally wrong.
-    if (stats.overflows !== lastReferenceOverflowCount) {
-      const newOverflows = stats.overflows - lastReferenceOverflowCount;
-      lastReferenceOverflowCount = stats.overflows;
-      if (recovery.noteOverflows(newOverflows) === "bypass") {
-        bypass("overload", new Error("Reference drift shedding is flooding"));
-        return;
-      }
+    // Telemetry FIRST — every tick carries the numbers, including the tick
+    // that (later) bypasses, so a failure names its layer instead of hiding
+    // behind an error string.
+    if (import.meta.env.DEV && performance.now() - lastTelemetryMs >= HOP_TELEMETRY_INTERVAL_MS) {
+      lastTelemetryMs = performance.now();
+      console.info(
+        `[aec] hop rtt avg ${stats.rttAvgMs.toFixed(1)}ms max ${stats.rttMaxMs.toFixed(1)}ms in-flight ${stats.inFlight} concealed ${engineConcealTimesMs.length}/5s | ref queue ${(stats.bufferedSamples / AEC_SAMPLE_RATE).toFixed(2)}s drift-sheds ${stats.overflows} starved ${stats.underruns}`
+      );
     }
+
+    // Drift sheds are MAINTENANCE TELEMETRY, never a bypass: they mean the
+    // ref queue shed its oldest hop or two to clock skew, or the engine was
+    // briefly lagging and the surplus was shed. The first cut of this
+    // architecture wired a ladder here — it fired on a startup transient
+    // (mic delay node settling while the schedule-ahead window primes) and
+    // killed the AEC within its first second on EVERY activation. The
+    // honest arbiter for "cannot sustain realtime" is the engine conceal
+    // budget below: sustained in-flight saturation still bypasses.
     const newHops = Math.max(0, stats.hops - lastStatsHops);
     for (let i = 0; i < newHops; i += 1) recovery.noteWorkerSuccess();
     lastStatsHops = stats.hops;
+    lastStats = stats;
 
     // Device/rate changes used to be checked per hop on the main thread; the
     // hop path no longer passes through here, so the stats cadence carries it.
@@ -384,13 +401,6 @@ export const createMicAec = (
         refDelayMs: 200,
         hops: stats.hops,
       };
-    }
-
-    if (import.meta.env.DEV && performance.now() - lastTelemetryMs >= HOP_TELEMETRY_INTERVAL_MS) {
-      lastTelemetryMs = performance.now();
-      console.info(
-        `[aec] hop rtt avg ${stats.rttAvgMs.toFixed(1)}ms max ${stats.rttMaxMs.toFixed(1)}ms in-flight ${stats.inFlight} concealed ${engineConcealTimesMs.length}/5s | ref queue ${(stats.bufferedSamples / AEC_SAMPLE_RATE).toFixed(2)}s drift-sheds ${stats.overflows} starved ${stats.underruns}`
-      );
     }
   };
 
