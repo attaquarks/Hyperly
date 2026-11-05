@@ -198,6 +198,18 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   const stopAndSendRef = useRef<
     ((text: string, source: TranscriptSource) => Promise<void>) | null
   >(null);
+  // Mirror of conversation.id for callbacks that must not read stale state.
+  const conversationIdRef = useRef<string>("");
+  useEffect(() => {
+    conversationIdRef.current = conversation.id;
+  });
+  // The conversation id whose ROW actually exists in the conversations table.
+  // transcript_events has a real FK to conversations(id): "New" (and
+  // startCapture) generate the id in state while the row is only written by
+  // the debounced save — which skips empty conversations — so without an
+  // on-demand row every event persist failed with FOREIGN KEY constraint
+  // failed and the session's transcript/answers were lost from the log.
+  const persistedConversationIdRef = useRef<string | null>(null);
   // True while a `speech-detected` utterance is being transcribed, and set when
   // a stop arrives during that window so the stop is applied once the
   // transcript lands instead of dropping it.
@@ -335,6 +347,29 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     }
     return pendingSaveRef.current;
   };
+  /**
+   * The conversation row must exist before any transcript_events row can
+   * reference it (real FK). The debounced save skips empty conversations, so
+   * a session started via "New" ran its whole life with the id set but the
+   * row absent — every event persist failed with FOREIGN KEY constraint
+   * failed. This creates the row on demand (title from the first text; the
+   * debounced save upserts the full conversation afterwards).
+   */
+  const ensureConversationPersisted = useCallback(
+    async (firstText: string): Promise<void> => {
+      const id = conversationIdRef.current;
+      if (!id || persistedConversationIdRef.current === id) return;
+      await saveConversation({
+        id,
+        title: generateConversationTitle(firstText),
+        messages: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      persistedConversationIdRef.current = id;
+    },
+    []
+  );
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   // Load context settings and VAD config from localStorage on mount
@@ -635,6 +670,12 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       // failure - or the app dying - can never lose the utterance. A persistence
       // error is reported but must not stop the answer.
       try {
+        // The events table has a real FK to conversations(id): an event may
+        // only reference the id AFTER the row exists. "New" generates the id
+        // in state while the row is only written by the debounced save (which
+        // skips empty conversations), so without this the whole session's
+        // events failed with FOREIGN KEY constraint failed.
+        await ensureConversationPersisted(text);
         const store = await getTranscriptStore();
         await store.addEvent({
           source: "system",
@@ -1272,6 +1313,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           // session show its answers even before the conversation is saved.
           void (async () => {
             try {
+              await ensureConversationPersisted(transcription);
               const store = await getTranscriptStore();
               await store.addEvent({
                 source: "system",
@@ -1454,6 +1496,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
 
       // Set up conversation
       const conversationId = generateConversationId("sysaudio");
+      persistedConversationIdRef.current = null;
       setConversation({
         id: conversationId,
         title: "",
@@ -1734,6 +1777,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   );
 
   const startNewConversation = useCallback(() => {
+    persistedConversationIdRef.current = null;
     setConversation({
       id: generateConversationId("sysaudio"),
       title: "",

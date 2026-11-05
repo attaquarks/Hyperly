@@ -12,6 +12,7 @@ const hook = readFileSync(join(ROOT, "src/hooks/useVoiceInput.ts"), "utf8");
 const worker = readFileSync(join(ROOT, "src/lib/aec/localvqe-worker.ts"), "utf8");
 const micAec = readFileSync(join(ROOT, "src/lib/aec/mic-aec.ts"), "utf8");
 const reference = readFileSync(join(ROOT, "src/lib/aec/reference.ts"), "utf8");
+const refScheduler = readFileSync(join(ROOT, "src/lib/aec/ref-scheduler.ts"), "utf8");
 const releaseSource = readFileSync(join(ROOT, "src/lib/aec/release.ts"), "utf8");
 const worklet = readFileSync(join(ROOT, "public/aec/mic-aec-worklet.js"), "utf8");
 const shippedWorklet = worklet;
@@ -88,32 +89,27 @@ assert.match(micAec, /worker\?\.postMessage\(\{ type: "reset" \}\)/);
 assert.match(micAec, /LocalVQE failed after its recovery reset/);
 assert.ok(!micAec.includes("takeRef"),
   "the main thread must never touch per-hop reference consumption — the AudioWorklet owns the realtime path");
-const workletWaterBlock = worklet.slice(
-  worklet.indexOf("if (this.refFrames.size > FIFO_HIGH_WATER)"),
-  worklet.indexOf("if (this.refFrames.size >= FIFO_CAPACITY)")
-);
-assert.ok(
-  workletWaterBlock.includes("this.refPendingGap = true;") &&
-    !workletWaterBlock.includes("this.refOverflows += 1;") &&
-    worklet.indexOf("const FIFO_HIGH_WATER = 14") >= 0,
-  "burst shaping above the high-water mark must shed surplus, mark the discontinuity, and NOT count against the overflow ladder"
-);
-const workletGapBlock = worklet.slice(
-  worklet.indexOf("frame.seq !== this.refLastSeq + 1"),
-  worklet.indexOf("this.refLastSeq = frame.seq;")
-);
-assert.ok(
-  workletGapBlock.includes("this.refSequenceGaps += 1;") &&
-    workletGapBlock.includes("this.refPendingGap = true;") &&
-    !workletGapBlock.includes("this.refFrames.clear()"),
-  "a sequence gap must mark the discontinuity for filter reset and KEEP the contiguous buffered audio — clearing the FIFO threw away ~200ms of valid audio and the next hop underran into a fatal bypass"
-);
-assert.match(worklet, /const FIFO_CAPACITY = 20/);
-const workletOverflowBlock = worklet.slice(worklet.indexOf("if (this.refFrames.size >= FIFO_CAPACITY)"), worklet.indexOf("this.refFrames.set(frame.seq"));
-assert.ok(workletOverflowBlock.includes("this.refOverflows += 1;") && workletOverflowBlock.includes("this.refPendingGap = true;"),
-  "FIFO overflow must count, drop oldest, and signal a discontinuity for filter reset");
-assert.match(reference, /attachForwarder\(port: MessagePort\): void/);
-assert.match(reference, /const FORWARD_BUFFER_FRAMES = 20/);
+// The reference is a SCHEDULED AUDIO STREAM, not main-thread messages. The
+// old design forwarded every frame across the UI thread; each UI stall
+// drained the worklet's FIFO dry (the live log showed ref depth swinging
+// 0.20 s ↔ 0.01 s, 65 underruns per 5 s) and the honest bypass fired — the
+// AEC never got to run long enough on steady audio to cancel anything.
+assert.match(worklet, /collectRefHops\(input\) \{/);
+assert.match(worklet, /const refInput = inputs\[1\]\?\.\[0\];/);
+assert.match(worklet, /takeRefHop\(\) \{/);
+assert.ok(!worklet.includes("refFrames") && !worklet.includes("trimToTarget") && !worklet.includes("onRefFrame"),
+  "the FIFO machinery is gone: the reference arrives as a live second audio input");
+assert.match(reference, /attach\(context: AudioContext, destination: AudioNode\): void/);
+assert.match(reference, /source\.start\(when\);/);
+assert.match(refScheduler, /const SCHEDULE_AHEAD_SECONDS = 0\.4/);
+assert.match(refScheduler, /this\.target\.createBuffer\(1, chunk\.length, 16000\)/);
+assert.match(refScheduler, /this\.target\.play\(buffer, this\.nextStartTime\);/);
+assert.match(micAec, /numberOfInputs: 2/);
+assert.match(micAec, /micDelay\.delayTime\.value = MIC_DELAY_SECONDS;/);
+assert.match(micAec, /refBus\.connect\(bridge, 0, 1\);/);
+assert.match(micAec, /feed\.attach\(audioContext, refBus\);/);
+assert.ok(!micAec.includes("attachForwarder"),
+  "frame forwarding across the UI thread is the failure mode this architecture removes");
 assert.match(worker, /if \(gap\) currentApi\.reset\(context\)/);
 assert.match(micAec, /micTrack\.addEventListener\("ended"/);
 assert.match(micAec, /settings\.deviceId !== initialDeviceId/);
@@ -173,13 +169,11 @@ assert.match(hook, /await session\.activate\(context, getActiveAecReferenceFeed\
 assert.match(micAec, /if \(!enabled \|\| disposed \|\| activating\) return/);
 assert.match(micAec, /if \(!feed \|\| feed\.status\.state === "degraded"/);
 assert.match(micAec, /worker\.postMessage\(\{ type: "init", port: workerChannel\.port1 \}, \[workerChannel\.port1\]\)/);
-// The reference goes over the worklet's NODE port (its handler owns the
-// `ref`/`trim`/`bypass` types). A second init-transferred refPort was never
-// unwrapped by the worklet, so every frame was silently dropped — the
-// "did not prime two contiguous hops" init-failure that bypassed the AEC.
-assert.match(micAec, /feed\.attachForwarder\(bridge\.port\)/);
-assert.ok(!micAec.includes("refChannel"), "mic-aec must not route references through a second MessageChannel the worklet never unwraps");
-assert.match(worklet, /this\.takeRef\(AEC_HOP_SAMPLES\)/);
+// The reference reaches the worklet as a scheduled audio stream on input 1 —
+// NOT as port messages (an init-transferred refPort was once never unwrapped
+// and every frame was silently dropped) and NOT as per-frame UI-thread
+// forwarding (UI stalls starved the FIFO into the bypass).
+assert.match(worklet, /const reference = this\.takeRefHop\(\);/);
 assert.match(worklet, /type: "process", id, mic: frame, ref: reference, gap/);
 assert.match(worklet, /const AEC_SAMPLE_RATE = 16000/);
 assert.match(worker, /localvqe_process_frame_f32/);

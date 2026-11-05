@@ -1,20 +1,15 @@
 const AEC_SAMPLE_RATE = 16000;
 const AEC_HOP_SAMPLES = 256;
 const OUTPUT_PREROLL_SAMPLES = AEC_SAMPLE_RATE * 0.064;
-// Reference FIFO — moved here from the main-thread feed. The audio rendering
-// thread owns the entire realtime path: reference buffering, hop pairing, and
-// engine transport. The main thread only forwards frames fire-and-forget and
-// runs policy (bypass decisions, telemetry), never per-hop work.
-const FIFO_CAPACITY = 20;
-/** Episode trim target: 10 frames = 200 ms, the top of the declared 100–200 ms refDelayMs band. */
-const FIFO_TARGET_DEPTH = 10;
 /**
- * Burst headroom above the target. Delivery bursts (a stalled main thread
- * flushing queued IPC frames) briefly exceed the target; shedding the surplus
- * here keeps wake bursts from drawing the FIFO dry before the reference
- * frames catch up. Consumed backlog still returns to 200 ms.
+ * The reference hop queue's drift bound, in hops. The queue pairs one-to-one
+ * with mic hops; its depth only changes with the tiny loopback-vs-mic clock
+ * skew, so a couple of hops of headroom absorbs it. Beyond the bound the
+ * OLDEST hops are shed (positive drift) — a ~1-per-minute correction, not a
+ * fault. This replaces the old main-thread-fed FIFO: its depth used to swing
+ * with every UI stall, which starved the engine into the bypass.
  */
-const FIFO_HIGH_WATER = 14;
+const REF_QUEUE_LIMIT = 8;
 /** In-flight process hops before a new hop is concealed. The engine drains a
  * full queue between stalls, so the queue must absorb a stall and let the
  * engine catch up; 16 hops = 256 ms matches the output-queue bound. */
@@ -40,14 +35,22 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
     this.micFrameOffset = 0;
     this.nextMicId = 0;
 
-    // Reference FIFO (same semantics the main-thread feed enforced).
-    this.refFrames = new Map();
-    this.refLastSeq = null;
-    this.refPendingGap = false;
-    this.refOverflows = 0;
-    this.refUnderruns = 0;
-    this.refSequenceGaps = 0;
+    // Reference hop accumulation: the reference arrives as a SECOND audio
+    // input (scheduled into the graph by the main thread, consumed on the
+    // audio thread's clock — immune to main-thread jank), averaged down to
+    // 16 kHz with the same math as the mic path. Completed 16 kHz ref hops
+    // queue here and pair one-to-one with mic hops. The queue only drifts by
+    // the tiny skew between the loopback and mic clocks; a deep FIFO fed by
+    // main-thread messages used to swing full↔empty with every UI stall and
+    // starve the engine into 60+ underruns per 5 s and the bypass.
+    this.refPhase = 0;
+    this.refSum = 0;
+    this.refCount = 0;
+    this.refQueue = [];
     this.refReadySent = false;
+    this.refHopsProduced = 0;
+    this.refDriftSheds = 0;
+    this.refStarvedPairs = 0;
 
     // Engine pairing state.
     this.inFlight = 0;
@@ -73,14 +76,6 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
         this.workerPort.onmessage = (workerEvent) => this.onWorkerMessage(workerEvent.data);
         return;
       }
-      if (data.type === "ref") {
-        this.onRefFrame(data.frame);
-        return;
-      }
-      if (data.type === "trim") {
-        this.trimToTarget();
-        return;
-      }
       if (data.type === "bypass") {
         this.bypass = true;
         this.playback.length = 0;
@@ -96,105 +91,58 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
     this.port.postMessage?.({ type: "feed-degraded", reason });
   }
 
-  onRefFrame(frame) {
-    if (this.bypass || this.degradedReason) return;
-    if (
-      !Number.isSafeInteger(frame.seq) ||
-      !Number.isFinite(frame.tsNs) ||
-      frame.tsNs < 0 ||
-      frame.sampleRate !== AEC_SAMPLE_RATE ||
-      !(frame.samples instanceof Float32Array) ||
-      frame.samples.length === 0
-    ) {
-      this.degrade("invalid-frame");
-      return;
-    }
+  /**
+   * Context-rate reference samples → 16 kHz hops. Same averaging as the mic
+   * path, driven by the scheduled audio stream on input 1 — steady by
+   * construction, because the WebAudio graph consumes scheduled buffers on
+   * the audio thread's clock no matter what the main thread is doing.
+   */
+  collectRefHops(input) {
+    for (const sample of input) {
+      this.refSum += sample;
+      this.refCount += 1;
+      this.refPhase += AEC_SAMPLE_RATE;
+      if (this.refPhase < sampleRate) continue;
 
-    if (
-      (this.refLastSeq !== null && frame.seq <= this.refLastSeq) ||
-      this.refFrames.has(frame.seq)
-    ) {
-      this.refSequenceGaps += 1;
-      this.degrade("duplicate-frame");
-      return;
-    }
-    if (this.refLastSeq !== null && frame.seq !== this.refLastSeq + 1) {
-      // A sequence gap is a reference discontinuity, not a reason to discard
-      // the contiguous backlog in front of it: clearing the FIFO threw away
-      // ~200ms of valid audio and the next hop underran into a fatal bypass.
-      // Keep the backlog; the gap flag resets the filter on the next
-      // consumed hop.
-      this.refSequenceGaps += 1;
-      this.refPendingGap = true;
-    }
-    this.refLastSeq = frame.seq;
+      this.refPhase -= sampleRate;
+      this.refQueue.push(this.refSum / this.refCount);
+      this.refSum = 0;
+      this.refCount = 0;
+      this.refHopsProduced += 1;
 
-    // Flow shaping: shed burst surplus above the high-water mark. This is
-    // not an overflow — no frame was lost to pressure — so it does not
-    // count against the recovery ladder; it marks the discontinuity so the
-    // filter resets on the next consumed hop.
-    if (this.refFrames.size > FIFO_HIGH_WATER) {
-      this.trimToTarget();
-      this.refPendingGap = true;
-    }
-    if (this.refFrames.size >= FIFO_CAPACITY) {
-      // One full-FIFO episode = one overflow + one gap: trim to the declared
-      // 200 ms band instead of dropping one frame per arriving frame, which
-      // counted a single burst as many strikes.
-      this.trimToTarget();
-      this.refOverflows += 1;
-      this.refPendingGap = true;
-    }
+      if (this.refQueue.length > REF_QUEUE_LIMIT) {
+        // Positive clock drift: the ref produces slightly more hops than the
+        // mic consumes. Shed the OLDEST to keep the pairing delay bounded —
+        // a ~1-per-minute event, not a fault.
+        this.refQueue.splice(0, this.refQueue.length - REF_QUEUE_LIMIT);
+        this.refDriftSheds += 1;
+      }
 
-    this.refFrames.set(frame.seq, { seq: frame.seq, samples: frame.samples, offset: 0 });
-
-    if (!this.refReadySent && this.bufferedRefSamples() >= AEC_HOP_SAMPLES * 2) {
-      this.refReadySent = true;
-      this.port.postMessage?.({ type: "ref-ready" });
+      // Ready = two ref hops have FLOWED, not that they are queued: the
+      // pairing queue runs 1:1 with mic hops and hovers near empty by
+      // design. (A depth-based gate here would never fire and would fail
+      // every activation with "did not prime".)
+      if (!this.refReadySent && this.refHopsProduced >= 2) {
+        this.refReadySent = true;
+        this.port.postMessage?.({ type: "ref-ready" });
+      }
     }
   }
 
-  bufferedRefSamples() {
-    let buffered = 0;
-    for (const frame of this.refFrames.values()) {
-      buffered += frame.samples.length - frame.offset;
+  /**
+   * One ref hop per mic hop, in lockstep. If the queue is dry (sustained
+   * negative drift), pair with silence so the engine keeps running — the
+   * audio graph delivering silence means uncanceled span, not a cascade.
+   */
+  takeRefHop() {
+    if (this.refQueue.length >= AEC_HOP_SAMPLES) {
+      const hop = this.refQueue.splice(0, AEC_HOP_SAMPLES);
+      return Float32Array.from(hop);
     }
-    return buffered;
+    this.refStarvedPairs += 1;
+    return new Float32Array(AEC_HOP_SAMPLES);
   }
 
-  trimToTarget() {
-    while (this.refFrames.size > FIFO_TARGET_DEPTH) {
-      const oldestSeq = this.refFrames.keys().next().value;
-      if (oldestSeq === undefined) break;
-      this.refFrames.delete(oldestSeq);
-    }
-  }
-
-  takeRef(hopSamples) {
-    let available = 0;
-    for (const frame of this.refFrames.values()) {
-      available += frame.samples.length - frame.offset;
-      if (available >= hopSamples) break;
-    }
-    if (available < hopSamples) {
-      this.refUnderruns += 1;
-      return null;
-    }
-
-    const output = new Float32Array(hopSamples);
-    let written = 0;
-    while (written < hopSamples) {
-      const first = this.refFrames.entries().next().value;
-      if (!first) break;
-      const [seq, frame] = first;
-      const count = Math.min(hopSamples - written, frame.samples.length - frame.offset);
-      output.set(frame.samples.subarray(frame.offset, frame.offset + count), written);
-      frame.offset += count;
-      written += count;
-      if (frame.offset >= frame.samples.length) this.refFrames.delete(seq);
-    }
-    return written === hopSamples ? output : null;
-  }
 
   collectMicHops(input) {
     for (const sample of input) {
@@ -232,16 +180,8 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
       this.conceal(id, "engine", `in flight ${this.inFlight}`);
       return;
     }
-    const reference = this.takeRef(AEC_HOP_SAMPLES);
-    if (!reference) {
-      // Momentarily empty FIFO (delivery burst drew it dry): the backlog
-      // refills in ~20ms — conceal, don't fail.
-      this.conceal(id, "ref", "reference underrun");
-      return;
-    }
-
-    const gap = this.refPendingGap || this.pendingMicGap;
-    this.refPendingGap = false;
+    const reference = this.takeRefHop();
+    const gap = this.pendingMicGap;
     this.pendingMicGap = false;
     this.inFlight += 1;
     this.hopPostedAt.set(id, currentTime);
@@ -344,18 +284,19 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
     this.port.postMessage?.({
       type: "stats",
       hops: this.hops,
-      bufferedSamples: this.bufferedRefSamples(),
+      bufferedSamples: this.refQueue.length,
       inFlight: this.inFlight,
       rttAvgMs: avg,
       rttMaxMs: worst,
-      overflows: this.refOverflows,
-      underruns: this.refUnderruns,
-      gaps: this.refSequenceGaps,
+      overflows: this.refDriftSheds,
+      underruns: this.refStarvedPairs,
+      gaps: 0,
     });
   }
 
   process(inputs, outputs) {
     const input = inputs[0]?.[0];
+    const refInput = inputs[1]?.[0];
     const output = outputs[0]?.[0];
     if (!output) return true;
 
@@ -365,6 +306,10 @@ class MicAecBridgeProcessor extends AudioWorkletProcessor {
       return true;
     }
 
+    // The reference is a live audio input now: scheduled into the graph by
+    // the main thread, consumed here on the audio thread's clock — the
+    // consumption rate cannot be touched by UI work.
+    if (refInput) this.collectRefHops(refInput);
     if (input) this.collectMicHops(input);
 
     this.maybePostStats();

@@ -14,6 +14,15 @@ const WORKER_LOAD_TIMEOUT_MS = 20_000;
 const REFERENCE_START_TIMEOUT_MS = 500;
 const WARMUP_HOPS = 3;
 const WARMUP_TIMEOUT_MS = 10_000;
+/**
+ * The user's mic is delayed by this much before the AEC, so its content time
+ * aligns with the scheduled reference. The model sees a constant pairing
+ * delay of SCHEDULE_AHEAD_SECONDS - MIC_DELAY_SECONDS = 200 ms — measured on
+ * the real engine as its BEST operating point (21.7 dB ERLE; the model even
+ * cancels across 100↔400 ms jumps, but 200 ms constant is where ERLE peaks).
+ * The cost is 200 ms of latency on the user's own transcript path.
+ */
+const MIC_DELAY_SECONDS = 0.2;
 /** Engine-conceal budget: concealed hops within the window that mean the
  * pipeline genuinely cannot keep up; anything below is scheduling jitter. */
 const ENGINE_CONCEAL_BYPASS_COUNT = 16;
@@ -175,6 +184,8 @@ export const createMicAec = (
   let sourceNode: MediaStreamAudioSourceNode | null = null;
   let bridgeNode: AudioWorkletNode | null = null;
   let destination: MediaStreamAudioDestinationNode | null = null;
+  let micDelayNode: DelayNode | null = null;
+  let refBusNode: GainNode | null = null;
   let rawRouteConnected = false;
   let lastReferenceOverflowCount = 0;
   let lastStatsHops = 0;
@@ -203,7 +214,7 @@ export const createMicAec = (
     lastStatsHops = 0;
     resolveReferenceReady = null;
     monitorMicDevice = null;
-    activeFeed?.detachForwarder();
+    activeFeed?.detach();
     activeFeed = null;
     if (currentWorker) {
       currentWorker.onmessage = null;
@@ -219,15 +230,19 @@ export const createMicAec = (
   };
 
   const disconnectGraph = (): void => {
-    // Detach the reference forwarder before the node port closes, so a frame
-    // in flight cannot hit a dead port and flip the shared feed to degraded.
-    activeFeed?.detachForwarder();
+    // Detach the scheduler before the nodes go away, so a top-up cannot
+    // schedule into a disconnected bus.
+    activeFeed?.detach();
     bridgeNode?.port.postMessage({ type: "bypass" });
     bridgeNode?.port.close();
     bridgeNode?.disconnect();
+    micDelayNode?.disconnect();
+    refBusNode?.disconnect();
     sourceNode?.disconnect();
     destination?.disconnect();
     bridgeNode = null;
+    micDelayNode = null;
+    refBusNode = null;
     sourceNode = null;
     destination = null;
   };
@@ -242,7 +257,10 @@ export const createMicAec = (
     bridgeNode?.disconnect();
     bridgeNode = null;
     try {
+      // Drop the delayed route entirely (input → micDelay → bridge): leaving
+      // it connected alongside the raw route would double-route the mic.
       input.disconnect();
+      micDelayNode?.disconnect();
       input.connect(outputNode);
       rawRouteConnected = true;
       output = outputNode.stream;
@@ -339,15 +357,17 @@ export const createMicAec = (
     if (message.type !== "stats") return;
     const stats = message as WorkletStats;
 
+    // The stats' overflows are now CLOCK-DRIFT sheds (the ref queue shedding
+    // its oldest hop or two per minute of loopback-vs-mic clock skew) — a
+    // maintenance event, not pressure. The ladder stays for safety: a flood
+    // of sheds would still mean something is structurally wrong.
     if (stats.overflows !== lastReferenceOverflowCount) {
       const newOverflows = stats.overflows - lastReferenceOverflowCount;
       lastReferenceOverflowCount = stats.overflows;
       if (recovery.noteOverflows(newOverflows) === "bypass") {
-        bypass("overload", new Error("Reference FIFO overflow recurred"));
+        bypass("overload", new Error("Reference drift shedding is flooding"));
         return;
       }
-      // A tolerated overflow is marked as a gap on the audio thread, which
-      // sends it to the worker reset path with the next paired hop.
     }
     const newHops = Math.max(0, stats.hops - lastStatsHops);
     for (let i = 0; i < newHops; i += 1) recovery.noteWorkerSuccess();
@@ -361,7 +381,7 @@ export const createMicAec = (
       status = {
         state: "active",
         model: MODEL_NAME,
-        refDelayMs: (stats.bufferedSamples / AEC_SAMPLE_RATE) * 1_000,
+        refDelayMs: 200,
         hops: stats.hops,
       };
     }
@@ -369,7 +389,7 @@ export const createMicAec = (
     if (import.meta.env.DEV && performance.now() - lastTelemetryMs >= HOP_TELEMETRY_INTERVAL_MS) {
       lastTelemetryMs = performance.now();
       console.info(
-        `[aec] hop rtt avg ${stats.rttAvgMs.toFixed(1)}ms max ${stats.rttMaxMs.toFixed(1)}ms in-flight ${stats.inFlight} concealed ${engineConcealTimesMs.length}/5s ref-concealed ${refConcealTimesMs.length}/5s | ref depth ${(stats.bufferedSamples / AEC_SAMPLE_RATE).toFixed(2)}s overflows ${stats.overflows} underruns ${stats.underruns} gaps ${stats.gaps}`
+        `[aec] hop rtt avg ${stats.rttAvgMs.toFixed(1)}ms max ${stats.rttMaxMs.toFixed(1)}ms in-flight ${stats.inFlight} concealed ${engineConcealTimesMs.length}/5s | ref queue ${(stats.bufferedSamples / AEC_SAMPLE_RATE).toFixed(2)}s drift-sheds ${stats.overflows} starved ${stats.underruns}`
       );
     }
   };
@@ -454,8 +474,12 @@ export const createMicAec = (
           return;
         }
 
+        // TWO inputs: 0 = the mic (delayed by MIC_DELAY_SECONDS so its
+        // content time aligns with the scheduled reference), 1 = the
+        // scheduled reference bus. The worklet pairs the two 16 kHz hop
+        // streams one-to-one.
         const bridge = new AudioWorkletNode(audioContext, "hyperly-mic-aec-bridge", {
-          numberOfInputs: 1,
+          numberOfInputs: 2,
           numberOfOutputs: 1,
           outputChannelCount: [1],
           channelCount: 1,
@@ -464,15 +488,6 @@ export const createMicAec = (
         });
         bridgeNode = bridge;
 
-        // The worker channel hands the worklet ↔ engine traffic to the audio
-        // thread. Reference frames do NOT get a second MessageChannel: the
-        // worklet's node-port handler owns the `ref`/`trim`/`bypass` message
-        // types, and an init-transferred refPort would need its own onmessage
-        // the worklet never installs — which is exactly how every frame was
-        // silently dropped (ref depth 0.00s, "did not prime two contiguous
-        // hops", init-failed, raw mic). The feed posts straight to the node
-        // port; the sample buffer still transfers, so this stays off the
-        // realtime hot path.
         const workerChannel = new MessageChannel();
         bridge.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
           handleWorkletMessage(event.data);
@@ -482,17 +497,34 @@ export const createMicAec = (
           [workerChannel.port2]
         );
         worker.postMessage({ type: "init", port: workerChannel.port1 }, [workerChannel.port1]);
-        // Start frame delivery into the worklet only now: its FIFO starts
-        // primed from the feed's pre-attach backlog and fills in realtime.
-        feed.attachForwarder(bridge.port);
+
+        // The reference reaches the worklet as a SCHEDULED audio stream: the
+        // feed accumulates loopback samples and keeps SCHEDULE_AHEAD_SECONDS
+        // of them queued on the audio thread's clock via AudioBufferSource
+        // nodes, so UI-thread stalls cannot touch the delivery (this was the
+        // failure mode that bypassed the AEC for its whole life). The mic is
+        // delayed by MIC_DELAY_SECONDS so both streams arrive content-aligned.
+        const micDelay = audioContext.createDelay(1.0);
+        micDelay.delayTime.value = MIC_DELAY_SECONDS;
+        micDelayNode = micDelay;
+        const refBus = audioContext.createGain();
+        refBusNode = refBus;
+
+        input.disconnect();
+        rawRouteConnected = false;
+        input.connect(micDelay);
+        micDelay.connect(bridge);
+        refBus.connect(bridge, 0, 1);
+        bridge.connect(destinationNode);
+        output = destinationNode.stream;
+
+        // The scheduler starts feeding the graph only now, so the ref queue
+        // and mic hops accrue together and nothing is shed at startup.
+        feed.attach(audioContext, refBus);
 
         if (!(await waitForWorkletReferenceReady())) {
-          throw new Error("Reference feed did not prime two contiguous 16 kHz hops in the worklet");
+          throw new Error("Reference audio did not prime two 16 kHz hops in the worklet");
         }
-        // Frames buffered before the forwarder was attached can exceed the
-        // declared refDelayMs band; the worklet clamps before the first hop.
-        // Not an overflow — no count, no gap, the AEC never saw the dropped span.
-        bridge.port.postMessage({ type: "trim" });
         if (disposed) {
           stopWorker();
           activating = false;
@@ -503,15 +535,13 @@ export const createMicAec = (
         worker.onmessageerror = () => bypass("overload", new Error("LocalVQE worker message could not be decoded"));
         bridge.addEventListener("processorerror", () => bypass("overload", new Error("Mic AEC worklet failed")));
 
-        input.disconnect();
-        rawRouteConnected = false;
-        input.connect(bridge);
-        bridge.connect(destinationNode);
-        output = destinationNode.stream;
         publish({
           state: "active",
           model: MODEL_NAME,
-          refDelayMs: 0,
+          // The constant pairing delay the engine is fed: the reference is
+          // scheduled SCHEDULE_AHEAD ahead, the mic is delayed MIC_DELAY —
+          // measured as the model's best operating point.
+          refDelayMs: 200,
           hops: 0,
         });
       } catch (error) {

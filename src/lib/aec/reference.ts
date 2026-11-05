@@ -2,40 +2,37 @@ import {
   startAecReference,
   type AecReferenceFrame,
 } from "./reference-channel.ts";
-
-/**
- * Pre-attach buffer bound, newest frames kept. System capture starts before
- * the mic AEC activates; buffering here (instead of dropping) means the
- * worklet's reference FIFO starts primed. That matters because the FIFO is
- * rate-matched — production equals consumption on average — so a FIFO that
- * starts empty would hover empty forever.
- */
-const FORWARD_BUFFER_FRAMES = 20;
+import {
+  ReferenceScheduler,
+  TOP_UP_INTERVAL_MS,
+  type ScheduleTarget,
+} from "./ref-scheduler.ts";
 
 export interface AecReferenceStatus {
   state: "waiting" | "ready" | "degraded" | "closed";
   reason?: "channel-unavailable" | "internal-error";
-  bufferedFrames: number;
+  /** 16 kHz samples waiting to be scheduled (320 = one 20 ms frame). */
+  bufferedSamples: number;
 }
 
 /**
- * Owns the raw-loopback Tauri Channel on the main thread and forwards frames
- * to the AudioWorklet, which owns the realtime reference FIFO. Frames are
- * forwarded fire-and-forget with transferred sample buffers — the main thread
- * is never in the per-hop path, only in the per-frame delivery path, where a
- * stall merely delays the next frame instead of stalling the pipeline.
+ * Owns the raw-loopback Tauri Channel and delivers the reference to the AEC
+ * by SCHEDULING it into the WebAudio graph. The scheduling core lives in
+ * ref-scheduler.ts (pure, harness-testable); this adapter binds it to the
+ * real AudioContext and a top-up timer.
  */
 export class AecReferenceFeed {
   status: AecReferenceStatus = {
     state: "waiting",
-    bufferedFrames: 0,
+    bufferedSamples: 0,
   };
 
-  private buffered: AecReferenceFrame[] = [];
-  private forwarder: MessagePort | null = null;
+  private scheduler: ReferenceScheduler | null = null;
+  private topUpTimer: ReturnType<typeof setInterval> | null = null;
   private stopChannel: (() => Promise<void>) | null = null;
   private connected = false;
   private closed = false;
+  private receivedAny = false;
 
   /** Opens the Channel. Failure is recorded in status and never rethrown. */
   async connect(): Promise<void> {
@@ -59,32 +56,44 @@ export class AecReferenceFeed {
   }
 
   /**
-   * Attaches the worklet side of the reference MessagePort and flushes any
-   * pre-attach backlog first, in sequence order.
+   * Wires the reference into the audio graph: pending (and future) samples
+   * are scheduled onto `destination` (the AEC worklet's second input),
+   * keeping the scheduler's ahead-window queued on the audio thread.
    */
-  attachForwarder(port: MessagePort): void {
-    this.forwarder = port;
-    for (const frame of this.buffered.splice(0)) {
-      this.forward(frame);
-    }
-    this.status.bufferedFrames = 0;
+  attach(context: AudioContext, destination: AudioNode): void {
+    const target: ScheduleTarget = {
+      currentTime: () => context.currentTime,
+      createBuffer: (channels, length, sampleRate) =>
+        context.createBuffer(channels, length, sampleRate),
+      play: (buffer, when) => {
+        const source = context.createBufferSource();
+        source.buffer = buffer as AudioBuffer;
+        source.connect(destination);
+        source.start(when);
+      },
+    };
+    this.scheduler = new ReferenceScheduler(target);
+    this.scheduler.prime();
+    // Anything that buffered while detached schedules immediately.
+    this.scheduler.push([]);
+    this.topUpTimer = setInterval(() => this.scheduler?.drain(), TOP_UP_INTERVAL_MS);
   }
 
-  /**
-   * Stops forwarding (session bypassed or torn down) and returns to the
-   * bounded pre-attach buffer, so frames queue to a dead worklet port can
-   * never accumulate without bound.
-   */
-  detachForwarder(): void {
-    this.forwarder = null;
+  /** Stops scheduling (session bypassed or torn down). */
+  detach(): void {
+    if (this.topUpTimer !== null) {
+      clearInterval(this.topUpTimer);
+      this.topUpTimer = null;
+    }
+    this.scheduler = null;
   }
 
   /** Closes the Channel and discards buffered audio without throwing. */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.buffered = [];
-    this.status.bufferedFrames = 0;
+    this.detach();
+    this.status.bufferedSamples = 0;
 
     const stop = this.stopChannel;
     this.stopChannel = null;
@@ -100,39 +109,12 @@ export class AecReferenceFeed {
 
   private receive(frame: AecReferenceFrame): void {
     if (this.closed) return;
-    if (this.forwarder) {
-      this.forward(frame);
-      return;
+    if (!this.receivedAny) {
+      this.receivedAny = true;
+      if (this.status.state === "waiting") this.status.state = "ready";
     }
-
-    // No consumer wired yet: keep only the newest frames so the worklet
-    // starts primed with recent audio, not stale audio.
-    this.buffered.push(frame);
-    if (this.buffered.length > FORWARD_BUFFER_FRAMES) {
-      this.buffered.shift();
-    }
-    this.status.bufferedFrames = this.buffered.length;
-    if (this.status.state === "waiting") this.status.state = "ready";
-  }
-
-  private forward(frame: AecReferenceFrame): void {
-    const samples = Float32Array.from(frame.samples);
-    try {
-      this.forwarder?.postMessage(
-        {
-          type: "ref",
-          frame: {
-            seq: frame.seq,
-            tsNs: frame.tsNs,
-            sampleRate: frame.sampleRate,
-            samples,
-          },
-        },
-        [samples.buffer]
-      );
-    } catch {
-      this.degrade("internal-error");
-    }
+    this.scheduler?.push(frame.samples);
+    this.status.bufferedSamples = this.scheduler?.pendingSamples ?? 0;
   }
 
   private degrade(

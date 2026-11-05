@@ -175,55 +175,32 @@ while (processor.port.pump()) {
   /* init consumed by the worklet's handler */
 }
 
-// 2. Reference frames on the node port — what the fixed feed now does.
-for (let i = 0; i < 10; i++) {
-  processor.port.receive({
-    type: "ref",
-    frame: {
-      seq: i,
-      tsNs: i * FRAME_SAMPLES * 62_500, // ns per sample at 16 kHz
-      sampleRate: 16_000,
-      samples: vmFrame(i * FRAME_SAMPLES, (i + 1) * FRAME_SAMPLES),
-    },
-  });
-}
+// 2. Reference as a LIVE AUDIO INPUT: the worklet reads it from inputs[1].
+// The harness feeds both channels in pace, exactly what the scheduled graph
+// delivers on the audio thread.
 while (processor.port.pump()) {
-  /* primed frames consumed */
+  /* init consumed */
 }
 while (mainEnd.pump()) {
   /* collect ref-ready / any degrade report */
 }
 
-// 3. ref-ready must have fired from the primed FIFO (>= 2 contiguous hops).
-assert.ok(
-  nodeOutbound.includes("ref-ready"),
-  `the primed reference FIFO must report ref-ready (got: ${nodeOutbound.join(", ")})`
-);
-
-// 4. Drive the realtime path in pace, like the real tap and the real mic:
-// every 20 ms of context-rate mic input, one 320-sample 16 kHz reference
-// frame arrives on the node port. The mic hears the far-end delayed by
-// ~30 ms (the speaker→mic acoustic path) plus a faint near-end tone. The
-// worklet averages the input down to 16 kHz hops and pairs each with the
-// reference span at the same wall time — the alignment the whole AEC
-// depends on.
+// 3. Drive the realtime path in pace, like the real pipeline: each 128-sample
+// context quantum delivers BOTH the mic and the reference to the worklet.
+// The mic hears the far-end delayed by ~30 ms (the speaker→mic acoustic
+// path) plus a faint near-end tone; the reference is the far-end itself —
+// content-aligned by the schedule-ahead + mic-delay design.
 const CONTEXT_RATE = 48_000;
 const DELAY_16K_SAMPLES = 480; // ~30 ms speaker→mic acoustic path
 const QUANTUM = 128;
-// One 320-sample 16 kHz frame per 960 context samples — exactly 20 ms, so
-// production equals consumption and the FIFO neither drifts nor starves.
-const CTX_SAMPLES_PER_FRAME = FRAME_SAMPLES * (CONTEXT_RATE / 16_000);
-
 const quantum = new Float32Array(QUANTUM);
+const refQuantum = new Float32Array(QUANTUM);
 const outputChannel = new Float32Array(QUANTUM);
-let refFrameIndex = 10; // the prime consumed seq 0..9
-let nextFrameCtx = 10 * CTX_SAMPLES_PER_FRAME;
 const totalQuanta = Math.floor(
   (fixture.reference.length - DELAY_16K_SAMPLES) * (CONTEXT_RATE / 16_000)
 );
 
 for (let q = 0; q < totalQuanta; q++) {
-  // The mic input for this quantum: the far-end delayed, plus a near tone.
   const base16k = (q * QUANTUM) / (CONTEXT_RATE / 16_000);
   for (let i = 0; i < QUANTUM; i++) {
     const ctxIndex = q * QUANTUM + i;
@@ -231,30 +208,13 @@ for (let q = 0; q < totalQuanta; q++) {
     const far = far16k >= 0 ? fixture.reference[Math.floor(far16k)] : 0;
     quantum[i] =
       far * 0.6 + 0.02 * Math.sin(2 * Math.PI * 180 * (ctxIndex / CONTEXT_RATE));
+    refQuantum[i] = far16k >= 0 ? fixture.reference[Math.floor(far16k)] : 0;
   }
-  // WebAudio shapes: inputs/outputs are arrays of channel ARRAYS.
+  // WebAudio shapes: inputs are arrays of channel ARRAYS; input 1 is the
+  // scheduled reference stream.
   workletClock += QUANTUM / CONTEXT_RATE;
-  processor.process([[quantum]], [[outputChannel]]);
+  processor.process([[quantum], [refQuantum]], [[outputChannel]]);
 
-  // Deliver reference frames on the sample-accurate 20 ms schedule.
-  const ctxEnd = (q + 1) * QUANTUM;
-  while (ctxEnd >= nextFrameCtx && refFrameIndex < frameCount) {
-    processor.port.receive({
-      type: "ref",
-      frame: {
-        seq: refFrameIndex,
-        tsNs: refFrameIndex * FRAME_SAMPLES * 62_500,
-        sampleRate: 16_000,
-        samples: vmFrame(
-          refFrameIndex * FRAME_SAMPLES,
-          (refFrameIndex + 1) * FRAME_SAMPLES
-        ),
-      },
-    });
-    refFrameIndex += 1;
-    nextFrameCtx += CTX_SAMPLES_PER_FRAME;
-  }
-  processor.port.pump();
   while (hopCollector.pump()) {
     /* hops land in workerHops via the collector */
   }
@@ -263,6 +223,10 @@ for (let q = 0; q < totalQuanta; q++) {
   }
 }
 
+assert.ok(
+  nodeOutbound.includes("ref-ready"),
+  `the reference accumulator must report ref-ready (got: ${nodeOutbound.join(", ")})`
+);
 assert.ok(workerHops.length > 100, `hops were dispatched (${workerHops.length})`);
 const unpaired = workerHops.filter((hop) => hop.ref === null);
 assert.equal(
@@ -310,7 +274,39 @@ assert.equal(
   );
 }
 
-// 5. No fault reports during the run.
+// 4. Starvation degrades gracefully: with the graph delivering silence (a
+// main-thread stall longer than the schedule-ahead window), the worklet
+// pairs mic hops with silent reference hops and KEEPS RUNNING — no conceal
+// cascade, no fault, no bypass.
+{
+  const hopsBefore = workerHops.length;
+  for (let q = 0; q < 1200; q++) {
+    // 1200 quanta = 3.2 s of starved reference (silence on input 1).
+    for (let i = 0; i < QUANTUM; i++) {
+      const ctxIndex = (workerHops.length + q) * QUANTUM + i;
+      quantum[i] = 0.05 * Math.sin(2 * Math.PI * 200 * (ctxIndex / CONTEXT_RATE));
+      refQuantum[i] = 0;
+    }
+    workletClock += QUANTUM / CONTEXT_RATE;
+    processor.process([[quantum], [refQuantum]], [[outputChannel]]);
+    while (hopCollector.pump()) {}
+    while (mainEnd.pump()) {}
+  }
+  const starvedAdded = workerHops.length - hopsBefore;
+  assert.ok(
+    starvedAdded > 100,
+    `hops must keep dispatching through a starved reference (added ${starvedAdded})`
+  );
+  assert.ok(
+    !nodeOutbound.includes("fault"),
+    "a starved reference must not fault the session"
+  );
+  console.log(
+    `  ok    starvation: ${starvedAdded} hops dispatched with silent reference, no fault, no bypass`
+  );
+}
+
+// 5. No fault reports during the aligned run either.
 assert.ok(
   !nodeOutbound.includes("feed-degraded"),
   "no feed-degraded report during the run"
@@ -318,9 +314,89 @@ assert.ok(
 assert.ok(!nodeOutbound.includes("fault"), "no fault report during the run");
 
 console.log(
-  `  ok    AEC wiring: ${frameCount} ref frames primed the FIFO, ref-ready fired, ` +
-    `${workerHops.length} hops dispatched, 0 unpaired, mic lags ref by ~${DELAY_16K_SAMPLES} samples, no faults`
+  `  ok    AEC wiring: reference as scheduled audio input, ref-ready fired, ` +
+    `${workerHops.length} total hops, aligned pairing, no faults`
 );
+
+// ---------------------------------------------------------------------------
+// Part A2 — the scheduler under bursty main-thread delivery. The mock clock
+// simulates a main thread that stalls 300 ms between top-ups; the scheduler
+// must keep the audio graph's playback GAPLESS because 400 ms is queued
+// ahead on the audio thread's clock.
+// ---------------------------------------------------------------------------
+{
+  const { ReferenceScheduler } = await import("../src/lib/aec/ref-scheduler.ts");
+  let clock = 0;
+  const scheduled: Array<{ start: number; length: number }> = [];
+  const target = {
+    currentTime: () => clock,
+    createBuffer: (_ch: number, length: number, _rate: number) => ({
+      copyToChannel: (_samples: Float32Array, _ch: number) => {},
+      length,
+    }),
+    play: (_buffer: unknown, when: number) => {
+      scheduled.push({ start: when, length: 0 });
+    },
+  };
+  // The harness needs the actual lengths to verify coverage; capture them by
+  // wrapping createBuffer — simpler: reconstruct from consecutive starts by
+  // recording the buffer length in play via closure. Use a mutable holder.
+  let lastLength = 0;
+  const target2 = {
+    currentTime: () => clock,
+    createBuffer: (_ch: number, length: number, _rate: number) => {
+      lastLength = length;
+      return {
+        copyToChannel: (_samples: Float32Array, _ch: number) => {},
+      };
+    },
+    play: (_buffer: unknown, when: number) => {
+      scheduled.push({ start: when, length: lastLength });
+    },
+  };
+  void target;
+  const scheduler = new ReferenceScheduler(target2);
+  scheduler.prime();
+
+  // Simulate the real delivery: frames every 20 ms, but the main thread only
+  // gets to run (push + drain) in bursts every ~300 ms.
+  const FRAME = 320;
+  let refPos = 0;
+  const totalFrames = 400; // 8 s of reference
+  for (let burst = 0; burst * 15 < totalFrames; burst++) {
+    // A 300 ms main-thread stall passes on the audio clock.
+    clock += 0.3;
+    // The burst delivers ~15 frames (300 ms of audio) at once.
+    const framesThisBurst = Math.min(15, totalFrames - burst * 15);
+    for (let f = 0; f < framesThisBurst; f++) {
+      const samples = new Float32Array(FRAME).fill(0.1);
+      scheduler.push(samples);
+      refPos += FRAME;
+    }
+    scheduler.drain();
+  }
+
+  // Coverage: sort by start; every scheduled region must be contiguous —
+  // no gap larger than one sample between consecutive playbacks.
+  scheduled.sort((a, b) => a.start - b.start);
+  let gaps = 0;
+  for (let i = 1; i < scheduled.length; i++) {
+    const prevEnd = scheduled[i - 1].start + scheduled[i - 1].length / 16000;
+    if (scheduled[i].start - prevEnd > 1 / 16000) gaps += 1;
+  }
+  assert.ok(scheduled.length > 10, `bursts were scheduled (${scheduled.length})`);
+  assert.equal(
+    gaps,
+    0,
+    `the scheduled reference stream must be gapless under bursty delivery (${gaps} gaps)`
+  );
+  // The ahead window must never have gone negative at schedule time — the
+  // scheduler re-primes when starved, so coverage is continuous.
+  console.log(
+    `  ok    scheduler: ${scheduled.length} buffers scheduled gapless across ` +
+      `300 ms main-thread stalls (400 ms ahead on the audio thread's clock)`
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Part B — the transcript decision pipeline (real modules, real scenarios)
