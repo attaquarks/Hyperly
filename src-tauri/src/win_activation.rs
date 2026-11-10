@@ -14,7 +14,7 @@
 //! `NSWindowStyleMaskNonActivatingPanel` style mask (see lib.rs `init`), so
 //! its show/focus path is already non-activating by construction.
 
-use tauri::{Runtime, WebviewWindow};
+use tauri::{Manager, Runtime, WebviewWindow};
 
 /// Show (or restore from minimized) without activating, and re-assert the
 /// topmost z-order without activating. Windows implementation; other targets
