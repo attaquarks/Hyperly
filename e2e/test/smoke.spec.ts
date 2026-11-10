@@ -102,6 +102,77 @@ describe("Hyperly startup health", () => {
     await shot("04-post-navigation");
   });
 
+  it("toggles the overlay visible WITHOUT taking the desktop foreground", async () => {
+    // Regression net for the Windows focus bug: the Ctrl+\ show path used to
+    // run show() (SW_SHOW — activates) + unminimize() + set_focus()
+    // (SetForegroundWindow), making Hyperly the foreground window — Chrome's
+    // fullscreen presentation broke and the taskbar popped back over it.
+    // The fix surfaces the overlay via SW_SHOWNOACTIVATE +
+    // SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE), so after a toggle-show the
+    // overlay MUST be visible while NOT being the foreground window.
+    //
+    // The toggle is driven through `toggle_main_window`, the same Rust path
+    // the shortcut dispatches to (the in-app Hide button shares it on
+    // purpose). No synthetic input is used anywhere in this suite.
+    //
+    // focusMainWindow() is called once BEFORE the toggles and no further
+    // handle switching happens afterwards, so the driver cannot interfere
+    // with the foreground state the assertions read.
+    await focusMainWindow();
+
+    const invokeCommand = (command: string): Promise<unknown> =>
+      browser.execute((cmd) => {
+        const tauri = (
+          window as unknown as {
+            __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<unknown> };
+          }
+        ).__TAURI_INTERNALS__;
+        return tauri.invoke(cmd);
+      }, command);
+
+    // Hide (first press), then show (second press) — exactly one show cycle.
+    await invokeCommand("toggle_main_window");
+    await browser.pause(400);
+    await invokeCommand("toggle_main_window");
+
+    // The show must really have surfaced the window — poll because the
+    // command returns after an async dispatch.
+    const state = await browser.waitUntil(
+      async () => {
+        const surface = (await invokeCommand("overlay_surface_state")) as {
+          visible: boolean;
+          focused: boolean;
+        };
+        return surface.visible ? surface : false;
+      },
+      {
+        timeout: 10_000,
+        timeoutMsg:
+          "overlay never became visible after the toggle-show — the no-activate Win32 path failed",
+      }
+    );
+    if (!state || typeof state !== "object") {
+      throw new Error("overlay_surface_state returned no state object");
+    }
+
+    // THE regression assertion: with the old code this was true — the toggle
+    // explicitly stole the foreground. It must now stay with whatever the
+    // runner had in the foreground (after the hide, Windows re-activates it;
+    // the non-activating show must not take it back).
+    if (state.focused) {
+      throw new Error(
+        "overlay became the foreground window on toggle-show — focus steal is back (SW_SHOW/set_focus on the shortcut path)"
+      );
+    }
+
+    // The webview must still answer after the hide/show cycle.
+    const probe = await browser.execute(() => document.title.length);
+    if (typeof probe !== "number") {
+      throw new Error("main overlay stopped answering after the toggle cycle");
+    }
+    await shot("07-toggle-no-focus-steal");
+  });
+
   it("opens and closes the history wing without freezing the app", async () => {
     // Regression net for the Windows deadlock: `open_history_wing` used to be
     // a *synchronous* command that created the wing webview window inline,

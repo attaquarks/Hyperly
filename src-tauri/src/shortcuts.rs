@@ -187,26 +187,53 @@ pub fn stop_all_move_windows<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// Show and focus the main window, keeping all three sources of truth in
-/// sync: the OS window, our own `is_hidden` flag (so the next toggle_window
-/// press hides instead of no-oping), and the frontend's `isHidden` state
-/// (which keeps the React root `hidden` until it receives this event —
-/// without it, a shortcut fired on a hidden window changes state invisibly).
-/// Every shortcut handler that surfaces the window goes through here.
+/// Show the overlay WITHOUT stealing the desktop foreground. Keeping all
+/// three sources of truth in sync: the OS window, our own `is_hidden` flag
+/// (so the next toggle_window press hides instead of no-oping), and the
+/// frontend's `isHidden` state (which keeps the React root `hidden` until it
+/// receives this event — without it, a shortcut fired on a hidden window
+/// changes state invisibly). Every shortcut handler that surfaces the window
+/// goes through here.
+///
+/// The old sequence — `show()` + `unminimize()` + `set_focus()` — was the
+/// whole "taskbar appears / Chrome drops fullscreen" bug: `show()` maps to
+/// `ShowWindow(SW_SHOW)` which ACTIVATES the window, and `set_focus()` is an
+/// explicit `SetForegroundWindow`. Either one makes Hyperly the foreground
+/// window, which breaks the previously active app's fullscreen presentation
+/// and raises the taskbar over it. Windows now surfaces the overlay through
+/// the non-activating Win32 primitives (win_activation): it appears above the
+/// fullscreen foreground app, stays mouse-interactive, and the keyboard stays
+/// with the app the user was in. macOS keeps `set_focus` — the overlay is an
+/// NSPanel with the non-activating style mask, so there "focus" means
+/// key-window without app activation, which is how typing works on that
+/// platform.
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
 
-    if let Err(e) = window.show() {
-        eprintln!("Failed to show window: {}", e);
+    #[cfg(target_os = "windows")]
+    if let Err(e) = crate::win_activation::show_window_no_activate(&window) {
+        // Never leave the user with an invisible overlay because the raw
+        // Win32 path failed: fall back to the activating show.
+        eprintln!("Failed to show overlay without activation: {}", e);
+        if let Err(e) = window.show() {
+            eprintln!("Failed to show window: {}", e);
+        }
     }
-    if let Err(e) = window.unminimize() {
-        // Unminimize is best-effort; ignore errors (window may not be minimized).
-        eprintln!("Failed to unminimize window (non-fatal): {}", e);
-    }
-    if let Err(e) = window.set_focus() {
-        eprintln!("Failed to focus window: {}", e);
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Err(e) = window.show() {
+            eprintln!("Failed to show window: {}", e);
+        }
+        if let Err(e) = window.unminimize() {
+            // Unminimize is best-effort; ignore errors (window may not be minimized).
+            eprintln!("Failed to unminimize window (non-fatal): {}", e);
+        }
+        if let Err(e) = window.set_focus() {
+            eprintln!("Failed to focus window (non-fatal): {}", e);
+        }
     }
 
     // On macOS the overlay window is an NSPanel: re-show it as a panel so it

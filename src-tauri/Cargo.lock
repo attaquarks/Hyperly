@@ -2495,9 +2495,10 @@ dependencies = [
  "tokio",
  "tracing",
  "wasapi",
- "webview2-com",
- "winreg",
- "xcap",
+  "webview2-com",
+  "windows 0.61.3",
+  "winreg",
+  "xcap",
 ]
 
 [[package]]

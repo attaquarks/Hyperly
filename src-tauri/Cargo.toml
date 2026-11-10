@@ -69,6 +69,11 @@ winreg = "0.55.0"
 # Windows mic permission: Tauri only brokers it on macOS, so the WebView2
 # PermissionRequested handler has to be installed by hand (src/mic_permission.rs).
 webview2-com = "0.38.0"
+# Non-activating window surfacing for the overlay (win_activation.rs): the
+# shortcut toggle must show/restore the overlay WITHOUT SetForegroundWindow.
+# Same major version tauri itself resolves (0.61.3 in Cargo.lock), so this
+# adds no new crate — only the Win32_UI_WindowsAndMessaging feature gate.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libpulse-binding = "2.30.1"

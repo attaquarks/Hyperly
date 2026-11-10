@@ -15,6 +15,7 @@ use tauri_nspanel::{cocoa::appkit::NSWindowCollectionBehavior, panel_delegate, W
 // PostHog analytics removed for the personal build.
 use tokio::task::JoinHandle;
 mod speaker;
+mod win_activation;
 use capture::CaptureState;
 use speaker::{ReferenceTap, VadConfig};
 
@@ -149,6 +150,7 @@ pub fn run() {
             shortcuts::set_always_on_top,
             shortcuts::exit_app,
             shortcuts::toggle_main_window,
+            win_activation::overlay_surface_state,
             speaker::start_system_audio_capture,
             speaker::stop_system_audio_capture,
             speaker::start_aec_reference,

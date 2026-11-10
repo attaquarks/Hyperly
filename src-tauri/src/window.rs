@@ -448,6 +448,9 @@ pub fn hide_history_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
 }
 
 /// Re-reveals the wing after the main overlay returns, if the user had it open.
+/// Same foreground rule as the overlay: this runs on the Ctrl+\ show path, so
+/// the wing must surface WITHOUT activating (it already builds with
+/// `focused(false)`; tauri's `show()` would still activate it via SW_SHOW).
 pub fn restore_history_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
     if !HISTORY_WING_OPEN.load(std::sync::atomic::Ordering::Acquire) {
         return;
@@ -458,6 +461,12 @@ pub fn restore_history_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
                 tauri::PhysicalPosition { x, y },
             ));
         }
+        #[cfg(target_os = "windows")]
+        if let Err(e) = crate::win_activation::show_window_no_activate(&wing) {
+            eprintln!("Failed to restore history wing without activation: {}", e);
+            let _ = wing.show();
+        }
+        #[cfg(not(target_os = "windows"))]
         let _ = wing.show();
     }
 }
