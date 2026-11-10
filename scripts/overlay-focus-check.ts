@@ -26,7 +26,14 @@
 //      handler (the E2E surface-state probe must exist);
 //   D. the `windows` crate dependency carries the two needed Win32 features;
 //   E. exactly ONE global-shortcut handler exists (the plugin's with_handler
-//      in lib.rs) — a second dispatcher would be an untracked focus path.
+//      in lib.rs) — a second dispatcher would be an untracked focus path;
+//   F. the overlay cursor: the default cursor type is a VISIBLE one (never
+//      "invisible"), no load-path fallback coerces a missing setting to
+//      "invisible", the one-time migration of the old persisted default
+//      exists, and the Rust hide path hands the cursor back to the system
+//      (SetCursor arrow) before every overlay/wing hide — the Win32 cursor
+//      is a stateful shape and a hidden last-state otherwise stays stale
+//      over the region after the hide.
 //
 // Run with:  node --experimental-strip-types scripts/overlay-focus-check.ts
 
@@ -162,6 +169,45 @@ const assert = (condition: boolean, message: string): void => {
   assert(
     handlerCount === 1,
     `lib.rs: expected exactly one global-shortcut with_handler, found ${handlerCount} — a second dispatcher would be an untracked shortcut path`
+  );
+}
+
+// --- F. overlay cursor: visible default, migration, hide-path handoff --------
+{
+  // The default cursor type must be a VISIBLE one; "invisible" is opt-in.
+  const storage = code(readRel("src/lib/storage/customizable.storage.ts"));
+  assert(
+    /cursor:\s*\{\s*type:\s*"default"\s*\}/.test(storage),
+    'customizable.storage.ts: DEFAULT_CUSTOMIZABLE_STATE.cursor.type must be "default" — the "invisible" default set cursor:none in the overlay webview and left a stale hidden cursor over the overlay\'s region after it was hidden'
+  );
+  assert(
+    storage.includes("CURSOR_VISIBLE_DEFAULT_MIGRATION_KEY"),
+    "customizable.storage.ts: the one-time migration of the old persisted \"invisible\" default is missing — machines with the old default persisted would keep the hidden cursor"
+  );
+
+  // No load-path fallback may coerce a missing setting to "invisible".
+  const context = code(readRel("src/contexts/app.context.tsx"));
+  assert(
+    !context.includes('|| "invisible"'),
+    'app.context.tsx: a fallback still coerces the cursor setting to "invisible" — an unset setting must mean the visible default'
+  );
+  assert(
+    context.includes('|| "default"'),
+    'app.context.tsx: the unset-setting fallback must resolve to the visible "default" cursor'
+  );
+
+  // The hide paths must hand the cursor back to the system before hiding.
+  const shortcuts = code(readRel("src-tauri/src/shortcuts.rs"));
+  const toggle = fnSource(shortcuts, "handle_toggle_window");
+  assert(
+    toggle.includes("restore_system_cursor_before_hide"),
+    "shortcuts.rs: handle_toggle_window's hide branch must call restore_system_cursor_before_hide — hiding with a hidden last cursor state leaves it stale over the overlay's region"
+  );
+  const windowRust = code(readRel("src-tauri/src/window.rs"));
+  assert(
+    fnSource(windowRust, "hide_history_wing_with_main").includes("restore_system_cursor_before_hide") &&
+      fnSource(windowRust, "close_history_wing").includes("restore_system_cursor_before_hide"),
+    "window.rs: both wing-hide paths must call restore_system_cursor_before_hide"
   );
 }
 

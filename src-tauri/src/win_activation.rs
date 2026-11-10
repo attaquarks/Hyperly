@@ -54,10 +54,37 @@ pub fn show_window_no_activate<R: Runtime>(window: &WebviewWindow<R>) -> Result<
     Ok(())
 }
 
+/// Hand the mouse cursor back to the system before the overlay hides.
+///
+/// The Win32 cursor is a STATEFUL shape: it only changes when the window
+/// under the mouse processes WM_SETCURSOR. If the overlay (or its webview's
+/// `cursor: none` styling in the explicit invisible-cursor mode) set a hidden
+/// cursor last, hiding the overlay leaves that stale hidden shape over the
+/// region it occupied — the foreground app shows no pointer until it happens
+/// to re-set one. Setting the standard arrow immediately before the hide
+/// re-asserts a visible shape as the last cursor state. Per the Win32
+/// contract this only takes effect when the window under the mouse belongs
+/// to the calling thread — exactly the reported scenario (mouse over the
+/// overlay at hide time) — and is a harmless no-op otherwise. No input is
+/// simulated and no foreground changes hands.
+#[cfg(target_os = "windows")]
+pub fn restore_system_cursor_before_hide() {
+    use windows::Win32::UI::WindowsAndMessaging::{IDC_ARROW, LoadCursorW, SetCursor};
+
+    unsafe {
+        // LoadCursorW returns Result in windows 0.61; a failed load must not
+        // block the hide — bail quietly and let the foreground app's next
+        // WM_SETCURSOR recover the cursor.
+        if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+            let _ = SetCursor(Some(arrow));
+        }
+    }
+}
+
 /// The overlay's OS-level surface facts, read by the focus regression test:
 /// after a toggle-show that must NOT have stolen focus, `visible` is true
-/// (the no-activate show really surfaced it) while `focused` is false (the
-/// user's app keeps the keyboard).
+/// (the no-activate show returns the overlay to view) while `focused` is
+/// false (the user's app keeps the keyboard).
 #[derive(serde::Serialize)]
 pub struct OverlaySurfaceState {
     pub visible: bool,

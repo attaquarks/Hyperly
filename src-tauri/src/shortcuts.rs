@@ -291,6 +291,13 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
         if let Err(e) = window.emit("toggle-window-visibility", true) {
             eprintln!("Failed to emit toggle-window-visibility event: {}", e);
         }
+        // Hand the cursor back to the system BEFORE the window goes away: if
+        // the mouse is over the overlay, the last WM_SETCURSOR state belongs
+        // to the overlay's webview (which can be a hidden cursor in the
+        // explicit invisible-cursor mode) and would otherwise stay stale over
+        // the region after the hide. No-op when the mouse is elsewhere.
+        #[cfg(target_os = "windows")]
+        crate::win_activation::restore_system_cursor_before_hide();
         if let Err(e) = window.hide() {
             eprintln!("Failed to hide window: {}", e);
         }

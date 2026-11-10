@@ -120,6 +120,21 @@ describe("Hyperly startup health", () => {
     // with the foreground state the assertions read.
     await focusMainWindow();
 
+    // The overlay must not present a hidden OS cursor: the webview-wide
+    // `cursor: none` styling (the old "invisible" DEFAULT) is what left a
+    // stale hidden cursor over the overlay's screen region after the overlay
+    // was hidden — the Win32 cursor shape is stateful and the foreground app
+    // only re-sets it via its own WM_SETCURSOR. A visible default also means
+    // the cursor "properly shows up on the overlay" when it is surfaced.
+    const computedCursor = await browser.execute(
+      () => getComputedStyle(document.body).cursor
+    );
+    if (computedCursor === "none") {
+      throw new Error(
+        'overlay webview computes cursor: none — the hidden-cursor default (or its persisted "invisible" state) is back'
+      );
+    }
+
     const invokeCommand = (command: string): Promise<unknown> =>
       browser.execute((cmd) => {
         const tauri = (

@@ -252,7 +252,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     const customizableState = getCustomizableState();
     setCustomizable(customizableState);
 
-    updateCursor(customizableState.cursor.type || "invisible");
+    updateCursor(customizableState.cursor.type || "default");
 
     const stored = safeLocalStorage.getItem(STORAGE_KEYS.CUSTOMIZABLE);
     if (!stored) {
@@ -293,8 +293,13 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         return;
       }
 
-      // For overlay windows (main, capture-overlay-*)
-      const safeType = type || "invisible";
+      // For overlay windows (main, capture-overlay-*, history-wing). An unset
+      // type means the VISIBLE default — coercing a missing setting to
+      // "invisible" here is what hid the OS cursor inside the overlay and
+      // left a stale hidden cursor over the overlay's region after it was
+      // hidden (the Win32 cursor shape is only re-set by the next window's
+      // WM_SETCURSOR, so the foreground app showed no pointer).
+      const safeType = type || "default";
       const cursorValue = type === "invisible" ? "none" : safeType;
       document.documentElement.style.setProperty("--cursor-type", cursorValue);
     } catch (error) {

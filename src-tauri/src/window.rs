@@ -409,6 +409,8 @@ pub async fn open_history_wing(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn close_history_wing(app: AppHandle) -> Result<(), String> {
     HISTORY_WING_OPEN.store(false, std::sync::atomic::Ordering::Release);
+    #[cfg(target_os = "windows")]
+    crate::win_activation::restore_system_cursor_before_hide();
     if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
         wing.hide()
             .map_err(|e| format!("Failed to hide history wing: {}", e))?;
@@ -442,6 +444,8 @@ pub fn setup_history_wing_sync<R: Runtime>(app: &AppHandle<R>) {
 
 /// Hides the wing alongside the main overlay (Ctrl+\ and the Hide button).
 pub fn hide_history_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
+    #[cfg(target_os = "windows")]
+    crate::win_activation::restore_system_cursor_before_hide();
     if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
         let _ = wing.hide();
     }
