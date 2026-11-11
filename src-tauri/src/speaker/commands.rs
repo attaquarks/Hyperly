@@ -334,21 +334,24 @@ mod turn_boundary_tests {
 
     #[test]
     fn hangover_is_derived_at_48k() {
-        assert_eq!(silence_chunks_for(48000, 1024), 94);
+        // ceil(57600 / 1024) = 57 chunks = 1216 ms: never short of 1200 ms.
+        assert_eq!(silence_chunks_for(48000, 1024), 57);
     }
 
     #[test]
     fn hangover_is_derived_at_44_1k() {
-        // 86.13 chunks rounds up to 87 = 2020 ms: never short of 2000 ms.
-        assert_eq!(silence_chunks_for(44100, 1024), 87);
+        // 51.68 chunks rounds up to 52 = 1207 ms: never short of 1200 ms.
+        assert_eq!(silence_chunks_for(44100, 1024), 52);
     }
 
     #[test]
-    fn a_1200ms_pause_yields_one_block() {
+    fn a_900ms_pause_yields_one_block() {
+        // Below the 1200 ms hangover AND below the 1 s UX contract: mid-
+        // sentence thinking pauses must not split the turn.
         let needed = silence_chunks_for(SR, HOP);
         let timeline = [
             (true, pause_chunks(2000, SR, HOP)),
-            (false, pause_chunks(1200, SR, HOP)),
+            (false, pause_chunks(900, SR, HOP)),
             (true, pause_chunks(2000, SR, HOP)),
             (false, pause_chunks(30000, SR, HOP)),
         ];
@@ -369,12 +372,13 @@ mod turn_boundary_tests {
 
     #[test]
     fn speech_restarts_the_pending_finalize() {
-        // 1.9 s of silence stays below the 2.005 s threshold; resuming speech
-        // must cancel the pending finalize instead of splitting the turn.
+        // 1.1 s of silence stays below the 1.216 s threshold (but above the
+        // 1 s contract, so the margin is real); resuming speech must cancel
+        // the pending finalize instead of splitting the turn.
         let needed = silence_chunks_for(SR, HOP);
         let timeline = [
             (true, pause_chunks(2000, SR, HOP)),
-            (false, pause_chunks(1900, SR, HOP)),
+            (false, pause_chunks(1100, SR, HOP)),
             (true, pause_chunks(400, SR, HOP)),
             (false, pause_chunks(30000, SR, HOP)),
         ];
@@ -383,12 +387,12 @@ mod turn_boundary_tests {
 
     #[test]
     fn after_a_cancelled_finalize_a_full_pause_still_splits() {
-        // The 1.9 s pause adds no block (cancelled), the 2.1 s one does, and the
-        // trailing recording closes the second block: two in total.
+        // The 1.1 s pause adds no block (cancelled), the 2.1 s one does, and
+        // the trailing recording closes the second block: two in total.
         let needed = silence_chunks_for(SR, HOP);
         let timeline = [
             (true, pause_chunks(2000, SR, HOP)),
-            (false, pause_chunks(1900, SR, HOP)),
+            (false, pause_chunks(1100, SR, HOP)),
             (true, pause_chunks(400, SR, HOP)),
             (false, pause_chunks(2100, SR, HOP)),
             (true, pause_chunks(2000, SR, HOP)),

@@ -77,8 +77,12 @@ export interface VoiceInputState {
   aecStatus?: AecStatus;
 }
 
-// How often a live partial transcript is produced mid-utterance.
-const PARTIAL_INTERVAL_MS = 2000;
+// How often a live partial transcript is produced mid-utterance. 600 ms to
+// match the system path (PARTIAL_INTERVAL_MS in commands.rs): the old 2000 ms
+// put the live mic transcript seconds behind the user's voice. Mic utterances
+// are short, so the whole-buffer snapshot stays affordable here; the
+// partialInFlightRef guard prevents overlapping uploads.
+const PARTIAL_INTERVAL_MS = 600;
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -416,7 +420,7 @@ export const useVoiceInput = ({
       try {
         vad = await MicVAD.new({
           ...thresholds,
-          // Phase 4 R1: the shared turn-finalization hangover (2000 ms - see
+          // Phase 4 R1: the shared turn-finalization hangover (1200 ms - see
           // src/lib/turn-boundary.ts). vad-web's default is 1400 ms, which cut
           // the same sentence at a different pause than the Rust VAD loop used
           // for system audio. vad-web floors this to whole 96 ms frames and

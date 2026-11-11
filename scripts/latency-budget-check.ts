@@ -79,6 +79,20 @@ assert(
   `STT_SAMPLE_RATE must be 16000 — 48 kHz payloads upload 3x more bytes than any speech model consumes; got ${sttRate}`
 );
 
+// The MIC path has its own partial cadence (browser-side vad-web); both
+// capture sources must share the sub-second live-transcript contract.
+const voiceInput = read("src/hooks/useVoiceInput.ts");
+const micPartialMatch = voiceInput.match(/const PARTIAL_INTERVAL_MS = (\d+)/);
+assert(
+  micPartialMatch !== null,
+  "useVoiceInput.ts: PARTIAL_INTERVAL_MS constant missing"
+);
+const micPartialMs = micPartialMatch ? Number(micPartialMatch[1]) : 0;
+assert(
+  micPartialMs > 0 && micPartialMs <= 700,
+  `useVoiceInput.ts PARTIAL_INTERVAL_MS must be <= 700 ms to match the system path's sub-second live transcript; got ${micPartialMs}`
+);
+
 // The partial must be a DELTA (emit only audio since the previous partial),
 // not a whole-buffer snapshot.
 assert(
