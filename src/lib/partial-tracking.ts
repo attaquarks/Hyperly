@@ -1,21 +1,20 @@
 /**
  * Epoch tracking for live partial transcripts (the duplicate-prompt fix).
  *
- * The Rust VAD emits a `speech-partial` snapshot roughly every 2 s of speech,
- * and each snapshot is transcribed by an async STT call. A final utterance can
- * therefore land while one or more partial STT calls are still in flight. The
- * old code cleared `livePartial` when the final arrived, but an in-flight
- * partial response that landed *afterwards* repopulated it with an older
- * snapshot of the same audio — and the manual stop then appended that stale
- * snapshot to the finalized text (or, in Auto, sent it as a whole new prompt).
- * The user saw the same words reach the model twice.
+ * The Rust VAD emits a `speech-partial` delta roughly every 600 ms of NEW
+ * speech — only the audio since the previous partial, not the whole buffer
+ * (the old 2 s whole-buffer snapshots made every partial heavier as the
+ * utterance grew, which is what pushed the live transcript seconds behind the
+ * voice). Each delta is transcribed by an async STT call, and the live text is
+ * the ACCUMULATION of the accepted delta texts. A final utterance can
+ * therefore land while one or more partial STT calls are still in flight.
  *
- * The fix is an epoch: every finalization (and every stop) bumps the epoch,
- * and a partial response may only become the live partial if its epoch is
- * still current. A partial that was requested before the final is discarded
- * no matter when its STT answer arrives — the final's text supersedes it by
- * construction, because the Rust partial is a strict prefix of the utterance
- * audio the final was produced from.
+ * The epoch is the correctness core: every finalization (and every stop) bumps
+ * the epoch, and a partial response may only contribute to the live text if
+ * its epoch is still current. A partial that was requested before the final is
+ * discarded no matter when its STT answer arrives — the final's text
+ * supersedes it by construction, because the flushed/finalized utterance
+ * carries the whole buffer the deltas came from.
  */
 export class PartialTracker {
   private epoch = 0;
@@ -30,12 +29,16 @@ export class PartialTracker {
   }
 
   /**
-   * Apply a completed partial STT result. Returns false (and changes nothing)
-   * when a final or a stop superseded the utterance this partial belongs to.
+   * Apply a completed DELTA partial STT result: the text is appended to the
+   * accumulated live transcript. Returns false (and changes nothing) when a
+   * final or a stop superseded the utterance this partial belongs to.
    */
   apply(epoch: number, text: string): boolean {
     if (epoch !== this.epoch) return false;
-    this.live = text;
+    const trimmed = text.trim();
+    if (trimmed) {
+      this.live = this.live ? `${this.live} ${trimmed}` : trimmed;
+    }
     return true;
   }
 

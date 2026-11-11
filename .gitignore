@@ -35,3 +35,6 @@ Thumbs.db
 
 # Local agent/reviewer instructions — private to this checkout, never pushed
 claude-reviewer.md
+
+# Local guard output (latency report, etc.)
+/artifacts/

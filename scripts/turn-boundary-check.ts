@@ -17,11 +17,12 @@
 //
 // THIS SCRIPT ENFORCES
 //   1. the two constants are equal and both sit above the UX contract
-//      (TURN_SPLIT_UX_MS = 1500 ms - "a pause up to ~1.5 s must not split");
+//      (TURN_SPLIT_UX_MS = 1000 ms - "a pause up to ~1 s must not split";
+//      the hangover stays above 1 s because humans pause mid-sentence);
 //   2. the mic option actually derives from the constant (no literal 1400);
 //   3. the Rust loop compares against the derived threshold, not the legacy
 //      `config.silence_chunks` field;
-//   4. FIXTURES, two per source: a 1.2 s pause yields exactly ONE block, a
+//   4. FIXTURES, two per source: a 0.9 s pause yields exactly ONE block, a
 //      2.5 s pause yields exactly TWO, and a pause that is interrupted by
 //      speech does not finalize early. System and mic must agree on all of
 //      them - that equality is the pass condition.
@@ -185,8 +186,8 @@ if (micHangoverMs < TURN_HANGOVER_MS) {
 
 const FIXTURES: Array<{ name: string; timeline: Array<[number, number]>; expected: number }> = [
   {
-    name: "a 1.2 s pause does not split (ONE block)",
-    timeline: [[2000, 1200], [2000, 30000]],
+    name: "a 0.9 s pause does not split (ONE block)",
+    timeline: [[2000, 900], [2000, 30000]],
     expected: 1,
   },
   {
@@ -196,12 +197,12 @@ const FIXTURES: Array<{ name: string; timeline: Array<[number, number]>; expecte
   },
   {
     name: "speech inside the window cancels the finalize (ONE block)",
-    timeline: [[2000, 1900], [400, 30000]],
+    timeline: [[2000, 1100], [400, 30000]],
     expected: 1,
   },
   {
     name: "after the cancel, a full pause still splits (TWO blocks)",
-    timeline: [[2000, 1900], [400, 2100], [2000, 30000]],
+    timeline: [[2000, 1100], [400, 2100], [2000, 30000]],
     expected: 2,
   },
 ];

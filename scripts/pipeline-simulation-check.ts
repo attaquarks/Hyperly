@@ -404,9 +404,11 @@ console.log(
 
 /**
  * Mirrors useSystemAudio's fixed flow with the real decision modules:
- * partial events → tracker.request/apply; finals → tracker.finalize +
- * planUtterance; the stop sequence → tracker.stop + stopRequested + the
- * engine flush landing like any final; the fallback timer as a manual step.
+ * partial events → tracker.request/apply (each partial is a DELTA — new audio
+ * since the previous one — and the tracker accumulates the texts); finals →
+ * tracker.finalize + planUtterance; the stop sequence → tracker.stop +
+ * stopRequested + the engine flush landing like any final; the fallback timer
+ * as a manual step.
  */
 class PipelineDriver {
   prompts: string[] = [];
@@ -415,12 +417,30 @@ class PipelineDriver {
   engineActive = true;
   tracker = new PartialTracker();
 
+  /** The accumulated live transcript (what the UI would show). */
+  live(): string {
+    return this.tracker.current();
+  }
+
   /** A speech-partial event: stamp, (STT round-trip), apply. */
   async partial(text: string): Promise<void> {
     const epoch = this.tracker.request();
     if (this.tracker.apply(epoch, text)) {
       // The hook would also mirror this into livePartialRef / the UI.
     }
+  }
+
+  /**
+   * Stamp a partial event the moment it ARRIVES (the real race: the event
+   * lands before a final, but its STT round-trip completes after one).
+   */
+  stamp(): number {
+    return this.tracker.request();
+  }
+
+  /** The stamped partial's STT answer landing after the round-trip. */
+  applyStamped(epoch: number, text: string): void {
+    this.tracker.apply(epoch, text);
   }
 
   /** A speech-detected final landing through applyTranscription. */
@@ -481,8 +501,17 @@ class PipelineDriver {
   const stalePartial =
     "you find joy not in the things people give you because those feelings";
 
+  // The true race: the partial EVENT arrives before the final, its STT lands
+  // after. (Stamping after the final would hand the partial the new epoch and
+    // the discard would be vacuous.)
+  const staleEpoch = driver.stamp();
   await driver.final(utterance, "manual"); // held
-  await driver.partial(stalePartial); // lands AFTER the final (stale)
+  driver.applyStamped(staleEpoch, stalePartial); // STT lands AFTER the final
+  assert.equal(
+    driver.live(),
+    "",
+    "S1: a stale partial's STT landing after the final must not repopulate the live text"
+  );
   await driver.pressStop(); // no flush (the room was silent)
   await driver.fallbackTimer(); // sends the held text
 
@@ -538,8 +567,19 @@ class PipelineDriver {
   const utterance =
     "but when the disrespect continues you know when it's time to walk away";
 
+  // The true race in auto mode: a delta event arrives while the utterance is
+  // still open, its STT lands after the final sent. (In the delta world a
+  // partial event AFTER the final is new audio by construction — the Rust
+  // side resets the delta mark on every finalize — so the only stale case is
+  // this stamp-before/lands-after race.)
+  const staleEpoch = driver.stamp();
   await driver.final(utterance, "auto"); // sent immediately
-  await driver.partial(utterance); // the late stale snapshot
+  driver.applyStamped(staleEpoch, utterance); // its STT lands AFTER the final
+  assert.equal(
+    driver.live(),
+    "",
+    "S3: a stale partial's STT landing after the final must not repopulate the live text"
+  );
   await driver.pressStop(); // silence; no flush
   await driver.fallbackTimer();
 
@@ -554,3 +594,46 @@ class PipelineDriver {
 }
 
 console.log("  ok    pipeline simulation: all three reported scenarios behave correctly");
+
+// ---------------------------------------------------------------------------
+// S4 — the delta-partial cadence: two DELTA partials (the 600 ms cadence
+// emits only NEW audio) must ACCUMULATE into one live transcript, and a
+// delta whose STT lands after the final must still be discarded.
+// ---------------------------------------------------------------------------
+{
+  const driver = new PipelineDriver();
+  const deltaA = "the first thing to check is";
+  const deltaB = "whether the network path is clean";
+  const utterance = `${deltaA} ${deltaB}`;
+
+  await driver.partial(deltaA);
+  await driver.partial(deltaB);
+  assert.equal(
+    driver.live(),
+    utterance,
+    `S4: delta partials must accumulate into the full live text (got "${driver.live()}")`
+  );
+
+  // The true race: this delta's event arrived before the final, its STT
+  // lands after.
+  const staleEpoch = driver.stamp();
+  await driver.final(utterance, "manual"); // held
+  driver.applyStamped(staleEpoch, deltaB); // STT lands AFTER the final
+  assert.equal(
+    driver.live(),
+    "",
+    "S4: a stale delta after the final must not repopulate the live text"
+  );
+
+  await driver.pressStop();
+  await driver.fallbackTimer();
+
+  const payload = driver.prompts.join(" | ");
+  const occurrences = payload.split(utterance).length - 1;
+  assert.equal(
+    occurrences,
+    1,
+    `S4: the utterance must appear exactly once (got ${occurrences}: "${payload}")`
+  );
+  console.log("  ok    S4 delta partials: accumulation works, stale deltas stay discarded");
+}

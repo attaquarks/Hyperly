@@ -49,6 +49,23 @@ jobs:
       - name: Run regression guards
         run: npm run guards
 
+      # The latency budget guard runs with the rest (run-guards discovers it
+      # from disk); this pass re-runs it against a dedicated output dir so the
+      # measured before/after numbers (payload sizes, stop→dispatch timings)
+      # are uploaded as a build artifact anyone can open.
+      - name: Record latency budget report
+        if: success()
+        run: node --experimental-strip-types scripts/latency-budget-check.ts
+        env:
+          LATENCY_REPORT_DIR: ${{ github.workspace }}/latency-report
+
+      - name: Upload latency budget report
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latency-report
+          path: latency-report/latency-report.json
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 

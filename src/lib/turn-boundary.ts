@@ -4,12 +4,14 @@
  *
  * THE UX CONTRACT
  * ---------------
- * A pause of up to ~1.5 s must not split a turn. Both sources therefore use
- * the same hangover: TURN_HANGOVER_MS (2000 ms, the value Glass uses),
- * comfortably above the contract so scheduling jitter cannot fragment a
- * sentence. The hangover is *resettable*: any detected speech restarts the
- * countdown in both segmenters (vad-web zeroes `redemptionCounter` in
- * frame-processor.js; the Rust loop zeroes `silence_chunks`).
+ * A pause of up to ~1 s must not split a turn — humans pause mid-sentence
+ * while thinking, so the hangover must stay comfortably above one second.
+ * Both sources use TURN_HANGOVER_MS (1200 ms), above the contract so
+ * scheduling jitter cannot fragment a sentence, while cutting the old 2000 ms
+ * finalize lag by 800 ms. The hangover is *resettable*: any detected speech
+ * restarts the countdown in both segmenters (vad-web zeroes
+ * `redemptionCounter` in frame-processor.js; the Rust loop zeroes
+ * `silence_chunks`).
  *
  * WHY TWO IMPLEMENTATIONS, ONE NUMBER
  * -----------------------------------
@@ -26,18 +28,18 @@
  */
 
 /** A pause up to this long must not split a turn (the UX contract). */
-export const TURN_SPLIT_UX_MS = 1500;
+export const TURN_SPLIT_UX_MS = 1000;
 
 /** Trailing silence required to finalize a turn - one value, both sources. */
-export const TURN_HANGOVER_MS = 2000;
+export const TURN_HANGOVER_MS = 1200;
 
 /** vad-web's analysis frame: 1536 samples at 16 kHz. */
 export const MIC_FRAME_MS = 96;
 
 /**
  * `redemptionMs` to hand vad-web. It floors to whole frames
- * (`floor(ms / 96)`), so round *up* to the next frame boundary: 2016 ms
- * resolves to 21 frames = 2016 ms of hangover, never below TURN_HANGOVER_MS.
+ * (`floor(ms / 96)`), so round *up* to the next frame boundary: 1200 ms
+ * resolves to 13 frames = 1248 ms of hangover, never below TURN_HANGOVER_MS.
  */
 export const micRedemptionMs = (): number =>
   Math.ceil(TURN_HANGOVER_MS / MIC_FRAME_MS) * MIC_FRAME_MS;

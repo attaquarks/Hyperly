@@ -227,8 +227,23 @@ const REF_DECAY: f32 = 0.997;
 /// Trailing silence that finalizes a turn, in milliseconds. Mirrored by
 /// `TURN_HANGOVER_MS` in src/lib/turn-boundary.ts; `scripts/turn-boundary-check.ts`
 /// fails if the two disagree. The UX contract behind the number: a pause of up
-/// to ~1.5 s must not split a turn, so both sources sit at 2000 ms.
-pub const TURN_HANGOVER_MS: u64 = 2000;
+/// to ~1 s must not split a turn — humans pause mid-sentence while thinking —
+/// so both sources sit at 1200 ms, comfortably above 1 s while cutting the
+/// old 2000 ms finalize lag by 800 ms.
+pub const TURN_HANGOVER_MS: u64 = 1200;
+
+/// How often a live delta partial is emitted, in ms of NEW speech. The old
+/// cadence was 2000 ms AND each partial re-emitted the whole utterance buffer,
+/// so the live transcript lagged speech by 2 s + a growing upload. 600 ms of
+/// new audio per partial keeps the live text sub-second behind the voice at a
+/// constant, tiny payload (see `resample_to_stt_rate`).
+pub const PARTIAL_INTERVAL_MS: u64 = 600;
+
+/// All audio sent to the cloud STT provider is downsampled to 16 kHz mono
+/// before the WAV encode. Speech recognition never uses more bandwidth, and
+/// every provider resamples to this internally anyway — 48 kHz payloads only
+/// inflated the base64 crossing the IPC bridge and the upload 3×.
+pub const STT_SAMPLE_RATE: u32 = 16000;
 
 /// The hangover expressed in hop-size chunks for a given sample rate, rounded
 /// **up** so the effective silence never falls short of `TURN_HANGOVER_MS`
@@ -429,7 +444,11 @@ fn emit_utterance(
         sr,
     ) {
         Some(normalized) => {
-            if let Ok(b64) = samples_to_wav_b64(sr, &normalized) {
+            // The final goes to the provider at the same 16 kHz the partials
+            // use — the upload is 3× smaller and the provider resamples
+            // internally anyway.
+            let normalized_16k = resample_to_stt_rate(&normalized, sr);
+            if let Ok(b64) = samples_to_wav_b64(STT_SAMPLE_RATE, &normalized_16k) {
                 let _ = app.emit("speech-detected", b64);
                 true
             } else {
@@ -586,14 +605,27 @@ async fn run_vad_capture(
                 speech_buffer.extend_from_slice(&mono);
                 silence_chunks = next_silence_count(silence_chunks, true); // resettable hangover
 
-                // Emit a live partial roughly every 2s of accumulated speech so
-                // Auto mode shows the same running transcript as Manual. The
-                // buffer is already noise-gated (the gate ran per-chunk before
-                // the VAD check), so only normalize before encoding.
-                if speech_buffer.len() >= last_partial_mark + (sr as usize) * 2 {
+                // Emit a live DELTA partial every PARTIAL_INTERVAL_MS of new
+                // speech so the running transcript stays sub-second behind
+                // the voice. The payload is ONLY the audio since the last
+                // partial: the old whole-buffer emit re-uploaded everything
+                // on every tick (a 30 s utterance re-uploaded ~30 s of audio
+                // each time), which is what made the live transcript lag
+                // worse the longer someone spoke. The frontend accumulates
+                // the delta texts in PartialTracker; the flushed/finalized
+                // utterance is always the authoritative whole-buffer
+                // transcript. The delta is already noise-gated (the gate ran
+                // per-chunk before the VAD check), so only normalize before
+                // encoding.
+                if speech_buffer.len()
+                    >= last_partial_mark
+                        + (sr as usize) * (PARTIAL_INTERVAL_MS as usize) / 1000
+                {
+                    let delta = &speech_buffer[last_partial_mark..];
                     last_partial_mark = speech_buffer.len();
-                    let partial_normalized = normalize_audio_level(&speech_buffer, 0.1);
-                    if let Ok(partial_b64) = samples_to_wav_b64(sr, &partial_normalized) {
+                    let partial_normalized = normalize_audio_level(delta, 0.1);
+                    let partial_16k = resample_to_stt_rate(&partial_normalized, sr);
+                    if let Ok(partial_b64) = samples_to_wav_b64(STT_SAMPLE_RATE, &partial_16k) {
                         let _ = app.emit("speech-partial", partial_b64);
                     }
                 }
@@ -663,7 +695,7 @@ async fn run_vad_capture(
     // utterance was still open. Emit what has been buffered — this is the
     // tail that used to vanish when the task was aborted mid-speech, which
     // is why the LLM received roughly half of what the transcript showed.
-    // The natural path's 2 s hangover does not apply here: the user ended
+    // The natural path's 1200 ms hangover does not apply here: the user ended
     // the turn explicitly.
     if in_speech && !speech_buffer.is_empty() {
         let silence_duration_samples = silence_chunks * config.hop_size;
@@ -676,6 +708,14 @@ async fn run_vad_capture(
             &speech_buffer,
         );
     }
+
+    // Tell the frontend the flush decision is final, event-driven. The stop
+    // path used to sit behind a 600 ms grace timer because the UI could not
+    // distinguish "flushed" from "nothing was open"; this event removes that
+    // guess. Fires on every loop exit (flushed, natural finalize, stream
+    // end) — the frontend only acts on it while a stop is pending and no
+    // flushed utterance has been seen, so it is a no-op otherwise.
+    let _ = app.emit("capture-stopped", ());
 }
 
 // Continuous capture (VAD disabled)
@@ -855,6 +895,29 @@ fn normalize_audio_level(samples: &[f32], target_rms: f32) -> Vec<f32> {
         .collect()
 }
 
+/// Linear-interpolation resampler down to `STT_SAMPLE_RATE`. 48 kHz → 16 kHz
+/// is exactly 3:1 and 44.1 kHz lands on fractional steps; either way the
+/// speech band (< 8 kHz) survives intact for transcription, while the WAV
+/// payload crossing the IPC bridge and the upload shrinks 3×.
+fn resample_to_stt_rate(samples: &[f32], sr: u32) -> Vec<f32> {
+    if samples.is_empty() || sr == STT_SAMPLE_RATE {
+        return samples.to_vec();
+    }
+    let out_len = ((samples.len() as u64 * STT_SAMPLE_RATE as u64) / sr as u64).max(1) as usize;
+    let step = f64::from(sr) / f64::from(STT_SAMPLE_RATE);
+    let mut out = Vec::with_capacity(out_len);
+    let last = samples.len() - 1;
+    for i in 0..out_len {
+        let pos = i as f64 * step;
+        let idx = (pos as usize).min(last);
+        let frac = (pos - pos as usize as f64) as f32;
+        let a = samples[idx];
+        let b = samples[(idx + 1).min(last)];
+        out.push(a + (b - a) * frac);
+    }
+    out
+}
+
 // Convert samples to WAV base64 (with proper error handling)
 fn samples_to_wav_b64(sample_rate: u32, mono_f32: &[f32]) -> Result<String, String> {
     // Validate sample rate
@@ -932,7 +995,7 @@ pub async fn stop_system_audio_capture(app: AppHandle) -> Result<(), String> {
 
     // Short cleanup windows (the old 300 ms + 200 ms blind sleeps were the
     // floor of the stop latency; the join above replaces their real work).
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
     // Mark as not capturing
     *state

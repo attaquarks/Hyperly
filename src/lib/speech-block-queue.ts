@@ -113,7 +113,11 @@ export class SpeechBlockQueue<T = unknown> {
    * Accept a speech block. Returns its id, or `null` when the queue is at
    * capacity (reported through `onOverflow`) or already disposed.
    */
-  enqueue(source: SpeechSource, audio: T): number | null {
+  enqueue(
+    source: SpeechSource,
+    audio: T,
+    options?: { front?: boolean }
+  ): number | null {
     if (this.disposed) return null;
     if (this.blocks.length >= this.maxQueueDepth) {
       this.onOverflow?.(source);
@@ -126,7 +130,16 @@ export class SpeechBlockQueue<T = unknown> {
       attempts: 0,
       enqueuedAt: this.now(),
     };
-    this.blocks.push(block);
+    // `front` places the block ahead of everything still WAITING — the
+    // stop-path flush must not queue behind older utterances. The drain is
+    // serial, so a block already mid-transcription finishes first (its text
+    // is real content and must not be abandoned); front priority only skips
+    // the waiters.
+    if (options?.front) {
+      this.blocks.unshift(block);
+    } else {
+      this.blocks.push(block);
+    }
     void this.drain();
     return block.id;
   }
@@ -168,7 +181,13 @@ export class SpeechBlockQueue<T = unknown> {
         const block = this.blocks[0];
         try {
           const text = await this.transcribe(block);
-          this.blocks.shift();
+          // Remove the block that was actually transcribed — NOT blindly
+          // blocks[0]. A front-priority enqueue during the transcribe await
+          // (the stop-path flush) lands ahead of the in-flight block, and a
+          // blind shift would discard the flush block while re-transcribing
+          // the one that already finished.
+          const idx = this.blocks.indexOf(block);
+          if (idx !== -1) this.blocks.splice(idx, 1);
           await this.onText(text, block);
         } catch (error) {
           block.attempts += 1;
@@ -176,7 +195,8 @@ export class SpeechBlockQueue<T = unknown> {
           if (block.attempts < this.maxAttempts) {
             await this.waitForRetry(this.backoffMs(block.attempts));
           } else {
-            this.blocks.shift();
+            const idx = this.blocks.indexOf(block);
+            if (idx !== -1) this.blocks.splice(idx, 1);
             this.dead.push(block);
             this.onDeadLetter?.(block, error);
           }

@@ -214,6 +214,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // a stop arrives during that window so the stop is applied once the
   // transcript lands instead of dropping it.
   const sttInFlightRef = useRef<boolean>(false);
+  // Aborts the in-flight delta-partial STT upload when a stop is pressed, so
+  // the flush utterance's upload gets the bandwidth instead of racing it.
+  const partialAbortRef = useRef<AbortController | null>(null);
   const stopRequestedRef = useRef<boolean>(false);
   // Guards the async spawn against a concurrent start.
   const startingRef = useRef<boolean>(false);
@@ -899,6 +902,12 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
               // stop) landing during it must invalidate this result.
               const epoch = partialTrackerRef.current.request();
 
+              // The abort controller lets a Stop press cancel the in-flight
+              // upload instead of sharing bandwidth with the flush that is
+              // about to race it.
+              const controller = new AbortController();
+              partialAbortRef.current = controller;
+
               // R4: a partial is best-effort. Only a real transcript is shown;
               // an error/empty/cancelled result is ignored here (the final block
               // path reports errors), so a provider hiccup can never inject error
@@ -907,13 +916,19 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
                 provider: providerConfig,
                 selectedProvider: selected,
                 audio: audioBlob,
+                signal: controller.signal,
               });
+              partialAbortRef.current = null;
 
               if (partial.status === "ok" && partial.text.trim()) {
+                // The partial is a DELTA (new audio since the previous one):
+                // the tracker accumulates it, so the live text and the
+                // transcript segment reflect the whole utterance so far.
                 if (partialTrackerRef.current.apply(epoch, partial.text)) {
-                  setLivePartial(partial.text);
-                  livePartialRef.current = partial.text;
-                  upsertPartialSegment(partial.text);
+                  const accumulated = partialTrackerRef.current.current();
+                  setLivePartial(accumulated);
+                  livePartialRef.current = accumulated;
+                  upsertPartialSegment(accumulated);
                 }
               }
             } catch (err) {
@@ -968,13 +983,42 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           // that takes.
           sttInFlightRef.current = true;
           setIsProcessing(true);
-          getSpeechQueue().enqueue("system", audioBlob);
+          // A stop press makes this block the flush-on-stop utterance: it
+          // jumps ahead of every waiter so the LLM is asked as soon as its
+          // STT lands.
+          getSpeechQueue().enqueue("system", audioBlob, {
+            front: stopRequestedRef.current,
+          });
         });
         if (disposed) {
           speechUnlisten();
           return;
         }
         unlistens.push(speechUnlisten);
+
+        // Event-driven stop resolution: the Rust side emits `capture-stopped`
+        // once per capture loop exit (after any flush-on-stop utterance was
+        // emitted). If a stop is still pending and no flushed utterance was
+        // seen, the held text goes out IMMEDIATELY instead of waiting out the
+        // 600 ms fallback timer — the timer below stays only as a backstop
+        // for a backend that never emits the event.
+        const stopAckUnlisten = await listen("capture-stopped", () => {
+          if (disposed) return;
+          if (stopRequestedRef.current && !stopFlushSeenRef.current) {
+            stopRequestedRef.current = false;
+            stopFlushSeenRef.current = false;
+            const held = pendingTranscriptRef.current;
+            pendingTranscriptRef.current = "";
+            if (held.trim()) {
+              void stopAndSendRef.current?.(held, "system");
+            }
+          }
+        });
+        if (disposed) {
+          stopAckUnlisten();
+          return;
+        }
+        unlistens.push(stopAckUnlisten);
       } catch (err) {
         if (!disposed) setError("Failed to setup speech listener");
       }
@@ -1674,6 +1718,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     // response describes audio the engine is about to flush as a final, so
     // applying one would resurface words the final will also carry.
     partialTrackerRef.current.stop();
+    // Cancel the in-flight delta-partial upload: its audio is flushed as a
+    // final anyway, and aborting frees the connection for the flush.
+    partialAbortRef.current?.abort();
+    partialAbortRef.current = null;
     setLivePartial("");
     livePartialRef.current = "";
     stopRequestedRef.current = true;
