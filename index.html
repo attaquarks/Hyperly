@@ -4,6 +4,29 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hyperly</title>
+    <script>
+      // Boot watchdog: if the app module never executes (the real-world case:
+      // vite's first-run dependency optimizer after an npm-cache clean holds
+      // every module request PENDING — no console error, the placeholder just
+      // sits there forever), say so visibly instead of stalling silently.
+      // main.tsx clears this the moment its module graph has finished
+      // evaluating; paintBootFailure covers failures AFTER that point.
+      window.__HYPERLY_BOOT_WATCHDOG__ = setTimeout(function () {
+        if (window.__HYPERLY_BOOTED__) return;
+        var root = document.getElementById("root");
+        if (!root) return;
+        root.innerHTML =
+          '<div style="box-sizing:border-box;width:100%;height:100%;min-height:540px;padding:18px 20px;color:#f8f8f8;background:rgba(16,16,18,0.96);border:1px solid rgba(255,255,255,0.12);border-radius:14px;font:13px/1.45 Segoe UI,system-ui,sans-serif;">' +
+          '<strong style="display:block;margin-bottom:8px;">Hyperly — the UI did not start</strong>' +
+          'The app bundle never finished loading. This is a dev-server issue, not a crash:' +
+          '<ul style="margin:8px 0 0 16px;padding:0;">' +
+          '<li>Look at the terminal running <code>npm run tauri dev</code>: a line like "new dependencies optimized" or "optimizing dependencies" means the first cold start was still pre-bundling — reload the window (Ctrl+R in devtools) or restart the dev command.</li>' +
+          '<li>If it recurs every run: stop the dev command, delete <code>node_modules/.vite</code>, and start again.</li>' +
+          '<li>Also check this console for red errors and the Network tab for a request stuck in "pending".</li>' +
+          "</ul>" +
+          "</div>";
+      }, 15000);
+    </script>
   </head>
 
   <body style="margin:0;background-color:transparent !important">

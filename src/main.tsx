@@ -38,6 +38,20 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 
 try {
+  // The boot watchdog (index.html) paints a "the UI did not start" panel if
+  // the module graph never finished evaluating — the silent vite cold-start
+  // optimizer hold. Clear it the moment this module body runs: everything
+  // after this line has its own failure surfaces (paintBootFailure, the
+  // window error/unhandledrejection listeners).
+  (
+    window as unknown as { __HYPERLY_BOOTED__?: boolean }
+  ).__HYPERLY_BOOTED__ = true;
+  clearTimeout(
+    (
+      window as unknown as { __HYPERLY_BOOT_WATCHDOG__?: number }
+    ).__HYPERLY_BOOT_WATCHDOG__
+  );
+
   const currentWindow = getCurrentWindow();
   const windowLabel = currentWindow.label;
   logFrontend("info", `webview boot ${windowLabel}`);
