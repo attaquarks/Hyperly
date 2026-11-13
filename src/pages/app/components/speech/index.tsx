@@ -33,6 +33,7 @@ const ListenUserMic = lazy(() =>
 export const SystemAudio = (props: useSystemAudioType) => {
   const {
     capturing,
+    sttStreaming,
     isProcessing,
     isAIProcessing,
     lastAIResponse,
@@ -208,6 +209,21 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
   return (
     <div className="hyperly-listen-body">
+      {/* Streaming STT is LIVE: the WebSocket path is running, words arrive
+      while people talk, and Stop sends instantly. The user must be able to
+      SEE which transcription mode is running — its absence is exactly how
+      the silent batch fallback went unnoticed. */}
+      {sttStreaming && capturing ? (
+        <div
+          className="flex items-center gap-1.5 px-2 py-0.5 w-fit rounded-full border border-green-500/40"
+          data-testid="listen-streaming-badge"
+        >
+          <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
+          <span className="text-[10px] uppercase tracking-wide text-green-500">
+            Live streaming
+          </span>
+        </div>
+      ) : null}
       <ErrorBoundary
         fallbackRender={() => null}
         onError={(micError) => {

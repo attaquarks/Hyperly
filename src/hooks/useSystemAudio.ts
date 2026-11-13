@@ -222,6 +222,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // which case transcripts arrive as `stt-stream-*` TEXT events and the
   // batch audio round trip is skipped entirely.
   const streamingActiveRef = useRef<boolean>(false);
+  // React-state mirror so the Listen room can SHOW the streaming state —
+  // the user must be able to see that the WebSocket path is live.
+  const [sttStreaming, setSttStreaming] = useState<boolean>(false);
   const stopRequestedRef = useRef<boolean>(false);
   // Guards the async spawn against a concurrent start.
   const startingRef = useRef<boolean>(false);
@@ -1042,7 +1045,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           if (disposed) return;
           const wasActive = streamingActiveRef.current;
           streamingActiveRef.current = event.payload.active;
-          if (wasActive && !event.payload.active && event.payload.reason) {
+          setSttStreaming(event.payload.active);
+          if (event.payload.active) {
+            console.info("[listen] streaming STT active — live words incoming");
+          } else if (wasActive && event.payload.reason) {
             console.warn("STT stream ended:", event.payload.reason);
           }
         });
@@ -1739,6 +1745,12 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         sttConfigRef.current.selected.variables
       );
       if (streamSessionConfig) {
+        console.info(
+          "[listen] starting streaming STT session:",
+          streamSessionConfig.base_url,
+          "model=",
+          streamSessionConfig.model
+        );
         try {
           await invoke("configure_stt_streaming", {
             config: {
@@ -2139,6 +2151,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
 
   return {
     capturing,
+    sttStreaming,
     isProcessing,
     isAIProcessing,
     lastTranscription,
