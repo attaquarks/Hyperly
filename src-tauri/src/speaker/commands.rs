@@ -536,7 +536,7 @@ async fn run_vad_capture(
             if let Ok(streaming_guard) = app.state::<crate::AudioState>().stt_streaming.try_lock() {
                 if let Some(session) = streaming_guard.as_ref() {
                     let down = resample_to_stt_rate(&mono, sr);
-                    let _ = session.audio_tx.send(down);
+                    let _ = session.engine.audio_tx.send(down);
                 }
             }
 
