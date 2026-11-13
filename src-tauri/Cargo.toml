@@ -52,7 +52,8 @@ once_cell = "1.19.0"
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 # Streaming STT (Tier 2): the WebSocket path for streaming-capable providers
 # (Deepgram nova-3 and friends) — audio streams up, words come back live.
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# native-tls on Windows = SChannel (the OS TLS), no extra native build deps.
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
 anyhow = "1.0"
 tracing = "0.1"
