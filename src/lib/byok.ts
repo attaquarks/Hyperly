@@ -62,16 +62,25 @@ export const buildByokProvider = (
   form: ByokForm,
   kind: "ai" | "stt"
 ): Omit<TYPE_PROVIDER, "id" | "isCustom"> => {
+  const byok = {
+    baseUrl: normalizeByokBase(form.baseUrl),
+    apiKey: form.apiKey.trim(),
+    model: form.model.trim(),
+  };
   if (kind === "stt") {
     return {
+      name: form.name,
       curl: buildSttCurl(form),
       responseContentPath: "text",
-      streaming: false,
+      streaming: form.streaming,
+      byok,
     };
   }
   return {
+    name: form.name,
     curl: buildAiCurl(form),
     responseContentPath: "choices[0].message.content",
     streaming: form.streaming,
+    byok,
   };
 };

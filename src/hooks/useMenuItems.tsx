@@ -1,6 +1,6 @@
 import {
   Settings,
-  Code,
+  Bot,
   MessagesSquare,
   WandSparkles,
   AudioLinesIcon,
@@ -62,8 +62,8 @@ export const useMenuItems = () => {
       href: "/shortcuts",
     },
     {
-      icon: Code,
-      label: "Dev space",
+      icon: Bot,
+      label: "AI Provider",
       href: "/dev-space",
     },
   ];

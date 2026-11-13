@@ -217,6 +217,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // Aborts the in-flight delta-partial STT upload when a stop is pressed, so
   // the flush utterance's upload gets the bandwidth instead of racing it.
   const partialAbortRef = useRef<AbortController | null>(null);
+  // Tier 2 streaming STT: true while the Rust WebSocket session is live, in
+  // which case transcripts arrive as `stt-stream-*` TEXT events and the
+  // batch audio round trip is skipped entirely.
+  const streamingActiveRef = useRef<boolean>(false);
   const stopRequestedRef = useRef<boolean>(false);
   // Guards the async spawn against a concurrent start.
   const startingRef = useRef<boolean>(false);
@@ -880,6 +884,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             // Engine lifetime, not React state: the flush-on-stop utterance
             // arrives in the same window the state flips to false.
             if (!engineActiveRef.current) return;
+            // Streaming mode: transcripts arrive as stt-stream-* TEXT events;
+            // the batch audio round trip would duplicate them.
+            if (streamingActiveRef.current) return;
             const base64Audio = event.payload as string;
             try {
               const binaryString = atob(base64Audio);
@@ -951,6 +958,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           if (!engineActiveRef.current) {
             return;
           }
+          // Streaming mode: the provider's finals arrive as stt-stream-final
+          // text; the flushed batch utterance would duplicate the words.
+          if (streamingActiveRef.current) return;
           // Multiplicity probe: if a listener leak ever regresses, this logs
           // once per leaked copy per event and the count is visible directly.
           console.info("[listen] speech-detected delivered");
@@ -1019,6 +1029,68 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           return;
         }
         unlistens.push(stopAckUnlisten);
+
+        // Tier 2 streaming STT: the Rust WebSocket session reports its
+        // lifecycle, and its TEXT transcripts feed the exact same paths the
+        // batch results use — partials through the epoch tracker, finals
+        // through applyTranscription — with NO audio upload or fetchSTT.
+        const statusUnlisten = await listen<{
+          active: boolean;
+          reason?: string;
+        }>("stt-stream-status", (event) => {
+          if (disposed) return;
+          const wasActive = streamingActiveRef.current;
+          streamingActiveRef.current = event.payload.active;
+          if (wasActive && !event.payload.active && event.payload.reason) {
+            console.warn("STT stream ended:", event.payload.reason);
+          }
+        });
+        if (disposed) {
+          statusUnlisten();
+          return;
+        }
+        unlistens.push(statusUnlisten);
+
+        const streamPartialUnlisten = await listen<{ text: string }>(
+          "stt-stream-partial",
+          (event) => {
+            if (disposed || !streamingActiveRef.current) return;
+            const text = event.payload.text.trim();
+            if (!text) return;
+            // Same epoch discipline as the batch partials: a final or a stop
+            // landing during the stream supersedes this text.
+            const epoch = partialTrackerRef.current.request();
+            if (partialTrackerRef.current.apply(epoch, text)) {
+              const accumulated = partialTrackerRef.current.current();
+              setLivePartial(accumulated);
+              livePartialRef.current = accumulated;
+              upsertPartialSegment(accumulated);
+            }
+          }
+        );
+        if (disposed) {
+          streamPartialUnlisten();
+          return;
+        }
+        unlistens.push(streamPartialUnlisten);
+
+        const streamFinalUnlisten = await listen<{ text: string }>(
+          "stt-stream-final",
+          (event) => {
+            if (disposed || !streamingActiveRef.current) return;
+            const text = event.payload.text.trim();
+            if (!text) return;
+            // The provider's own final: persist + plan + send with NO queue,
+            // NO upload, NO fetchSTT. This is the path that makes Stop→LLM
+            // ~instant for streaming providers.
+            void applyTranscriptionRef.current(text);
+          }
+        );
+        if (disposed) {
+          streamFinalUnlisten();
+          return;
+        }
+        unlistens.push(streamFinalUnlisten);
       } catch (err) {
         if (!disposed) setError("Failed to setup speech listener");
       }
@@ -1399,6 +1471,15 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // `stopCapture`, which belongs to Auto's Stop button.
   const stopAndSend = useCallback(
     async (text: string, source: TranscriptSource) => {
+      // Streaming mode: the WS teardown at engine-stop means the provider's
+      // final for the unfinalized tail will never arrive — fold the live
+      // tail into the outgoing text instead of losing it.
+      if (streamingActiveRef.current) {
+        const tail = partialTrackerRef.current.current().trim();
+        if (tail && !text.includes(tail)) {
+          text = text ? `${text} ${tail}` : tail;
+        }
+      }
       await stopReferenceTap();
       try {
         await invoke<string>("stop_system_audio_capture");
@@ -1641,6 +1722,29 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         deviceId: deviceId,
       });
       await startReferenceTap();
+      // Tier 2 streaming STT: when the selected provider carries a detected
+      // streaming capability, start the Rust WebSocket session — transcripts
+      // arrive as `stt-stream-*` TEXT events and the batch audio round trip
+      // is skipped for this session.
+      streamingActiveRef.current = false;
+      const streamProvider = sttConfigRef.current.providers.find(
+        (p) => p.id === sttConfigRef.current.selected.provider
+      );
+      if (streamProvider?.streaming && streamProvider.byok) {
+        try {
+          await invoke("configure_stt_streaming", {
+            config: {
+              base_url: streamProvider.byok.baseUrl,
+              api_key: streamProvider.byok.apiKey,
+              model: streamProvider.byok.model,
+            },
+          });
+        } catch (streamError) {
+          console.warn("Streaming STT unavailable, using batch mode:", streamError);
+        }
+      } else {
+        void invoke("configure_stt_streaming", { config: null }).catch(() => {});
+      }
       // The engine may emit events from this point on; the listeners gate on
       // the engine lifetime, not on the React state that flips a render later.
       engineActiveRef.current = true;
@@ -1717,6 +1821,17 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     // Nothing is mid-STT. Freeze partials FIRST: from here every partial
     // response describes audio the engine is about to flush as a final, so
     // applying one would resurface words the final will also carry.
+    // Streaming mode: the WS is torn down at stop, so the provider's final
+    // for the unfinalized tail will NEVER arrive — fold the live tail into
+    // the held text instead of losing it.
+    if (streamingActiveRef.current) {
+      const tail = partialTrackerRef.current.current();
+      if (tail.trim()) {
+        pendingTranscriptRef.current = pendingTranscriptRef.current
+          ? `${pendingTranscriptRef.current} ${tail}`
+          : tail;
+      }
+    }
     partialTrackerRef.current.stop();
     // Cancel the in-flight delta-partial upload: its audio is flushed as a
     // final anyway, and aborting frees the connection for the flush.

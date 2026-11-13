@@ -85,30 +85,57 @@ pub fn set_capture_protection<R: Runtime>(window: &WebviewWindow<R>, protected: 
     }
 }
 
-/// Hand the mouse cursor back to the system before the overlay hides.
+/// Hand the mouse back to the system before a window hides.
 ///
-/// The Win32 cursor is a STATEFUL shape: it only changes when the window
-/// under the mouse processes WM_SETCURSOR. If the overlay (or its webview's
-/// `cursor: none` styling in the explicit invisible-cursor mode) set a hidden
-/// cursor last, hiding the overlay leaves that stale hidden shape over the
-/// region it occupied — the foreground app shows no pointer until it happens
-/// to re-set one. Setting the standard arrow immediately before the hide
-/// re-asserts a visible shape as the last cursor state. Per the Win32
-/// contract this only takes effect when the window under the mouse belongs
-/// to the calling thread — exactly the reported scenario (mouse over the
-/// overlay at hide time) — and is a harmless no-op otherwise. No input is
+/// Two properties must be released, or the hidden window keeps eating input
+/// in the region it occupied (the reported "cursor stays attached with the
+/// overlay; clicks and scroll behind it do nothing"):
+///
+/// 1. **Mouse capture.** Chromium's renderer holds the Win32 mouse capture
+///    during drags and selections inside the web content. A hidden window
+///    that still owns the capture keeps receiving (and swallowing) every
+///    mouse event. `ReleaseCapture` drops any capture held by this thread's
+///    windows — the webview child was created on our thread, so its capture
+///    belongs here.
+/// 2. **The stale cursor shape** (the stateful WM_SETCURSOR issue — see the
+///    cursor fix below).
+///
+/// Both calls are no-ops when nothing is held/hovering. No input is
 /// simulated and no foreground changes hands.
 #[cfg(target_os = "windows")]
-pub fn restore_system_cursor_before_hide() {
+pub fn release_input_before_hide() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
     use windows::Win32::UI::WindowsAndMessaging::{IDC_ARROW, LoadCursorW, SetCursor};
 
     unsafe {
-        // LoadCursorW returns Result in windows 0.61; a failed load must not
-        // block the hide — bail quietly and let the foreground app's next
-        // WM_SETCURSOR recover the cursor.
+        // Drop any mouse capture held by this thread's windows FIRST, so the
+        // hidden window cannot keep swallowing clicks and scroll.
+        let _ = ReleaseCapture();
+        // Re-assert a visible cursor as the last shape the system saw.
         if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
             let _ = SetCursor(Some(arrow));
         }
+    }
+}
+
+/// Hide a window and GUARANTEE the foreground gets its mouse back.
+///
+/// `window.hide()` (SW_HIDE) normally suffices — a hidden window cannot be
+/// hit-tested. As the belt-and-suspenders for the input-retention failure
+/// mode, the visibility is verified after the hide: if the window is somehow
+/// still visible, it is MINIMIZED instead — a minimized window provably
+/// returns the mouse to the foreground app (the user-verified reference
+/// behavior). Either way the region the window occupied becomes inert.
+#[cfg(target_os = "windows")]
+pub fn hide_and_release_input<R: Runtime>(window: &WebviewWindow<R>) {
+    release_input_before_hide();
+    if let Err(e) = window.hide() {
+        eprintln!("Failed to hide window: {}", e);
+    }
+    // Verify: a still-visible window would keep eating the region's input.
+    if window.is_visible().unwrap_or(false) {
+        eprintln!("Window still visible after hide — minimizing as fallback");
+        let _ = window.minimize();
     }
 }
 

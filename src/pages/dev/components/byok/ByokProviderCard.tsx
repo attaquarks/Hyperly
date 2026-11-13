@@ -41,6 +41,37 @@ export const ByokProviderCard = ({ kind }: { kind: "ai" | "stt" }) => {
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<ByokTestResult | null>(null);
   const [saveError, setSaveError] = useState("");
+  const [detectingStreaming, setDetectingStreaming] = useState(false);
+  const [streamingMessage, setStreamingMessage] = useState("");
+  const [streamingDetected, setStreamingDetected] = useState(false);
+
+  const detectStreaming = async () => {
+    setDetectingStreaming(true);
+    setStreamingMessage("");
+    try {
+      const outcome = await invoke<{ supported: boolean; message: string }>(
+        "byok_test_streaming",
+        {
+          baseUrl: normalizeByokBase(baseUrl),
+          apiKey,
+          model: model.trim(),
+        }
+      );
+      setStreamingDetected(outcome.supported);
+      setStreaming(outcome.supported);
+      setStreamingMessage(outcome.message);
+    } catch (error) {
+      setStreamingDetected(false);
+      setStreaming(false);
+      setStreamingMessage(
+        `Streaming detection failed to run: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    } finally {
+      setDetectingStreaming(false);
+    }
+  };
 
   const testConnection = async () => {
     setTesting(true);
@@ -49,6 +80,8 @@ export const ByokProviderCard = ({ kind }: { kind: "ai" | "stt" }) => {
       const outcome = await invoke<ByokTestResult>("byok_test_connection", {
         baseUrl: normalizeByokBase(baseUrl),
         apiKey,
+        kind,
+        model: model.trim(),
       });
       setResult(outcome);
     } catch (error) {
@@ -204,11 +237,36 @@ export const ByokProviderCard = ({ kind }: { kind: "ai" | "stt" }) => {
         </div>
       )}
       {kind === "stt" && (
-        <p className="text-xs italic text-muted-foreground">
-          STT requests are one upload per utterance. Streaming STT (words
-          appearing while someone still talks) is a separate feature for
-          streaming-capable providers and arrives later.
-        </p>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              className="text-xs"
+              disabled={detectingStreaming || !baseUrl.trim() || !model.trim()}
+              onClick={detectStreaming}
+            >
+              {detectingStreaming ? "Checking…" : "Detect streaming support"}
+            </Button>
+            {streaming && (
+              <span className="text-xs text-green-500">
+                ● Streaming enabled — live words while someone talks
+              </span>
+            )}
+          </div>
+          {streamingMessage && (
+            <p
+              className={`text-xs ${
+                streamingDetected ? "text-green-500" : "text-muted-foreground"
+              }`}
+            >
+              {streamingMessage}
+            </p>
+          )}
+          <p className="text-xs italic text-muted-foreground">
+            Without streaming, this provider runs in one-shot mode: one upload
+            per utterance, text after each one.
+          </p>
+        </div>
       )}
 
       <div className="flex items-center gap-2">

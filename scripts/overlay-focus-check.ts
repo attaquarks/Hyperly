@@ -280,14 +280,14 @@ const assert = (condition: boolean, message: string): void => {
   const shortcuts = code(readRel("src-tauri/src/shortcuts.rs"));
   const toggle = fnSource(shortcuts, "handle_toggle_window");
   assert(
-    toggle.includes("restore_system_cursor_before_hide"),
-    "shortcuts.rs: handle_toggle_window's hide branch must call restore_system_cursor_before_hide — hiding with a hidden last cursor state leaves it stale over the overlay's region"
+    toggle.includes("hide_and_release_input"),
+    "shortcuts.rs: handle_toggle_window's hide branch must call hide_and_release_input — it releases the mouse capture + stale cursor and guarantees the region becomes inert (minimize fallback)"
   );
   const windowRust = code(readRel("src-tauri/src/window.rs"));
   assert(
-    fnSource(windowRust, "hide_history_wing_with_main").includes("restore_system_cursor_before_hide") &&
-      fnSource(windowRust, "close_history_wing").includes("restore_system_cursor_before_hide"),
-    "window.rs: both wing-hide paths must call restore_system_cursor_before_hide"
+    fnSource(windowRust, "hide_history_wing_with_main").includes("release_input_before_hide") &&
+      fnSource(windowRust, "close_history_wing").includes("release_input_before_hide"),
+    "window.rs: both wing-hide paths must call release_input_before_hide"
   );
 }
 

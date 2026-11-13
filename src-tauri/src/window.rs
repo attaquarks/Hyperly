@@ -435,7 +435,7 @@ pub async fn open_history_wing(app: AppHandle) -> Result<(), String> {
 pub fn close_history_wing(app: AppHandle) -> Result<(), String> {
     HISTORY_WING_OPEN.store(false, std::sync::atomic::Ordering::Release);
     #[cfg(target_os = "windows")]
-    crate::win_activation::restore_system_cursor_before_hide();
+    crate::win_activation::release_input_before_hide();
     if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
         // Capture protection OFF before the hide (stealth rule — see
         // set_capture_protection).
@@ -474,7 +474,7 @@ pub fn setup_history_wing_sync<R: Runtime>(app: &AppHandle<R>) {
 /// Hides the wing alongside the main overlay (Ctrl+\ and the Hide button).
 pub fn hide_history_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
     #[cfg(target_os = "windows")]
-    crate::win_activation::restore_system_cursor_before_hide();
+    crate::win_activation::release_input_before_hide();
     if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
         // Capture protection OFF before the hide — the affinity flag on a
         // hidden WebView2 surface paints as a static black box in captures.

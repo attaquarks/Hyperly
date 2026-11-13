@@ -51,9 +51,11 @@ export const Providers = ({
           options={allSttProviders?.map((provider) => {
             const json = curl2Json(provider?.curl);
             return {
-              label: provider?.isCustom
-                ? json?.url || "Custom Provider"
-                : provider?.id || "Custom Provider",
+              label:
+                provider?.name ||
+                (provider?.isCustom
+                  ? json?.url || "Custom Provider"
+                  : provider?.id || "Custom Provider"),
               value: provider?.id || "Custom Provider",
               isCustom: provider?.isCustom,
             };

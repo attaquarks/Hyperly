@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 mod speaker;
 mod win_activation;
 mod byok;
+mod stt_stream;
 use capture::CaptureState;
 use speaker::{ReferenceTap, VadConfig};
 
@@ -34,11 +35,55 @@ pub struct AudioState {
     /// which is what truncated the transcript the LLM received. Aborting
     /// remains the backstop for a stalled stream.
     stop_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// The live streaming-STT session (Tier 2): when Some, the capture loop
+    /// feeds hops into it and transcripts arrive as `stt-stream-*` text
+    /// events instead of the batch audio round trip.
+    stt_streaming: Arc<Mutex<Option<stt_stream::SttStreamSession>>>,
 }
 
 #[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Turn the streaming-STT session on/off for the next capture. The frontend
+/// calls this at session start with the selected provider's BYOK config when
+/// streaming was detected for it, and with `None` at stop.
+#[tauri::command]
+async fn configure_stt_streaming(
+    app: tauri::AppHandle,
+    config: Option<stt_stream::SttStreamConfig>,
+) -> Result<(), String> {
+    let state = app.state::<AudioState>();
+    let mut session = state.stt_streaming.lock().map_err(|e| e.to_string())?;
+    // Tear down any previous session first.
+    if let Some(old) = session.take() {
+        old.task.abort();
+    }
+    *session = match config {
+        Some(config) => Some(
+            stt_stream::spawn_session(app.clone(), config)
+                .map_err(|e| format!("Streaming session failed to start: {}", e))?,
+        ),
+        None => None,
+    };
+    Ok(())
+}
+
+/// Streaming capability detection: a REAL WebSocket handshake against the
+/// provider, surfaced as the dashboard's green/red light.
+#[tauri::command]
+async fn byok_test_streaming(
+    base_url: String,
+    api_key: String,
+    model: String,
+) -> Result<stt_stream::StreamingSupport, String> {
+    let config = stt_stream::SttStreamConfig {
+        base_url,
+        api_key,
+        model,
+    };
+    Ok(stt_stream::detect_streaming_support(&config).await)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -132,6 +177,8 @@ pub fn run() {
         let mut builder = builder
         .invoke_handler(tauri::generate_handler![
             get_app_version,
+            configure_stt_streaming,
+            byok_test_streaming,
             window::set_window_size,
             window::open_dashboard,
             window::open_history_wing,

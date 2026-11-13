@@ -527,6 +527,19 @@ async fn run_vad_capture(
             // Apply noise gate BEFORE VAD (critical for accuracy)
             let mono = apply_noise_gate(&mono, config.noise_gate_threshold);
 
+            // Streaming STT (Tier 2): feed the hop to the live WebSocket
+            // session, resampled to the 16 kHz s16le rate the streaming
+            // protocols speak. The gating decision below still runs — turn
+            // tracking stays VAD-driven — but in streaming mode the
+            // transcripts arrive as `stt-stream-*` TEXT events, so the
+            // frontend skips the batch STT round trip entirely.
+            if let Ok(streaming_guard) = app.state::<crate::AudioState>().stt_streaming.try_lock() {
+                if let Some(session) = streaming_guard.as_ref() {
+                    let down = resample_to_stt_rate(&mono, sr);
+                    let _ = session.audio_tx.send(down);
+                }
+            }
+
             let (rms, peak) = calculate_audio_metrics(&mono);
 
             // Speech/silence decision, relative to what is actually playing.
@@ -996,6 +1009,15 @@ pub async fn stop_system_audio_capture(app: AppHandle) -> Result<(), String> {
     }
 
     stop_reference_tap(&state);
+
+    // Tear down the streaming-STT session: dropping the audio sender closes
+    // the WebSocket politely from the task side, and the status event tells
+    // the frontend to fall back to batch mode.
+    if let Ok(mut session) = state.stt_streaming.lock() {
+        if let Some(session) = session.take() {
+            session.task.abort();
+        }
+    }
 
     // Short cleanup windows (the old 300 ms + 200 ms blind sleeps were the
     // floor of the stop latency; the join above replaces their real work).

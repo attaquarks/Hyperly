@@ -1,23 +1,20 @@
 import { Header } from "@/components";
 import { UseSettingsReturn } from "@/types";
 import { Providers } from "./Providers";
-import { CustomProviders } from "./CustomProvider";
 import { ByokProviderCard } from "../byok/ByokProviderCard";
 
 export const STTProviders = (settings: UseSettingsReturn) => {
   return (
     <div id="stt-providers" className="space-y-3">
       <Header
-        title="STT Providers"
-        description="Select your preferred STT service provider to get started."
+        title="Choose your STT provider"
+        description="Pick a built-in provider or add your own — base URL, key, model."
         isMainTitle
       />
 
-      {/* Simple BYOK form: base URL + key + model, fetch/test/save */}
+      {/* Simple BYOK form with streaming detection */}
       <ByokProviderCard kind="stt" />
-      {/* Custom Provider */}
-      <CustomProviders {...settings} />
-      {/* Providers Selection */}
+      {/* Providers Selection (built-ins + saved BYOK providers, by name) */}
       <Providers {...settings} />
     </div>
   );
