@@ -42,18 +42,6 @@ use tokio_tungstenite::tungstenite::Message;
 
 const CONNECT_TIMEOUT_SECS: u64 = 8;
 
-#[derive(Serialize)]
-pub struct StreamingSupport {
-    pub supported: bool,
-    pub message: String,
-}
-
-#[derive(Serialize, Clone, Debug)]
-pub struct StreamEventPayload {
-    pub text: String,
-    pub is_final: bool,
-}
-
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct SttStreamConfig {
     pub base_url: String,
