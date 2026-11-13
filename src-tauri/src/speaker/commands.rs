@@ -1015,7 +1015,9 @@ pub async fn stop_system_audio_capture(app: AppHandle) -> Result<(), String> {
     // the frontend to fall back to batch mode.
     if let Ok(mut session) = state.stt_streaming.lock() {
         if let Some(session) = session.take() {
-            session.task.abort();
+            session.engine.task.abort();
+            session.forwarder.abort();
+            let _ = app.emit("stt-stream-status", serde_json::json!({ "active": false }));
         }
     }
 

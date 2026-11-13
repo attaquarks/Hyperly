@@ -1,3 +1,9 @@
+[workspace]
+# The streaming-STT engine is its own crate: its integration tests run
+# without linking tauri/WebView2 (see streaming-stt/src/lib.rs).
+members = [".", "streaming-stt"]
+resolver = "2"
+
 [package]
 name = "hyperly"
 version = "0.2.0"
@@ -50,10 +56,10 @@ hound = "3.5.1"
 tokio = { version = "1.0", features = ["full"] }
 once_cell = "1.19.0"
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
-# Streaming STT (Tier 2): the WebSocket path for streaming-capable providers
-# (Deepgram nova-3 and friends) — audio streams up, words come back live.
-# native-tls on Windows = SChannel (the OS TLS), no extra native build deps.
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+# Streaming STT (Tier 2) engine lives in the streaming-stt workspace member
+# (pure tokio/tungstenite — deliberately Tauri-free so its integration tests
+# run on Windows runners without the WebView2 DLL loading trap).
+streaming-stt = { path = "streaming-stt" }
 futures-util = "0.3"
 anyhow = "1.0"
 tracing = "0.1"

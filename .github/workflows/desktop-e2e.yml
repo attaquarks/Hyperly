@@ -66,6 +66,14 @@ jobs:
           workspaces: src-tauri
           shared-key: hyperly-windows
 
+      # The streaming-STT engine is a Tauri-free workspace crate: its
+      # integration tests drive the REAL WebSocket path (local mock server)
+      # without linking WebView2 — the tauri-linked test binary cannot always
+      # load on Windows runners (STATUS_ENTRYPOINT_NOT_FOUND, the known
+      # WebView2Loader trap), so the streaming verification runs HERE.
+      - name: Run streaming-STT engine tests (WebView2-free crate)
+        run: cargo test -p streaming-stt --manifest-path src-tauri/Cargo.toml --locked
+
       - name: Run Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
@@ -136,6 +144,14 @@ jobs:
         with:
           workspaces: src-tauri
           shared-key: hyperly-windows
+
+      # The streaming-STT engine is a Tauri-free workspace crate: its
+      # integration tests drive the REAL WebSocket path (local mock server)
+      # without linking WebView2 — the tauri-linked test binary cannot always
+      # load on Windows runners (STATUS_ENTRYPOINT_NOT_FOUND, the known
+      # WebView2Loader trap), so the streaming verification runs HERE.
+      - name: Run streaming-STT engine tests (WebView2-free crate)
+        run: cargo test -p streaming-stt --manifest-path src-tauri/Cargo.toml --locked
 
       - name: Run Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked

@@ -2487,6 +2487,7 @@ dependencies = [
  "ringbuf",
  "serde",
  "serde_json",
+ "streaming-stt",
  "tauri",
  "tauri-build",
  "tauri-nspanel",
@@ -2499,7 +2500,6 @@ dependencies = [
  "tauri-plugin-wdio",
  "tauri-plugin-wdio-webdriver",
  "tokio",
- "tokio-tungstenite",
  "tracing",
  "wasapi",
  "webview2-com",
@@ -5779,6 +5779,17 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "streaming-stt"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
 
 [[package]]
 name = "string_cache"

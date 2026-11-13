@@ -6,7 +6,7 @@ mod shortcuts;
 mod startup;
 mod window;
 use std::sync::{Arc, Mutex};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 #[cfg(target_os = "macos")]
 use tauri::{AppHandle, WebviewWindow};
 #[cfg(target_os = "macos")]
@@ -38,7 +38,15 @@ pub struct AudioState {
     /// The live streaming-STT session (Tier 2): when Some, the capture loop
     /// feeds hops into it and transcripts arrive as `stt-stream-*` text
     /// events instead of the batch audio round trip.
-    stt_streaming: Arc<Mutex<Option<stt_stream::SttStreamSession>>>,
+    stt_streaming: Arc<Mutex<Option<SttStreamingSession>>>,
+}
+
+/// The app-side handle for one streaming-STT session: the Tauri-free engine
+/// (streaming-stt crate) plus the task that forwards its transcript events
+/// onto the window event bus.
+struct SttStreamingSession {
+    engine: stt_stream::SttStreamSession,
+    forwarder: tauri::async_runtime::JoinHandle<()>,
 }
 
 #[tauri::command]
@@ -58,14 +66,52 @@ async fn configure_stt_streaming(
     let mut session = state.stt_streaming.lock().map_err(|e| e.to_string())?;
     // Tear down any previous session first.
     if let Some(old) = session.take() {
-        old.task.abort();
+        old.engine.task.abort();
+        old.forwarder.abort();
+        let _ = app.emit("stt-stream-status", serde_json::json!({ "active": false }));
     }
     *session = match config {
-        Some(config) => Some(
-            stt_stream::spawn_session(app.clone(), config)
-                .map_err(|e| format!("Streaming session failed to start: {}", e))?,
-        ),
-        None => None,
+        Some(config) => {
+            let (engine_session, mut event_rx) =
+                stt_stream::spawn_session(config)
+                    .map_err(|e| format!("Streaming session failed to start: {}", e))?;
+            // Forward the engine's transcript events onto the window events.
+            let app_for_events = app.clone();
+            let forwarder = tauri::async_runtime::spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    // The engine reports lifecycle failures as __status__ text.
+                    if event.text.starts_with("__status__:") {
+                        let _ = app_for_events.emit(
+                            "stt-stream-status",
+                            serde_json::json!({
+                                "active": false,
+                                "reason": event
+                                    .text
+                                    .trim_start_matches("__status__:")
+                            }),
+                        );
+                    } else {
+                        let _ = app_for_events.emit(
+                            if event.is_final {
+                                "stt-stream-final"
+                            } else {
+                                "stt-stream-partial"
+                            },
+                            serde_json::json!({ "text": event.text, "is_final": event.is_final }),
+                        );
+                    }
+                }
+            });
+            let _ = app.emit("stt-stream-status", serde_json::json!({ "active": true }));
+            Some(SttStreamingSession {
+                engine: engine_session,
+                forwarder,
+            })
+        }
+        None => {
+            let _ = app.emit("stt-stream-status", serde_json::json!({ "active": false }));
+            None
+        }
     };
     Ok(())
 }
