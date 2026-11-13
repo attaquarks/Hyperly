@@ -3,6 +3,7 @@ import { UseSettingsReturn } from "@/types";
 import curl2Json, { ResultJSON } from "@bany/curl-to-json";
 import { KeyIcon, TrashIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { SttStreamingStatus } from "./SttStreamingStatus";
 
 export const Providers = ({
   allSttProviders,
@@ -68,6 +69,7 @@ export const Providers = ({
             });
           }}
         />
+        <SttStreamingStatus />
       </div>
       {localSelectedProvider ? (
         <Header

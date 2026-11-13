@@ -31,7 +31,7 @@ const PLACEHOLDERS: Record<"ai" | "stt", { url: string; model: string }> = {
   },
 };
 
-export const ByokProviderCard = ({ kind }: { kind: "ai" | "stt" }) => {
+const ByokFormFields = ({ kind }: { kind: "ai" | "stt" }) => {
   const { loadData } = useApp();
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -288,5 +288,33 @@ export const ByokProviderCard = ({ kind }: { kind: "ai" | "stt" }) => {
       )}
       {saveError && <p className="text-xs text-red-500">{saveError}</p>}
     </Card>
+  );
+};
+
+/**
+ * The collapsed-by-default entry point: the page shows the provider
+ * selection list first; this button (and the form behind it) appears below.
+ */
+export const ByokProviderCard = ({ kind }: { kind: "ai" | "stt" }) => {
+  const [open, setOpen] = useState(false);
+  const label = kind === "stt" ? "custom STT provider" : "custom AI provider";
+  if (!open) {
+    return (
+      <Button className="text-xs w-full" onClick={() => setOpen(true)}>
+        + Add {label}
+      </Button>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <ByokFormFields kind={kind} />
+      <Button
+        variant="outline"
+        className="text-xs w-full"
+        onClick={() => setOpen(false)}
+      >
+        Hide the {label} form
+      </Button>
+    </div>
   );
 };

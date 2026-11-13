@@ -9,6 +9,7 @@ import { readAecEnabled } from "@/lib/aec";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
+import { resolveSttStreamConfig } from "@/lib/byok";
 import { captureOwnership, type CaptureToken } from "@/lib/capture-owner";
 import { SpeechBlockQueue } from "@/lib/speech-block-queue";
 import { getTranscriptStore } from "@/lib/database/transcript-adapter";
@@ -1730,13 +1731,20 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       const streamProvider = sttConfigRef.current.providers.find(
         (p) => p.id === sttConfigRef.current.selected.provider
       );
-      if (streamProvider?.streaming && streamProvider.byok) {
+      // Built-in streaming providers (Deepgram et al.) derive the session
+      // from the curl URL + configured variables; BYOK providers carry the
+      // config on the record. resolveSttStreamConfig handles both.
+      const streamSessionConfig = resolveSttStreamConfig(
+        streamProvider,
+        sttConfigRef.current.selected.variables
+      );
+      if (streamSessionConfig) {
         try {
           await invoke("configure_stt_streaming", {
             config: {
-              base_url: streamProvider.byok.baseUrl,
-              api_key: streamProvider.byok.apiKey,
-              model: streamProvider.byok.model,
+              base_url: streamSessionConfig.base_url,
+              api_key: streamSessionConfig.api_key,
+              model: streamSessionConfig.model,
             },
           });
         } catch (streamError) {

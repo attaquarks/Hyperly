@@ -84,3 +84,66 @@ export const buildByokProvider = (
     byok,
   };
 };
+
+/**
+ * Built-in STT providers whose endpoints speak a streaming protocol Hyperly
+ * implements (the Deepgram listen protocol over WebSocket). Selecting one of
+ * these from the list means streaming is available WITHOUT the BYOK form —
+ * the session is built from the provider's curl URL and the configured
+ * variables.
+ */
+export const STREAMING_STT_PROVIDER_IDS = ["deepgram-stt"];
+
+export interface SttStreamSessionConfig {
+  base_url: string;
+  api_key: string;
+  model: string;
+}
+
+/**
+ * Build the streaming-session config for the selected STT provider:
+ * BYOK providers carry it on the record; built-in streaming providers derive
+ * it from the curl URL (origin only) and the configured variables. Returns
+ * null when streaming does not apply or the key is missing.
+ */
+export const resolveSttStreamConfig = (
+  provider: TYPE_PROVIDER | undefined,
+  variables: Record<string, string> | undefined
+): SttStreamSessionConfig | null => {
+  if (!provider) return null;
+
+  if (provider.streaming && provider.byok) {
+    return {
+      base_url: provider.byok.baseUrl,
+      api_key: provider.byok.apiKey,
+      model: provider.byok.model,
+    };
+  }
+
+  if (provider.id && STREAMING_STT_PROVIDER_IDS.includes(provider.id)) {
+    const match = provider.curl.match(/https?:\/\/[^"'\s\\]+/);
+    if (!match) return null;
+    let base: string;
+    try {
+      base = new URL(match[0]).origin;
+    } catch {
+      return null;
+    }
+    const apiKey =
+      variables?.api_key || variables?.API_KEY || variables?.APIKEY || "";
+    if (!apiKey.trim()) return null;
+    const model =
+      variables?.MODEL || variables?.model || "nova-3";
+    return { base_url: base, api_key: apiKey.trim(), model: model.trim() };
+  }
+
+  return null;
+};
+
+/** Whether the provider's endpoint family has a streaming profile at all. */
+export const isStreamingCapableStt = (
+  provider: TYPE_PROVIDER | undefined
+): boolean =>
+  !!provider &&
+  ((!!provider.byok && provider.streaming === true) ||
+    (!!provider.id && STREAMING_STT_PROVIDER_IDS.includes(provider.id)));
