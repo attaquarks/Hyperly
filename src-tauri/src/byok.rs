@@ -169,12 +169,13 @@ pub async fn byok_test_connection(
 
         if status == 200 {
             if let Some(models) = extract_model_ids(&body) {
+                let count = models.len();
                 return Ok(ByokTestResult {
                     ok: true,
                     models,
                     message: format!(
                         "Connected. {} model(s) available via {}.",
-                        models.len(),
+                        count,
                         url
                     ),
                 });
