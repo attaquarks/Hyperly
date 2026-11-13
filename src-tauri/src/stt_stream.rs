@@ -103,8 +103,8 @@ pub async fn detect_streaming_support(config: &SttStreamConfig) -> StreamingSupp
         // http::HeaderMap::insert needs typed HeaderName/HeaderValue, not
         // plain Strings.
         if let (Ok(header_name), Ok(header_value)) = (
-            name.parse::<http::HeaderName>(),
-            value.parse::<http::HeaderValue>(),
+            name.parse::<HeaderName>(),
+            value.parse::<HeaderValue>(),
         ) {
             request.headers_mut().insert(header_name, header_value);
         }
@@ -131,7 +131,7 @@ pub async fn detect_streaming_support(config: &SttStreamConfig) -> StreamingSupp
 /// task below converts, streams, and translates server messages into events.
 pub struct SttStreamSession {
     pub audio_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
-    pub task: tokio::task::JoinHandle<()>,
+    pub task: tauri::async_runtime::JoinHandle<()>,
 }
 
 /// Spawn the streaming session: connect, then pump audio up and transcripts
@@ -151,8 +151,8 @@ pub fn spawn_session(
         // http::HeaderMap::insert needs typed HeaderName/HeaderValue, not
         // plain Strings.
         if let (Ok(header_name), Ok(header_value)) = (
-            name.parse::<http::HeaderName>(),
-            value.parse::<http::HeaderValue>(),
+            name.parse::<HeaderName>(),
+            value.parse::<HeaderValue>(),
         ) {
             request.headers_mut().insert(header_name, header_value);
         }
