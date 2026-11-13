@@ -16,6 +16,7 @@ use tauri_nspanel::{cocoa::appkit::NSWindowCollectionBehavior, panel_delegate, W
 use tokio::task::JoinHandle;
 mod speaker;
 mod win_activation;
+mod byok;
 use capture::CaptureState;
 use speaker::{ReferenceTap, VadConfig};
 
@@ -151,6 +152,7 @@ pub fn run() {
             shortcuts::exit_app,
             shortcuts::toggle_main_window,
             win_activation::overlay_surface_state,
+            byok::byok_test_connection,
             speaker::start_system_audio_capture,
             speaker::stop_system_audio_capture,
             speaker::start_aec_reference,
