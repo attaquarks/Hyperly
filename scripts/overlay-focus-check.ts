@@ -172,6 +172,86 @@ const assert = (condition: boolean, message: string): void => {
   );
 }
 
+// --- G. capture-protection discipline + mode memory --------------------------
+{
+  // The affinity flag must be active ONLY while a window is visible. Left on
+  // a hidden window, WDA_EXCLUDEFROMCAPTURE on the WebView2 composition
+  // surface is what screen-capture stacks paint as a STATIC BLACK BOX (the
+  // reported stealth failure): it persisted while the overlay was hidden and
+  // vanished only on minimize.
+  const winAct = code(readRel("src-tauri/src/win_activation.rs"));
+  assert(
+    winAct.includes("pub fn set_capture_protection"),
+    "win_activation.rs: set_capture_protection missing — the clear-before-hide/re-apply-after-show discipline is not implemented"
+  );
+  assert(
+    winAct.includes("WDA_EXCLUDEFROMCAPTURE") && winAct.includes("WDA_NONE"),
+    "win_activation.rs: set_capture_protection must toggle WDA_EXCLUDEFROMCAPTURE / WDA_NONE"
+  );
+
+  const countIn = (fn: string, needle: string): number =>
+    (fn.match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? [])
+      .length;
+
+  // HIDES: every hide of a protected window must clear protection first; the
+  // show side re-applies (inline, or via show_main_window/show_dashboard_window).
+  const hideSites: Array<[string, string]> = [
+    ["handle_toggle_window", "src-tauri/src/shortcuts.rs"],
+    ["handle_toggle_dashboard", "src-tauri/src/shortcuts.rs"],
+  ];
+  for (const [fnName, file] of hideSites) {
+    const fn = fnSource(code(readRel(file)), fnName);
+    assert(
+      countIn(fn, "set_capture_protection") >= 1,
+      `${file}: ${fnName} must clear capture protection before its hide branch`
+    );
+  }
+  const windowRust = code(readRel("src-tauri/src/window.rs"));
+  for (const fnName of [
+    "hide_history_wing_with_main",
+    "close_history_wing",
+    "toggle_dashboard",
+    "setup_dashboard_close_handler",
+    "show_dashboard_window",
+    "restore_history_wing_with_main",
+    "open_history_wing",
+  ]) {
+    const fn = fnSource(windowRust, fnName);
+    assert(
+      fn.includes("set_capture_protection"),
+      `window.rs: ${fnName} must participate in the capture-protection discipline (clear before hide / re-apply after show)`
+    );
+  }
+  const shortcutsCode = code(readRel("src-tauri/src/shortcuts.rs"));
+  assert(
+    countIn(shortcutsCode, "set_capture_protection") >= 4 &&
+      fnSource(shortcutsCode, "show_main_window").includes("set_capture_protection"),
+    "shortcuts.rs: show_main_window must re-apply capture protection after surfacing the overlay"
+  );
+
+  // The dashboard is created HIDDEN on Windows — creation-time protection
+  // would be the flag-on-a-hidden-window state the discipline forbids.
+  const nonMacosBuilder = windowRust.slice(
+    windowRust.indexOf('#[cfg(not(target_os = "macos"))]\n    let base_builder'),
+    windowRust.indexOf("let window = base_builder.build()")
+  );
+  assert(
+    !nonMacosBuilder.includes("content_protected(true)"),
+    "window.rs: the non-macOS dashboard builder must NOT set content_protected(true) — it is created hidden; the show paths apply protection while visible"
+  );
+
+  // MODE MEMORY: the Ctrl+\ show path must not switch the overlay's room.
+  const toggleFn = fnSource(shortcutsCode, "handle_toggle_window");
+  assert(
+    !toggleFn.includes("focus-text-input"),
+    "shortcuts.rs: handle_toggle_window must not emit focus-text-input on show — it switched the overlay to Ask, yanking the user out of the mode they left"
+  );
+  assert(
+    fnSource(shortcutsCode, "handle_focus_input").includes("focus-text-input"),
+    "shortcuts.rs: handle_focus_input must keep emitting focus-text-input (the dedicated focus-composer shortcut)"
+  );
+}
+
 // --- F. overlay cursor: visible default, migration, hide-path handoff --------
 {
   // The default cursor type must be a VISIBLE one; "invisible" is opt-in.

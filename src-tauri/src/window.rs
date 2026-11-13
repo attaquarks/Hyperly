@@ -164,6 +164,10 @@ pub async fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
         match dashboard_window.is_visible() {
             Ok(true) => {
                 // Window is visible, hide it
+                #[cfg(target_os = "windows")]
+                if let Some(w) = app.get_webview_window("dashboard") {
+                    crate::win_activation::set_capture_protection(&w, false);
+                }
                 dashboard_window
                     .hide()
                     .map_err(|e| format!("Failed to hide dashboard window: {}", e))?;
@@ -182,6 +186,9 @@ pub async fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
                 dashboard_window
                     .set_focus()
                     .map_err(|e| format!("Failed to focus dashboard window: {}", e))?;
+                // Protection ON while visible (stealth rule).
+                #[cfg(target_os = "windows")]
+                crate::win_activation::set_capture_protection(&dashboard_window, true);
             }
             Err(e) => {
                 return Err(format!("Failed to check dashboard visibility: {}", e));
@@ -240,6 +247,8 @@ pub fn create_dashboard_window<R: Runtime>(
         .min_inner_size(900.0, 600.0)
         .hidden_title(true)
         .title_bar_style(tauri::TitleBarStyle::Overlay)
+        // macOS: created visible, so creation-time protection is correct
+        // (the stealth rule only forbids the flag on HIDDEN windows).
         .content_protected(true)
         .visible(true)
         .traffic_light_position(LogicalPosition::new(14.0, 18.0));
@@ -251,7 +260,12 @@ pub fn create_dashboard_window<R: Runtime>(
         .decorations(true)
         .inner_size(1200.0, 800.0)
         .min_inner_size(900.0, 600.0)
-        .content_protected(true)
+        // Capture protection is NOT set here: the dashboard is created
+        // HIDDEN at startup, and the affinity flag on a hidden WebView2
+        // surface is what capture stacks paint as a static black box (the
+        // reported stealth failure). The show paths apply protection while
+        // visible; the hide paths clear it. macOS keeps creation-time
+        // protection (it is created visible there).
         .visible(false);
 
     let window = base_builder.build()?;
@@ -274,6 +288,10 @@ fn setup_dashboard_close_handler<R: Runtime>(window: &WebviewWindow<R>) {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             // Prevent the window from being destroyed
             api.prevent_close();
+            // Capture protection OFF before the hide (stealth rule — the
+            // affinity flag must never survive a hide).
+            #[cfg(target_os = "windows")]
+            crate::win_activation::set_capture_protection(&window_clone, false);
             // Hide the window instead
             if let Err(e) = window_clone.hide() {
                 eprintln!("Failed to hide dashboard window on close: {}", e);
@@ -292,6 +310,8 @@ pub fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
         dashboard_window
             .set_focus()
             .map_err(|e| format!("Failed to focus dashboard window: {}", e))?;
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&dashboard_window, true);
     } else {
         // Window doesn't exist, create it and then show it
         let window = create_dashboard_window(app)
@@ -302,6 +322,8 @@ pub fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
         window
             .set_focus()
             .map_err(|e| format!("Failed to focus new dashboard window: {}", e))?;
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&window, true);
     }
     Ok(())
 }
@@ -398,6 +420,9 @@ pub async fn open_history_wing(app: AppHandle) -> Result<(), String> {
             .map_err(|e| format!("Failed to position history wing: {}", e))?;
         wing.show()
             .map_err(|e| format!("Failed to show history wing: {}", e))?;
+        // Protection back ON while visible (stealth rule).
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&wing, true);
     } else {
         create_history_wing_window(&app)?;
     }
@@ -412,6 +437,10 @@ pub fn close_history_wing(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     crate::win_activation::restore_system_cursor_before_hide();
     if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
+        // Capture protection OFF before the hide (stealth rule — see
+        // set_capture_protection).
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&wing, false);
         wing.hide()
             .map_err(|e| format!("Failed to hide history wing: {}", e))?;
     }
@@ -447,6 +476,10 @@ pub fn hide_history_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
     #[cfg(target_os = "windows")]
     crate::win_activation::restore_system_cursor_before_hide();
     if let Some(wing) = app.get_webview_window(HISTORY_WING_LABEL) {
+        // Capture protection OFF before the hide — the affinity flag on a
+        // hidden WebView2 surface paints as a static black box in captures.
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&wing, false);
         let _ = wing.hide();
     }
 }
@@ -470,6 +503,10 @@ pub fn restore_history_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
             eprintln!("Failed to restore history wing without activation: {}", e);
             let _ = wing.show();
         }
+        // Protection back ON only while actually visible (stealth rule: the
+        // affinity flag must never survive a hide).
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&wing, true);
         #[cfg(not(target_os = "windows"))]
         let _ = wing.show();
     }

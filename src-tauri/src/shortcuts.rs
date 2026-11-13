@@ -221,6 +221,10 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
             eprintln!("Failed to show window: {}", e);
         }
     }
+    // Protection goes back ON only now that the window is actually visible
+    // (see set_capture_protection: the flag must never survive a hide).
+    #[cfg(target_os = "windows")]
+    crate::win_activation::set_capture_protection(&window, true);
 
     #[cfg(not(target_os = "windows"))]
     {
@@ -277,7 +281,8 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
     //   - Track our own "hidden" flag in Rust state (the OS visibility check
     //     on Windows is unreliable because focus changes can flip it).
     //   - Toggle the flag, then hide or show+focus accordingly.
-    //   - Always emit focus-text-input on show so the input is ready.
+    //   - No room switch on show: the overlay returns to the mode the user
+    //     left (the focus-text-input emit moved out — see the show branch).
     // The guard is scoped to this block: show_main_window locks the same
     // mutex, and std Mutex is not reentrant.
     let should_be_hidden = {
@@ -291,6 +296,12 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
         if let Err(e) = window.emit("toggle-window-visibility", true) {
             eprintln!("Failed to emit toggle-window-visibility event: {}", e);
         }
+        // Capture protection OFF before the hide: the affinity flag on a
+        // hidden WebView2 surface is what capture stacks render as a static
+        // black box (the reported stealth failure). The flag must never
+        // survive a hide.
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&window, false);
         // Hand the cursor back to the system BEFORE the window goes away: if
         // the mouse is over the overlay, the last WM_SETCURSOR state belongs
         // to the overlay's webview (which can be a hidden cursor in the
@@ -310,9 +321,13 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
     show_main_window(app);
     window::restore_history_wing_with_main(app);
 
-    if let Err(e) = window.emit("focus-text-input", json!({})) {
-        eprintln!("Failed to emit focus-text-input event: {}", e);
-    }
+    // NO focus-text-input here, on purpose. This event switched the overlay's
+    // room to Ask on every show, which yanked the user out of the mode they
+    // left: hide from Listen, press Ctrl+\ again, and Listen's transcript was
+    // replaced by the Ask composer (the reported complaint). The React state
+    // survives the hide untouched, so showing now returns to exactly where
+    // the user was. Landing on the Ask composer remains the dedicated
+    // focus_input shortcut's job (handle_focus_input below).
 }
 
 /// Handle audio shortcut
@@ -604,7 +619,10 @@ fn handle_toggle_dashboard<R: Runtime>(app: &AppHandle<R>) {
     if let Some(dashboard_window) = app.get_webview_window("dashboard") {
         match dashboard_window.is_visible() {
             Ok(true) => {
-                // Window is visible, hide it
+                // Window is visible, hide it. Capture protection OFF before
+                // the hide (stealth rule — see set_capture_protection).
+                #[cfg(target_os = "windows")]
+                crate::win_activation::set_capture_protection(&dashboard_window, false);
                 if let Err(e) = dashboard_window.hide() {
                     eprintln!("Failed to hide dashboard window: {}", e);
                 }
@@ -617,6 +635,9 @@ fn handle_toggle_dashboard<R: Runtime>(app: &AppHandle<R>) {
                 if let Err(e) = dashboard_window.set_focus() {
                     eprintln!("Failed to focus dashboard window: {}", e);
                 }
+                // Protection ON while visible.
+                #[cfg(target_os = "windows")]
+                crate::win_activation::set_capture_protection(&dashboard_window, true);
             }
             Err(e) => {
                 eprintln!("Failed to check dashboard visibility: {}", e);

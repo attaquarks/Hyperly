@@ -54,6 +54,37 @@ pub fn show_window_no_activate<R: Runtime>(window: &WebviewWindow<R>) -> Result<
     Ok(())
 }
 
+/// Turn the window's capture protection (WDA_EXCLUDEFROMCAPTURE) on or off.
+///
+/// THE STEALTH RULE: the affinity flag may be active ONLY while the window is
+/// actually visible. Tauri's `content_protected(true)` sets the flag once at
+/// creation and leaves it on for the window's whole lifetime — including while
+/// hidden. On WebView2's composition surfaces that is exactly what screen
+/// capture stacks render as a STATIC BLACK BOX: the flag survives hide/show
+/// cycles, the ghost persists while the window is hidden, and it vanishes only
+/// when the whole app minimizes (the reported failure). Every hide path must
+/// clear the flag BEFORE the hide, and every show path must re-apply it AFTER
+/// the window surfaces — protection stays on while visible, and a hidden
+/// window carries nothing for a capture stack to paint black.
+#[cfg(target_os = "windows")]
+pub fn set_capture_protection<R: Runtime>(window: &WebviewWindow<R>, protected: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    unsafe {
+        // A failed toggle must never break the hide/show flow: the previous
+        // state persists (which is safe — worst case is the old behavior).
+        let _ = SetWindowDisplayAffinity(
+            hwnd,
+            if protected { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE },
+        );
+    }
+}
+
 /// Hand the mouse cursor back to the system before the overlay hides.
 ///
 /// The Win32 cursor is a STATEFUL shape: it only changes when the window
