@@ -22,6 +22,7 @@ use futures_util::{SinkExt, StreamExt};
 use tauri::Emitter;
 use serde::Serialize;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
 
 const CONNECT_TIMEOUT_SECS: u64 = 8;
@@ -101,7 +102,10 @@ pub async fn detect_streaming_support(config: &SttStreamConfig) -> StreamingSupp
     for (name, value) in auth_headers(&config.base_url, &config.api_key) {
         // http::HeaderMap::insert needs typed HeaderName/HeaderValue, not
         // plain Strings.
-        if let (Ok(header_name), Ok(header_value)) = (name.parse(), value.parse()) {
+        if let (Ok(header_name), Ok(header_value)) = (
+            name.parse::<http::HeaderName>(),
+            value.parse::<http::HeaderValue>(),
+        ) {
             request.headers_mut().insert(header_name, header_value);
         }
     }
@@ -146,13 +150,16 @@ pub fn spawn_session(
     for (name, value) in auth_headers(&config.base_url, &config.api_key) {
         // http::HeaderMap::insert needs typed HeaderName/HeaderValue, not
         // plain Strings.
-        if let (Ok(header_name), Ok(header_value)) = (name.parse(), value.parse()) {
+        if let (Ok(header_name), Ok(header_value)) = (
+            name.parse::<http::HeaderName>(),
+            value.parse::<http::HeaderValue>(),
+        ) {
             request.headers_mut().insert(header_name, header_value);
         }
     }
 
     let (audio_tx, mut audio_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
-    let handle = tauri::async_runtime::spawn(async move {
+    let task = tauri::async_runtime::spawn(async move {
         let connect = tokio::time::timeout(
             std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS),
             tokio_tungstenite::connect_async(request),
