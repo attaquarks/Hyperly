@@ -226,6 +226,14 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     #[cfg(target_os = "windows")]
     crate::win_activation::set_capture_protection(&window, true);
 
+    // Belt-and-braces glass re-apply: the acrylic accent policy survives
+    // hide/show, but re-applying keeps the state deterministic after every
+    // surfacing path (and re-confirms the status event for the shell).
+    #[cfg(target_os = "windows")]
+    if let Err(e) = crate::glass::apply(&window) {
+        eprintln!("[glass] re-apply after show failed: {}", e);
+    }
+
     #[cfg(not(target_os = "windows"))]
     {
         if let Err(e) = window.show() {
