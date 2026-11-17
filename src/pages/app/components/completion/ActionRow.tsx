@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   CameraIcon,
+  HistoryIcon,
   LibraryIcon,
   Loader2,
   MousePointer2Icon,
@@ -18,8 +19,10 @@ type Props = UseCompletionReturn;
 
 // The Ask action row: the Library wing button at the far LEFT (the history
 // wing's twin opens top-left and owns folder picking + the file list), then
-// Push to talk, full-screen Capture, region Selection, and image Attach.
-// The old folder dropdown is gone — the wing replaces it.
+// Push to talk, full-screen Capture, region Selection, and image Attach —
+// with the History button at the far RIGHT (Ask's chat history lives on the
+// dashboard, which opens straight onto the chats page). The old folder
+// dropdown is gone — the wing replaces it.
 //
 // History is gone — it duplicated what the overlay header's conversation
 // control does. The "Use image" toggle is gone too: captured images land in the
@@ -124,6 +127,16 @@ export const ActionRow = (props: Props) => {
           </span>
         )}
       </button>
+      <button
+        type="button"
+        className="hyperly-action ml-auto"
+        onClick={() => void invoke("open_dashboard")}
+        title="Open chat history"
+      >
+        <HistoryIcon className="h-3 w-3" />
+        History
+      </button>
+
       <input
         ref={fileInputRef}
         type="file"
