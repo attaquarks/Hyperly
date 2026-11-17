@@ -528,17 +528,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
-  // The glass preference: persist it, then push it to the Rust window. The
-  // command applies/clears the OS acrylic and reports the confirmed state via
-  // the overlay-glass-status event (the shell only drops its tint then).
+  // The ambient-glass preference: storage only. The overlay shell reads the
+  // context value and flips its CSS surface immediately — no Rust round trip.
   const toggleOverlayGlass = async (overlay: boolean) => {
     const newState = updateOverlayGlass(overlay);
     setCustomizable(newState);
-    try {
-      await invoke("set_overlay_glass", { enabled: overlay });
-    } catch (error) {
-      console.error("Failed to toggle overlay glass:", error);
-    }
   };
 
   const setCursorType = (type: CursorType) => {

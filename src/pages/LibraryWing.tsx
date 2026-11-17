@@ -86,10 +86,10 @@ export const LibraryWing = () => {
             <XIcon className="size-3.5" />
           </button>
         </header>
-        <div className="hyperly-wing-body">
-          <div className="flex w-full flex-col min-h-0">
+        <div className="hyperly-wing-body" data-tauri-drag-region={true}>
+          <div className="flex w-full flex-col min-h-0" data-tauri-drag-region={true}>
             {/* Select-folder control: sits under the heading, above search. */}
-            <div className="px-2 pt-1 pb-2">
+            <div className="px-2 pt-1 pb-2" data-tauri-drag-region={true}>
               <button
                 type="button"
                 className="hyperly-wing-select"
@@ -113,7 +113,7 @@ export const LibraryWing = () => {
               />
             </div>
             {/* Search bar, then the file names — same stack as history. */}
-            <div className="relative px-2 pb-2">
+            <div className="relative px-2 pb-2" data-tauri-drag-region={true}>
               <Search className="absolute left-4 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
               <input
                 type="text"
@@ -123,15 +123,15 @@ export const LibraryWing = () => {
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
-            <div className="hyperly-wing-list">
+            <div className="hyperly-wing-list" data-tauri-drag-region={true}>
               {entries.length === 0 ? (
-                <p className="hyperly-wing-empty">
+                <p className="hyperly-wing-empty" data-tauri-drag-region={true}>
                   {folderName
                     ? "No files in this folder"
                     : "Pick a folder to browse its files as knowledge"}
                 </p>
               ) : (
-                <ul className="hyperly-wing-list-ul">
+                <ul className="hyperly-wing-list-ul" data-tauri-drag-region={true}>
                   {filtered.map((entry, index) => (
                     <li key={`${entry.name}-${index}`}>
                       <button

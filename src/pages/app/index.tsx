@@ -25,32 +25,11 @@ const App = () => {
   // D10: supplies the screenshot-panel routing getter (see the effect below).
   const globalShortcuts = useGlobalShortcuts();
 
-  // Whether Rust confirmed OS acrylic is active behind the window (it reports
-  // via overlay-glass-status). The shell only drops its tint on CONFIRMATION —
-  // without the OS blur, the near-opaque fallback keeps text readable.
-  const [glassOS, setGlassOS] = useState(false);
-  useEffect(() => {
-    // Mount-time sync: the startup apply fires before this listener exists,
-    // so the confirmed state is QUERIED here; the event keeps it live after.
-    void invoke<boolean>("get_overlay_glass")
-      .then((active) => setGlassOS(active === true))
-      .catch(() => {});
-    const unlisten = listen<boolean>("overlay-glass-status", (event) => {
-      setGlassOS(event.payload === true);
-    });
-    return () => {
-      void unlisten.then((off) => off());
-    };
-  }, []);
-
-  // Startup sync: apply the stored glass preference to the Rust window. Rust
-  // applies acrylic by default at creation (so the enabled path has no
-  // unblurred flash), and this clears it for users who turned the effect off.
-  useEffect(() => {
-    if (customizable?.glass?.overlay === false) {
-      void invoke("set_overlay_glass", { enabled: false }).catch(() => {});
-    }
-  }, [customizable?.glass?.overlay]);
+  // Ambient glass is a pure CSS surface: translucent tint + rim + sheen +
+  // grain, honoring the user's transparency setting. No OS compositing, no
+  // GPU requirement — the acrylic path was removed (embedded GPUs, and the
+  // app must stay lightweight). The toggle flips it live from storage.
+  const glassOS = customizable?.glass?.overlay !== false;
 
   // Mode is user-controlled via the header tabs. The only automatic switch is
   // INTO listen mode the moment a capture starts (e.g. via the global

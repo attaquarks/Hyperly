@@ -18,9 +18,6 @@ mod speaker;
 mod win_activation;
 mod byok;
 mod stt_stream;
-/// OS acrylic behind the overlay (the liquid-glass frost). Windows-only.
-#[cfg(target_os = "windows")]
-pub mod glass;
 use capture::CaptureState;
 use speaker::{ReferenceTap, VadConfig};
 
@@ -55,45 +52,6 @@ struct SttStreamingSession {
 #[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
-}
-
-/// The confirmed acrylic state, queried by the frontend on mount: the startup
-/// apply fires before any React listener exists, so the status event alone
-/// would be missed.
-#[tauri::command]
-fn get_overlay_glass() -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        glass::is_active()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        false
-    }
-}
-
-/// Toggle the OS acrylic behind the overlay (the liquid-glass surface). The
-/// result is reported to the frontend via `overlay-glass-status`; a failure
-/// leaves the near-opaque fallback surface active (never an unreadable
-/// shell). Non-Windows platforms have no acrylic path yet.
-#[tauri::command]
-fn set_overlay_glass(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let Some(window) = app.get_webview_window("main") else {
-            return Err("main window not found".into());
-        };
-        if enabled {
-            glass::apply(&window)
-        } else {
-            glass::clear(&window)
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (app, enabled);
-        Err("glass is Windows-only".into())
-    }
 }
 
 /// Turn the streaming-STT session on/off for the next capture. The frontend
@@ -289,8 +247,6 @@ pub fn run() {
             shortcuts::exit_app,
             shortcuts::toggle_main_window,
             win_activation::overlay_surface_state,
-            set_overlay_glass,
-            get_overlay_glass,
             byok::byok_test_connection,
             speaker::start_system_audio_capture,
             speaker::stop_system_audio_capture,
@@ -312,12 +268,6 @@ pub fn run() {
             startup::remove_legacy_autostart();
             // Setup main window positioning
             window::setup_main_window(app).expect("Failed to setup main window");
-            // Liquid glass: apply the OS acrylic immediately so the enabled
-            // path never flashes unblurred. Best-effort; the frontend syncs
-            // the stored preference right after (set_overlay_glass), which
-            // clears the effect for users who turned it off.
-            #[cfg(target_os = "windows")]
-            glass::apply_at_startup(app.handle());
             // Keep the history wing glued to the overlay while it is dragged.
             window::setup_history_wing_sync(app.handle());
             // The library wing (left-side twin) glues the same way.

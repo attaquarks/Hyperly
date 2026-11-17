@@ -15,8 +15,8 @@ export const GlassToggle = ({ className }: GlassToggleProps) => {
   return (
     <div id="overlay-glass" className={`space-y-2 ${className}`}>
       <Header
-        title="Overlay Glass"
-        description="Blurs the desktop behind the overlay (Windows acrylic). Off = the classic solid surface"
+        title="Ambient Glass"
+        description="Translucent glass surface with rim light and grain (no GPU needed). Off = the classic solid surface"
         isMainTitle
       />
       <div className="flex items-center justify-between">
@@ -24,13 +24,13 @@ export const GlassToggle = ({ className }: GlassToggleProps) => {
           <div>
             <Label className="text-sm font-medium">
               {customizable.glass.overlay
-                ? "Disable glass blur"
-                : "Enable glass blur"}
+                ? "Disable ambient glass"
+                : "Enable ambient glass"}
             </Label>
             <p className="text-xs text-muted-foreground mt-1">
               {customizable.glass.overlay
-                ? "Acrylic blur is active behind the overlay"
-                : "Solid overlay surface (no OS blur)"}
+                ? "Translucent ambient glass is active"
+                : "Solid overlay surface"}
             </p>
           </div>
         </div>
@@ -39,10 +39,10 @@ export const GlassToggle = ({ className }: GlassToggleProps) => {
           onCheckedChange={handleSwitchChange}
           title={`Toggle to ${
             !customizable.glass.overlay ? "Enabled" : "Disabled"
-          } glass blur`}
+          } ambient glass`}
           aria-label={`Toggle to ${
             customizable.glass.overlay ? "Enabled" : "Disabled"
-          } glass blur`}
+          } ambient glass`}
         />
       </div>
     </div>

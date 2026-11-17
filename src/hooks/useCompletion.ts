@@ -80,7 +80,20 @@ export const useCompletion = (capturing: boolean = false) => {
     pickFolder: pickKnowledgeFolder,
     selectFile: selectKnowledgeFile,
     clearKnowledge: clearKnowledgeFile,
+    applyExternalKnowledge: applyExternalKnowledgeFile,
   } = useKnowledge();
+
+  // The Library wing serves both rooms: a file picked there ships its text
+  // over this event, and Ask applies it exactly like Listen does. A later
+  // pick replaces the knowledge riding the next prompt.
+  useEffect(() => {
+    const unlisten = listen<KnowledgeFile>("library-wing-pick", (event) => {
+      applyExternalKnowledgeFile(event.payload);
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [applyExternalKnowledgeFile]);
   // Mirror in a ref so submit/handleScreenshotSubmit read the latest picked
   // file without being rebuilt on every selection.
   const knowledgeFileRef = useRef<KnowledgeFile | null>(null);
