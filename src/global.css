@@ -459,15 +459,34 @@ body {
 }
 
 /* Always-expanded overlay bodies (Ask + Listen). One surface, two rooms:
-   the header is wayfinding, the body below swaps per tab. */
+   the header is wayfinding, the body below swaps per tab. Ask uses the same
+   static-zone discipline as Listen: composer and action row are FIXED rows
+   (always on screen, never scrolled away), and only the content lane below
+   them scrolls. */
 .hyperly-overlay-body {
   display: flex;
   flex-direction: column;
   flex: 1 1 0%;
   gap: 10px;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
   padding: 10px 12px;
+}
+
+.hyperly-overlay-body > .hyperly-composer,
+.hyperly-overlay-body > .hyperly-action-row {
+  flex: 0 0 auto;
+}
+
+/* The Ask content lane: live mic transcript, thumbnails, knowledge note, and
+   the answer. This is the room's single scroller (scrollAreaRef targets it). */
+.hyperly-ask-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .hyperly-composer {
@@ -718,14 +737,78 @@ body {
   color: var(--hyperly-text-muted);
 }
 
-/* Sectioned Listen window: hairline-separated sections, each scrolling
-   independently. No card blocks, no single whole-panel scroll. */
+/* Sectioned Listen window: a STATIC ZONE GRID. Hairline-separated zones with
+   reserved slots — nothing ever overlaps, nothing ever collapses, every zone
+   scrolls inside its own slot. This replaces the old flex stack whose
+   `flex-shrink` let a growing answer squeeze the transcript to its floor and
+   collapse the follow-up chips.
+
+   Zone map (DOM order matches; each child is placed by grid-row):
+     1 toolbar (mode pills + history/new)     auto
+     2 capture bar (Start/Stop + behavior)    auto
+     3 transcript                             minmax(140px, 3fr) — floor 140px,
+                                              owns 60% of the free space
+     4 error (auto row; collapses when empty) auto
+     5 suggested answer                       minmax(88px, 2fr) — floor 88px,
+                                              40% of free space, own scroll
+     6 follow-ups dock                        auto — fixed single-row dock
+     7 action row (Capture/Selection/…)       auto
+     8 footer (size presets + hide)           auto
+   The fr maxes share the space left after the content-sized rows, so the two
+   reading zones flex with the window height while their floors guarantee the
+   docks and toolbars never move. */
 .hyperly-listen-body {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows:
+    auto
+    auto
+    minmax(140px, 3fr)
+    auto
+    minmax(88px, 2fr)
+    auto
+    auto
+    auto;
   flex: 1 1 0%;
   min-height: 0;
   overflow: hidden;
+}
+
+.hyperly-listen-body .hyperly-listen-toolbar-section {
+  grid-row: 1;
+}
+
+.hyperly-listen-body .hyperly-listening-bar {
+  grid-row: 2;
+}
+
+.hyperly-transcript-section {
+  grid-row: 3;
+}
+
+.hyperly-listen-body .hyperly-zone-error {
+  grid-row: 4;
+}
+
+.hyperly-answer-section {
+  grid-row: 5;
+}
+
+.hyperly-followups-section {
+  grid-row: 6;
+}
+
+.hyperly-listen-body .hyperly-zone-actions {
+  grid-row: 7;
+}
+
+.hyperly-listen-body .hyperly-overlay-footer {
+  grid-row: 8;
+}
+
+/* The setup/permission flow replaces the whole room: span every row so it
+   fills the panel. */
+.hyperly-listen-body .hyperly-zone-setup {
+  grid-row: 1 / -1;
 }
 
 .hyperly-section {
@@ -737,19 +820,6 @@ body {
 
 .hyperly-section + .hyperly-section {
   border-top: 1px solid var(--hyperly-line);
-}
-
-/* Follow-up chips wrap with conversation length; cap the section and scroll
-   the chip rows so they cannot push the action row and footer off-screen. */
-.hyperly-followups-section {
-  flex: 0 1 auto;
-  min-height: 0;
-  max-height: 24%;
-}
-
-.hyperly-followups-section .hyperly-action-row {
-  overflow-y: auto;
-  min-height: 0;
 }
 
 .hyperly-section-heading {
@@ -773,21 +843,30 @@ body {
 
 .hyperly-transcript-section {
   position: relative;
-  flex: 1 1 0%;
-  min-height: 72px;
 }
 
-/* The suggested answer takes only the height its content needs and never a
-   fixed share of the panel: a one-line answer shouldn't reserve 38% of the
-   window, and a long one shouldn't be clipped to it. flex-shrink lets it give
-   room back to the transcript when the panel is short. */
-.hyperly-answer-section {
-  flex: 0 1 auto;
+/* The suggested answer owns its slot: the zone never grows past its grid
+   share and its scroller takes the rest, so a long answer scrolls instead of
+   pushing the follow-ups, action row, or footer off-screen. */
+.hyperly-answer-section .hyperly-section-scroll {
+  flex: 1 1 0%;
+}
+
+/* The follow-ups DOCK: one fixed-height horizontal lane. Chips never wrap
+   into a second row and the lane never changes height with conversation
+   length — extra chips scroll horizontally instead of squeezing anyone. */
+.hyperly-followups-section .hyperly-action-row {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
   min-height: 0;
-  /* A long suggested answer scrolls inside its slot: without this cap the
-     answer grew until the transcript vanished and the footer was clipped
-     past the window edge. */
-  max-height: 45%;
+  padding-bottom: 2px;
+}
+
+.hyperly-followups-section .hyperly-action {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .hyperly-icon-btn {

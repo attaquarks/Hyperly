@@ -908,9 +908,9 @@ export const useCompletion = (capturing: boolean = false) => {
       scrollAreaRef.current &&
       responseSettings.autoScroll
     ) {
-      // scrollAreaRef is the Ask room's single scroller (.hyperly-overlay-body)
-      // itself, not a wrapper around a nested Radix viewport, so scroll it
-      // directly.
+      // scrollAreaRef is the Ask room's content lane (.hyperly-ask-scroll) —
+      // the single scroller below the fixed composer/action row — not a
+      // wrapper around a nested Radix viewport, so scroll it directly.
       const scrollElement = scrollAreaRef.current;
       scrollElement.scrollTo({
         top: scrollElement.scrollHeight,

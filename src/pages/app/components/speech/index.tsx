@@ -209,21 +209,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
   return (
     <div className="hyperly-listen-body">
-      {/* Streaming STT is LIVE: the WebSocket path is running, words arrive
-      while people talk, and Stop sends instantly. The user must be able to
-      SEE which transcription mode is running — its absence is exactly how
-      the silent batch fallback went unnoticed. */}
-      {sttStreaming && capturing ? (
-        <div
-          className="flex items-center gap-1.5 px-2 py-0.5 w-fit rounded-full border border-green-500/40"
-          data-testid="listen-streaming-badge"
-        >
-          <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
-          <span className="text-[10px] uppercase tracking-wide text-green-500">
-            Live streaming
-          </span>
-        </div>
-      ) : null}
       <ErrorBoundary
         fallbackRender={() => null}
         onError={(micError) => {
@@ -248,7 +233,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
         </Suspense>
       </ErrorBoundary>
       {setupRequired ? (
-        <div className="hyperly-section">
+        <div className="hyperly-section hyperly-zone-setup">
           <PermissionFlow
             onPermissionGranted={() => {
               startCapture();
@@ -260,8 +245,22 @@ export const SystemAudio = (props: useSystemAudioType) => {
         </div>
       ) : (
         <>
-          {/* Mode toolbar: prompt pills + history/new chat on the right */}
-          <div className="hyperly-section">
+          {/* Mode toolbar: the Live-streaming badge rides here so the grid's
+              rows stay fixed — a conditional top-level badge would occupy the
+              first grid row and shift every zone below it. Prompt pills +
+              history/new chat on the right. */}
+          <div className="hyperly-section hyperly-zone-toolbar">
+            {sttStreaming && capturing ? (
+              <div
+                className="flex items-center gap-1.5 px-2 py-0.5 w-fit rounded-full border border-green-500/40 mb-1.5"
+                data-testid="listen-streaming-badge"
+              >
+                <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-[10px] uppercase tracking-wide text-green-500">
+                  Live streaming
+                </span>
+              </div>
+            ) : null}
             <div className="hyperly-listen-toolbar">
               <div className="flex-1 min-w-0">
                 <ListenControls mode={listenMode} onModeChange={setListenMode} />
@@ -329,7 +328,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
           />
 
           {error && (
-            <div className="hyperly-section">
+            <div className="hyperly-section hyperly-zone-error">
               <div className="hyperly-error">
                 <strong>Error:</strong> {error}
               </div>
@@ -351,7 +350,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
           />
 
           {/* Action row: Capture / Selection / Attach / Library + file dropdown */}
-          <div className="hyperly-section">
+          <div className="hyperly-section hyperly-zone-actions">
             <ListenActionRow
               isCapturing={isCapturingScreenshot}
               onCapture={() => void handleCapture()}
