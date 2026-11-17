@@ -13,7 +13,7 @@
 //! excluded-from-capture behaviour applies to the whole composited window
 //! (acrylic backdrop included).
 
-use tauri::{Emitter, Runtime, WebviewWindow};
+use tauri::{Emitter, Manager, Runtime, WebviewWindow};
 
 /// Dark tint under the acrylic — matches the shell's --hyperly-surface color.
 const GLASS_TINT: (u8, u8, u8, u8) = (16, 16, 18, 142);
