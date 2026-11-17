@@ -320,14 +320,16 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
         if let Err(e) = window.hide() {
             eprintln!("Failed to hide window: {}", e);
         }
-        // The wing is a separate window; an orphaned bubble above the meeting
+        // The wings are separate windows; an orphaned bubble above the meeting
         // would defeat the hide. Restore-on-show uses the Rust-side open flag.
         window::hide_history_wing_with_main(app);
+        window::hide_library_wing_with_main(app);
         return;
     }
 
     show_main_window(app);
     window::restore_history_wing_with_main(app);
+    window::restore_library_wing_with_main(app);
 
     // NO focus-text-input here, on purpose. This event switched the overlay's
     // room to Ask on every show, which yanked the user out of the mode they

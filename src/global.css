@@ -117,8 +117,12 @@
   * {
     @apply border-border outline-ring/50;
   }
+  /* Transparent body: the dashboard's aurora canvas paints its own base, and
+     the overlay is a transparent window — an opaque body would bleed white
+     around the shell's rounded corners in light mode. */
   body {
-    @apply bg-background text-foreground;
+    background: transparent;
+    color: var(--foreground);
   }
 }
 
@@ -206,11 +210,18 @@ body {
      overlay-glass-status event; the class is applied ONLY on confirmation
      (never optimistically — a wrong guess leaves text on a bright desktop). */
 .hyperly-overlay-shell {
+  position: relative;
   --hyperly-surface: rgb(16 16 18 / 0.94);
   --hyperly-surface-muted: rgb(255 255 255 / 0.055);
   --hyperly-line: rgb(255 255 255 / 0.1);
   --hyperly-text: rgb(248 248 248);
   --hyperly-text-muted: rgb(248 248 248 / 0.58);
+  --hyperly-chip: rgb(255 255 255 / 0.04);
+  --hyperly-chip-active: rgb(255 255 255 / 0.085);
+  --hyperly-rim: rgb(255 255 255 / 0.14);
+  --hyperly-solid: rgb(16 16 18);
+  --hyperly-live: rgb(110 231 183 / 0.92);
+  --hyperly-danger: rgb(252 165 165);
   /* The shell owns the window height. It is a fixed-size panel — the window
      never grows or shrinks in response to content, so every room below has to
      fit inside this box rather than pushing it taller. */
@@ -231,14 +242,58 @@ body {
 }
 
 .hyperly-overlay-shell.glass-os {
-  --hyperly-surface: rgb(16 16 18 / 0.46);
+  --hyperly-surface: rgb(16 16 18 / 0.34);
   /* The OS blur is the frost; keep text comfortable with a slightly denser
      tint at the bottom (content-heavy zones read better over busier
      backdrops). */
   background:
-    linear-gradient(rgb(16 16 18 / 0.28), rgb(16 16 18 / 0.6)),
+    linear-gradient(rgb(16 16 18 / 0.16), rgb(16 16 18 / 0.46)),
     var(--hyperly-surface);
   backdrop-filter: none;
+}
+
+/* The grain: fractal noise rasterized once, compositor-static afterwards. */
+.hyperly-overlay-shell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  border-radius: inherit;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.025;
+}
+
+html:not(.dark) .hyperly-overlay-shell::after {
+  opacity: 0.035;
+}
+
+/* LIGHT THEME — the real white overlay: white glass surface, black text.
+   The shell's tokens are theme-scoped, so every surface below (chips,
+   composer, hairlines, transcript) flips with the toggle instead of leaving
+   a dark panel with a white shadow around it. */
+html:not(.dark) .hyperly-overlay-shell {
+  --hyperly-surface: rgb(250 250 252 / 0.95);
+  --hyperly-surface-muted: rgb(15 23 42 / 0.05);
+  --hyperly-line: rgb(15 23 42 / 0.11);
+  --hyperly-text: rgb(24 24 27);
+  --hyperly-text-muted: rgb(24 24 27 / 0.56);
+  --hyperly-chip: rgb(15 23 42 / 0.045);
+  --hyperly-chip-active: rgb(15 23 42 / 0.09);
+  --hyperly-rim: rgb(255 255 255 / 0.9);
+  --hyperly-solid: rgb(255 255 255);
+  --hyperly-live: rgb(5 150 105 / 0.95);
+  --hyperly-danger: rgb(185 28 28);
+  box-shadow:
+    0 24px 60px rgb(15 23 42 / 0.16),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.9);
+}
+
+html:not(.dark) .hyperly-overlay-shell.glass-os {
+  --hyperly-surface: rgb(250 250 252 / 0.45);
+  background:
+    linear-gradient(rgb(250 250 252 / 0.24), rgb(250 250 252 / 0.55)),
+    var(--hyperly-surface);
 }
 
 @keyframes hyperly-wing-in {
@@ -256,7 +311,7 @@ body {
   gap: 12px;
   padding: 5px 8px 5px 14px;
   border-bottom: 1px solid var(--hyperly-line);
-  background: rgb(255 255 255 / 0.018);
+  background: var(--hyperly-chip);
 }
 
 .hyperly-wordmark {
@@ -288,7 +343,7 @@ body {
 
 .hyperly-tab-active {
   color: var(--hyperly-text);
-  background: rgb(255 255 255 / 0.085);
+  background: var(--hyperly-chip-active);
 }
 
 .hyperly-tab-active::after {
@@ -298,7 +353,7 @@ body {
   left: 9px;
   height: 2px;
   content: "";
-  background: rgb(248 248 248 / 0.82);
+  background: var(--hyperly-text);
   border-radius: 2px;
 }
 
@@ -310,10 +365,10 @@ body {
   color: var(--hyperly-text-muted);
   font-size: 11px;
   white-space: nowrap;
-  background: rgb(255 255 255 / 0.04);
+  background: var(--hyperly-chip);
   border: 1px solid var(--hyperly-line);
   border-radius: 999px;
-  box-shadow: inset 0 1px 0 0 rgb(255 255 255 / 0.07);
+  box-shadow: inset 0 1px 0 0 var(--hyperly-rim);
 }
 
 .hyperly-status-dot {
@@ -361,7 +416,7 @@ body {
 .hyperly-thread {
   padding: 10px 12px;
   color: var(--hyperly-text);
-  background: rgb(255 255 255 / 0.035);
+  background: var(--hyperly-chip);
   border: 1px solid var(--hyperly-line);
   border-radius: 10px;
 }
@@ -400,12 +455,12 @@ body {
 
 .hyperly-thread-source:hover {
   color: var(--hyperly-text);
-  background: rgb(255 255 255 / 0.06);
+  background: var(--hyperly-chip-active);
 }
 
 .hyperly-thread-source-on {
   color: var(--hyperly-text);
-  background: rgb(255 255 255 / 0.1);
+  background: var(--hyperly-chip-active);
 }
 
 .hyperly-thread-list {
@@ -416,6 +471,7 @@ body {
 .hyperly-transcript-row {
   display: grid;
   grid-template-columns: 40px 72px minmax(0, 1fr);
+  overflow-wrap: anywhere;
   gap: 8px;
   align-items: baseline;
   color: rgb(248 248 248 / 0.86);
@@ -434,7 +490,7 @@ body {
 }
 
 .hyperly-transcript-live {
-  color: rgb(110 231 183 / 0.92);
+  color: var(--hyperly-live);
 }
 
 
@@ -502,6 +558,8 @@ body {
   flex-direction: column;
   flex: 1 1 0%;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
   overflow-y: auto;
 }
@@ -517,7 +575,7 @@ body {
 }
 
 .hyperly-composer:focus-within {
-  border-color: rgb(255 255 255 / 0.22);
+  border-color: var(--hyperly-live);
 }
 
 .hyperly-composer-input {
@@ -553,10 +611,10 @@ body {
   color: var(--hyperly-text-muted);
   font-size: 10px;
   font-weight: 540;
-  background: rgb(255 255 255 / 0.04);
+  background: var(--hyperly-chip);
   border: 1px solid var(--hyperly-line);
   border-radius: 7px;
-  box-shadow: inset 0 1px 0 0 rgb(255 255 255 / 0.07);
+  box-shadow: inset 0 1px 0 0 var(--hyperly-rim);
   transition: color 140ms ease-out, background-color 140ms ease-out, border-color 140ms ease-out;
 }
 
@@ -627,11 +685,12 @@ body {
 
 .hyperly-send-ready {
   color: var(--hyperly-text);
-  background: rgb(255 255 255 / 0.1);
+  background: var(--hyperly-chip-active);
 }
 
 .hyperly-send-ready:hover {
-  background: rgb(255 255 255 / 0.16);
+  background: var(--hyperly-chip-active);
+  box-shadow: inset 0 0 0 1px var(--hyperly-line);
 }
 
 .hyperly-toggle-label {
@@ -657,7 +716,7 @@ body {
   font-size: 9px;
   font-weight: 650;
   letter-spacing: 0.08em;
-  color: rgb(110 231 183 / 0.92);
+  color: var(--hyperly-live);
 }
 
 .hyperly-answer {
@@ -665,7 +724,7 @@ body {
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
-  background: rgb(255 255 255 / 0.035);
+  background: var(--hyperly-chip);
   border: 1px solid var(--hyperly-line);
   border-radius: 10px;
 }
@@ -688,15 +747,25 @@ body {
 .hyperly-answer-body {
   font-size: 12px;
   line-height: 1.55;
-  color: rgb(248 248 248 / 0.9);
+  color: var(--hyperly-text);
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* Markdown furniture must stay inside the zone: wide code blocks and tables
+   scroll horizontally INSIDE the answer slot instead of stretching the room. */
+.hyperly-answer-body [data-streamdown="code-block"],
+.hyperly-answer-body table {
+  max-width: 100% !important;
 }
 
 .hyperly-error {
   padding: 8px 10px;
   font-size: 11px;
-  color: rgb(252 165 165);
+  color: var(--hyperly-danger);
   background: rgb(248 113 113 / 0.08);
-  border: 1px solid rgb(248 113 113 / 0.3);
+  border: 1px solid var(--hyperly-danger);
   border-radius: 8px;
 }
 
@@ -725,7 +794,7 @@ body {
   height: 14px;
   width: 14px;
   color: var(--hyperly-text-muted);
-  background: rgb(16 16 18);
+  background: var(--hyperly-solid);
   border: 1px solid var(--hyperly-line);
   border-radius: 999px;
 }
@@ -777,6 +846,7 @@ body {
    docks and toolbars never move. */
 .hyperly-listen-body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows:
     auto
     auto
@@ -832,6 +902,8 @@ body {
 .hyperly-section {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
   padding: 6px 12px;
 }
@@ -922,6 +994,12 @@ body {
   --hyperly-line: rgb(255 255 255 / 0.1);
   --hyperly-text: rgb(248 248 248);
   --hyperly-text-muted: rgb(248 248 248 / 0.58);
+  --hyperly-chip: rgb(255 255 255 / 0.04);
+  --hyperly-chip-active: rgb(255 255 255 / 0.085);
+  --hyperly-rim: rgb(255 255 255 / 0.14);
+  --hyperly-solid: rgb(16 16 18);
+  --hyperly-live: rgb(110 231 183 / 0.92);
+  --hyperly-danger: rgb(252 165 165);
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -933,8 +1011,25 @@ body {
   overflow: hidden;
   box-shadow:
     0 24px 60px rgb(0 0 0 / 0.35),
-    inset 0 1px 0 0 rgb(255 255 255 / 0.12);
+    inset 0 1px 0 0 var(--hyperly-rim);
   animation: hyperly-wing-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+html:not(.dark) .hyperly-wing-bubble {
+  --hyperly-surface: rgb(250 250 252 / 0.95);
+  --hyperly-surface-muted: rgb(15 23 42 / 0.05);
+  --hyperly-line: rgb(15 23 42 / 0.11);
+  --hyperly-text: rgb(24 24 27);
+  --hyperly-text-muted: rgb(24 24 27 / 0.56);
+  --hyperly-chip: rgb(15 23 42 / 0.045);
+  --hyperly-chip-active: rgb(15 23 42 / 0.09);
+  --hyperly-rim: rgb(255 255 255 / 0.9);
+  --hyperly-solid: rgb(255 255 255);
+  --hyperly-live: rgb(5 150 105 / 0.95);
+  --hyperly-danger: rgb(185 28 28);
+  box-shadow:
+    0 24px 60px rgb(15 23 42 / 0.16),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.9);
 }
 
 .hyperly-wing-header {
@@ -945,7 +1040,7 @@ body {
   gap: 8px;
   padding: 6px 8px 6px 12px;
   border-bottom: 1px solid var(--hyperly-line);
-  background: rgb(255 255 255 / 0.018);
+  background: var(--hyperly-chip);
 }
 
 .hyperly-wing-title {
@@ -1001,7 +1096,7 @@ body {
 .hyperly-listening-eq span {
   width: 2px;
   height: 4px;
-  background: rgb(110 231 183 / 0.9);
+  background: var(--hyperly-live);
   border-radius: 1px;
   animation: hyperly-eq 1.1s ease-in-out infinite;
 }
@@ -1049,7 +1144,7 @@ body {
 }
 
 .hyperly-followup-input:focus {
-  border-color: rgb(255 255 255 / 0.22);
+  border-color: var(--hyperly-text-muted);
 }
 
 /* One focus edge. Header buttons also carry the shared Button ring;
@@ -1062,7 +1157,7 @@ body {
 .hyperly-overlay-shell .hyperly-header-icon:focus-visible,
 .hyperly-overlay-shell .hyperly-header-drag:focus-visible,
 .hyperly-overlay-shell .hyperly-thumb-remove:focus-visible {
-  outline: 1px solid rgb(255 255 255 / 0.22);
+  outline: 1px solid var(--hyperly-text-muted);
   outline-offset: -1px;
   box-shadow: none;
 }
@@ -1333,3 +1428,91 @@ body {
   }
 }
 
+
+/* ---- Wing content: shared by the history and library wings -----------------
+   Heading (bubble header) → control row → search → list. Glass chips on the
+   wing tokens, so both wings follow the overlay's theme automatically. */
+.hyperly-wing-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 26px;
+  padding: 0 9px;
+  color: var(--hyperly-text);
+  font-size: 10px;
+  font-weight: 540;
+  background: var(--hyperly-chip);
+  border: 1px solid var(--hyperly-line);
+  border-radius: 7px;
+  box-shadow: inset 0 1px 0 0 var(--hyperly-rim);
+  transition: background-color 140ms ease-out, border-color 140ms ease-out;
+}
+
+.hyperly-wing-select:hover {
+  border-color: var(--hyperly-text-muted);
+}
+
+.hyperly-wing-search {
+  width: 100%;
+  height: 26px;
+  padding: 0 8px 0 24px;
+  color: var(--hyperly-text);
+  font-size: 11px;
+  background: var(--hyperly-chip);
+  border: 1px solid var(--hyperly-line);
+  border-radius: 7px;
+  outline: none;
+}
+
+.hyperly-wing-search:focus {
+  border-color: var(--hyperly-live);
+}
+
+.hyperly-wing-search::placeholder {
+  color: var(--hyperly-text-muted);
+}
+
+.hyperly-wing-list {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 6px 6px;
+}
+
+.hyperly-wing-list-ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hyperly-wing-item {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  color: var(--hyperly-text);
+  font-size: 11px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--hyperly-line);
+  border-radius: 5px;
+  transition: background-color 140ms ease-out;
+}
+
+.hyperly-wing-item:hover {
+  background: var(--hyperly-chip-active);
+}
+
+.hyperly-wing-empty {
+  padding: 10px 8px;
+  color: var(--hyperly-text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.hyperly-wing-error {
+  padding: 8px;
+  color: var(--hyperly-danger);
+  font-size: 10px;
+}

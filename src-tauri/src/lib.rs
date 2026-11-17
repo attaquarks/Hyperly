@@ -57,6 +57,21 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// The confirmed acrylic state, queried by the frontend on mount: the startup
+/// apply fires before any React listener exists, so the status event alone
+/// would be missed.
+#[tauri::command]
+fn get_overlay_glass() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        glass::is_active()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 /// Toggle the OS acrylic behind the overlay (the liquid-glass surface). The
 /// result is reported to the frontend via `overlay-glass-status`; a failure
 /// leaves the near-opaque fallback surface active (never an unreadable
@@ -256,6 +271,8 @@ pub fn run() {
             window::open_dashboard,
             window::open_history_wing,
             window::close_history_wing,
+            window::open_library_wing,
+            window::close_library_wing,
             window::toggle_dashboard,
             window::move_window,
             window::log_frontend,
@@ -273,6 +290,7 @@ pub fn run() {
             shortcuts::toggle_main_window,
             win_activation::overlay_surface_state,
             set_overlay_glass,
+            get_overlay_glass,
             byok::byok_test_connection,
             speaker::start_system_audio_capture,
             speaker::stop_system_audio_capture,
@@ -302,6 +320,8 @@ pub fn run() {
             glass::apply_at_startup(app.handle());
             // Keep the history wing glued to the overlay while it is dragged.
             window::setup_history_wing_sync(app.handle());
+            // The library wing (left-side twin) glues the same way.
+            window::setup_library_wing_sync(app.handle());
             // Convert the overlay window into a floating NSPanel (macOS only).
             #[cfg(target_os = "macos")]
             init(app.app_handle());

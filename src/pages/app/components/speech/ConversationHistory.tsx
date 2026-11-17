@@ -11,6 +11,9 @@ interface ConversationHistoryProps {
   activeConversationId?: string;
   onClose?: () => void;
   className?: string;
+  /** The wing renders its own bubble header ("History" + close) — hide this
+      component's internal one there so the heading never shows twice. */
+  showHeader?: boolean;
 }
 
 /**
@@ -23,6 +26,7 @@ export const ConversationHistory = ({
   activeConversationId,
   onClose,
   className,
+  showHeader = true,
 }: ConversationHistoryProps) => {
   const history = useHistory();
 
@@ -45,19 +49,21 @@ export const ConversationHistory = ({
         className
       )}
     >
-      <div className="flex items-center justify-between p-2 border-b border-border/50">
-        <p className="text-xs font-medium select-none">History</p>
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            title="Close"
-            className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
-          >
-            ×
-          </button>
-        )}
-      </div>
+      {showHeader && (
+        <div className="flex items-center justify-between p-2 border-b border-border/50">
+          <p className="text-xs font-medium select-none">History</p>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              title="Close"
+              className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
+            >
+              ×
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="relative p-2 border-b border-border/50">
         <Search className="absolute left-4 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />

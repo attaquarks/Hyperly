@@ -30,6 +30,11 @@ const App = () => {
   // without the OS blur, the near-opaque fallback keeps text readable.
   const [glassOS, setGlassOS] = useState(false);
   useEffect(() => {
+    // Mount-time sync: the startup apply fires before this listener exists,
+    // so the confirmed state is QUERIED here; the event keeps it live after.
+    void invoke<boolean>("get_overlay_glass")
+      .then((active) => setGlassOS(active === true))
+      .catch(() => {});
     const unlisten = listen<boolean>("overlay-glass-status", (event) => {
       setGlassOS(event.payload === true);
     });

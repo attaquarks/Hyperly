@@ -257,7 +257,21 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     pickFolder: pickKnowledgeFolder,
     selectFile: selectKnowledgeFile,
     clearKnowledge: clearKnowledgeFile,
+    applyExternalKnowledge: applyExternalKnowledgeFile,
   } = useKnowledge();
+
+  // The Library wing (its own window, opened by the toolbar's library button)
+  // owns folder picking and file reading. It ships the finished KnowledgeFile
+  // over this event; the overlay applies it verbatim. A previously selected
+  // file is replaced, mirroring selectFile's behaviour.
+  useEffect(() => {
+    const unlisten = listen<KnowledgeFile>("library-wing-pick", (event) => {
+      applyExternalKnowledgeFile(event.payload);
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [applyExternalKnowledgeFile]);
   const knowledgeFileRef = useRef<KnowledgeFile | null>(null);
   useEffect(() => {
     knowledgeFileRef.current = knowledgeFile;
