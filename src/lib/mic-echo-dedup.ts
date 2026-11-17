@@ -62,3 +62,64 @@ export const isMicEchoOfSystem = (
     return overlap >= minOverlap && novelty <= maxNovelty;
   });
 };
+/**
+ * The echo candidate a mic utterance matched, or null. The boolean variant
+ * above answers "suppress?"; this one answers "suppress AND what did it
+ * match?" — the Listen room needs the target to decide whether the room's
+ * copy has already been dispatched (nothing to relabel) or is still pending
+ * (the mic just proved those words are the USER's — see the retag in
+ * useSystemAudio, the "user transcription inside the System label" fix).
+ */
+export const findMicEcho = (
+  micText: string,
+  systemHistory: DedupCandidate[],
+  micAtSeconds: number,
+  options?: { windowSeconds?: number; minOverlap?: number; maxNovelty?: number }
+): DedupCandidate | null => {
+  const windowSeconds = options?.windowSeconds ?? 8;
+  const minOverlap = options?.minOverlap ?? 0.6;
+  const maxNovelty = options?.maxNovelty ?? 0.35;
+  const micTokens = new Set(normalizeUtterance(micText));
+  if (micTokens.size === 0) return null;
+  for (const candidate of systemHistory) {
+    if (Math.abs(micAtSeconds - candidate.atSeconds) > windowSeconds) {
+      continue;
+    }
+    const sysTokens = new Set(normalizeUtterance(candidate.text));
+    if (sysTokens.size === 0) continue;
+    let shared = 0;
+    for (const token of micTokens) {
+      if (sysTokens.has(token)) shared++;
+    }
+    const overlap = shared / new Set([...micTokens, ...sysTokens]).size;
+    const novelty = (micTokens.size - shared) / micTokens.size;
+    if (overlap >= minOverlap && novelty <= maxNovelty) {
+      return candidate;
+    }
+  }
+  return null;
+};
+
+/**
+ * Whether the mic's tokens are essentially CONTAINED in a (possibly longer)
+ * system text. Used when the system side is an ACCUMULATED send (Manual mode
+ * holds several utterances): overlap-of-union would fail a short mic copy
+ * against a long blob, so containment asks the other question — "is what the
+ * mic heard, heard inside the room text?"
+ */
+export const micTokensContained = (
+  systemText: string,
+  micText: string,
+  minContainment?: number
+): boolean => {
+  const threshold = minContainment ?? 0.6;
+  const micTokens = new Set(normalizeUtterance(micText));
+  if (micTokens.size === 0) return false;
+  const sysTokens = new Set(normalizeUtterance(systemText));
+  if (sysTokens.size === 0) return false;
+  let shared = 0;
+  for (const token of micTokens) {
+    if (sysTokens.has(token)) shared++;
+  }
+  return shared / micTokens.size >= threshold;
+};

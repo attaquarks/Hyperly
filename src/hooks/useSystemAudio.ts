@@ -32,7 +32,11 @@ import { AiTurnGate } from "@/lib/ai-turn";
 import { chronological } from "@/lib/message-order";
 import { PendingSave } from "@/lib/pending-save";
 import { modelSourceTag } from "@/lib/transcript-label";
-import { isMicEchoOfSystem, type DedupCandidate } from "@/lib/mic-echo-dedup";
+import {
+  findMicEcho,
+  micTokensContained,
+  type DedupCandidate,
+} from "@/lib/mic-echo-dedup";
 import { PartialTracker } from "@/lib/partial-tracking";
 import {
   CaptureBehavior,
@@ -74,7 +78,8 @@ const composeListenPrompt = (base: string, mode: ListenMode): string => {
   // else talking). The model must answer questions FROM the room without
   // treating the user's own words as a question to answer.
   const legend =
-    'Each incoming message is prefixed with its source channel. ' +
+    'Each message - the current one AND every past message in this ' +
+    'conversation - is prefixed with its source channel. ' +
     '"User: ..." is the user speaking directly to you — their words are the ' +
     'request and the context, never a question for you to answer on their behalf. ' +
     '"System: ..." is audio captured from the system/room: someone else ' +
@@ -218,6 +223,14 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // Aborts the in-flight delta-partial STT upload when a stop is pressed, so
   // the flush utterance's upload gets the bandwidth instead of racing it.
   const partialAbortRef = useRef<AbortController | null>(null);
+  // Mic-confirmed user words waiting for the room's final. When the close mic
+  // transcribes text the room is ALSO hearing (the user's own voice in the
+  // meeting mix, or the mic simply finalizes first), the mic copy is
+  // suppressed as an echo — and the room's final then dispatched as
+  // "System: <the user's words>", which is exactly the "no user label" bug.
+  // The echo check now records WHAT matched; the system final checks this ref
+  // and dispatches those words as "User: ..." instead. Cleared per session.
+  const micConfirmedRef = useRef<DedupCandidate | null>(null);
   // Tier 2 streaming STT: true while the Rust WebSocket session is live, in
   // which case transcripts arrive as `stt-stream-*` TEXT events and the
   // batch audio round trip is skipped entirely.
@@ -712,6 +725,22 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         console.warn("Could not persist transcript event:", persistError);
       }
 
+      // The close mic may have already proven these words are the USER's (see
+      // micConfirmedRef): the echo suppression dropped the mic copy, so the
+      // label has to flip here or the model reads the user's own words as the
+      // room. Only the finalized utterance itself is retagged — an accumulated
+      // Manual blob stays channel-truth, because one label cannot cover mixed
+      // speakers.
+      const confirmed = micConfirmedRef.current;
+      const micProvedTheseWords =
+        !!confirmed && micTokensContained(text, confirmed.text);
+      if (micProvedTheseWords) {
+        micConfirmedRef.current = null;
+      }
+      const modelSource: TranscriptSource = micProvedTheseWords
+        ? "microphone"
+        : "system";
+
       // One call decides the outcome for every mode - send now, hold, or apply a
       // stop pressed while this utterance was transcribing - so Auto cannot
       // drift into the Manual/Questions path. D1: the room path — only
@@ -735,13 +764,13 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         if (!engineActiveRef.current && pendingTranscriptRef.current) {
           const held = pendingTranscriptRef.current;
           pendingTranscriptRef.current = "";
-          await stopAndSend(held, "system");
+          await stopAndSend(held, modelSource);
         }
         return;
       }
 
       if (plan.kind === "stop-and-send") {
-        await stopAndSend(plan.text, "system");
+        await stopAndSend(plan.text, modelSource);
         return;
       }
 
@@ -761,7 +790,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         plan.text,
         effectiveSystemPrompt,
         conversation.messages ?? [],
-        modelSourceTag("system", plan.text)
+        modelSourceTag(modelSource, plan.text),
+        modelSource
       );
     };
   });
@@ -1263,7 +1293,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         const userMessage = {
           id: generateMessageId("user", timestamp),
           role: "user" as const,
-          content: lastTranscription,
+          // The quick action is a typed user action — the stored message
+          // carries the User label like every other Listen turn.
+          content: modelSourceTag("microphone", lastTranscription),
           timestamp,
         };
         updatedMessages.push(userMessage);
@@ -1289,7 +1321,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       action,
       effectiveSystemPrompt,
       updatedMessages,
-      modelSourceTag("microphone", action)
+      modelSourceTag("microphone", action),
+      "microphone"
     );
   };
 
@@ -1338,12 +1371,22 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       prompt: string,
       priorMessages: ChatMessage[],
       /**
-       * What the model is asked with, when that must differ from what is stored.
-       * The source tag ("User (microphone): ...") belongs here: the model needs to
-       * tell the user's own words from the room, while the stored message must stay
-       * the plain transcript (Phase 4 R8).
+       * What the model is asked with for the CURRENT turn when it must differ
+       * from what is stored. The source tag ("User: ..."/"System: ...")
+       * belongs here.
        */
-      modelInput?: string
+      modelInput?: string,
+      /**
+       * The capture channel this turn's words came from. DECISION CHANGE
+       * (2026-11-18, user instruction "make sure llm gets the user and system
+       * labels right every time"): the stored conversation message now carries
+       * the channel label, because the model reads PRIOR turns as history and
+       * unlabelled history collapsed both channels into one speaker — the
+       * exact "no user label" report. R8's prompt-only rule survives for what
+       * it was protecting: the transcript EVENTS store (kind=final rows) keeps
+       * its own channel-truth source column and never sees the tag.
+       */
+      source: TranscriptSource = "system"
     ) => {
       // R6: one in-flight turn per session. `begin()` supersedes (and cancels) a
       // turn that is still streaming, so two answers can no longer interleave;
@@ -1428,9 +1471,12 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
               {
                 id: generateMessageId("user", timestamp),
                 role: "user" as const,
-                // The stored message is the plain transcript - never the model's
-                // source tag (Phase 4 R8).
-                content: transcription,
+                // The stored message carries the channel label ("User: ..."/
+                // "System: ..."): the model reads prior turns as HISTORY, and
+                // unlabelled history is exactly how the user's words ended up
+                // inside the System stream (decision change, 2026-11-18). The
+                // transcript EVENTS store keeps its plain channel-truth text.
+                content: modelSourceTag(source, transcription),
                 timestamp,
               },
               {
@@ -1540,7 +1586,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         outbound,
         effectiveSystemPrompt,
         conversation.messages ?? [],
-        modelSourceTag(source, outbound)
+        modelSourceTag(source, outbound),
+        source
       );
     },
     [systemPrompt, contextContent, conversation.messages, processWithAI, stopReferenceTap]
@@ -1583,13 +1630,16 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             },
           ]
         : systemHistoryRef.current;
-      if (
-        isMicEchoOfSystem(
-          transcript,
-          systemCandidates,
-          elapsedSeconds()
-        )
-      ) {
+      const nowSeconds = elapsedSeconds();
+      const echo = findMicEcho(transcript, systemCandidates, nowSeconds);
+      if (echo) {
+        // If the match is the room's LIVE partial, the room's final has NOT
+        // been dispatched yet — record the confirmation so that final goes to
+        // the model as "User: ...". A match against an already-sent system
+        // utterance is too late to relabel; suppression stands.
+        if (echo.atSeconds === nowSeconds) {
+          micConfirmedRef.current = { atSeconds: echo.atSeconds, text: transcript };
+        }
         return;
       }
 
@@ -1629,7 +1679,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         plan.text,
         effectiveSystemPrompt,
         conversation.messages ?? [],
-        modelSourceTag("microphone", plan.text)
+        modelSourceTag("microphone", plan.text),
+        "microphone"
       );
     },
     [
@@ -1670,6 +1721,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       setTranscriptSegments([]);
       pendingTranscriptRef.current = "";
       stopRequestedRef.current = false;
+      micConfirmedRef.current = null;
       sessionStartRef.current = Date.now();
 
       // Manual and Auto both start capturing audio immediately. Manual used
