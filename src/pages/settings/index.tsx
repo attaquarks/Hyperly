@@ -2,6 +2,7 @@ import {
   Theme,
   AlwaysOnTopToggle,
   AppIconToggle,
+  GlassToggle,
   PersonalContext,
 } from "./components";
 import { PageLayout } from "@/layouts";
@@ -24,6 +25,9 @@ const Settings = () => {
 
       {/* Always On Top Toggle */}
       <AlwaysOnTopToggle />
+
+      {/* Overlay glass (OS acrylic) toggle */}
+      <GlassToggle />
     </PageLayout>
   );
 };

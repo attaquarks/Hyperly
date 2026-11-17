@@ -7,10 +7,11 @@ import { Answer } from "./Answer";
 import { ActionRow } from "./ActionRow";
 import { AskPushToTalkKey } from "./AskPushToTalkKey";
 
-// The Ask room: composer (text + send arrow), action row, then whatever the
-// room has to show — live voice transcript, attached-image thumbnails, a
-// knowledge note, and the streamed answer with follow-up chips. Everything
-// renders inline in the always-expanded panel; nothing here is a popover.
+// The Ask room: a FIXED composer (text + send arrow) and action row that
+// never scroll away, then the content lane — live voice transcript,
+// attached-image thumbnails, a knowledge note, and the streamed answer with
+// follow-up chips — which is the room's single scroller. Everything renders
+// inline in the always-expanded panel; nothing here is a popover.
 //
 // The mic is headless (MicDriver) and driven by the Push to talk button, the
 // spacebar, or the global Voice Input shortcut — all three flip the same
@@ -27,7 +28,7 @@ export const Completion = ({
   const completion = useCompletion(capturing);
 
   return (
-    <div className="hyperly-overlay-body" ref={completion.scrollAreaRef}>
+    <div className="hyperly-overlay-body">
       <MicDriver {...completion} />
       <AskPushToTalkKey
         active={!isHidden}
@@ -41,60 +42,64 @@ export const Completion = ({
 
       <ActionRow {...completion} />
 
-      {/* Live voice transcript while the mic is on */}
-      {(completion.enableVAD || completion.micTranscript) && (
-        <div className="hyperly-mic-live">
-          <span className="hyperly-mic-live-label">User</span>
-          <span>{completion.micTranscript || "Listening… speak now"}</span>
-        </div>
-      )}
+      {/* The content lane: mic transcript, thumbnails, knowledge note, and the
+          answer. The room's single scroller (scrollAreaRef targets it), so
+          the composer and action row above stay fixed on screen. */}
+      <div className="hyperly-ask-scroll" ref={completion.scrollAreaRef}>
+        {/* Live voice transcript while the mic is on */}
+        {(completion.enableVAD || completion.micTranscript) && (
+          <div className="hyperly-mic-live">
+            <span className="hyperly-mic-live-label">User</span>
+            <span>{completion.micTranscript || "Listening… speak now"}</span>
+          </div>
+        )}
 
-      {/* Attached images */}
-      {(completion.attachedFiles?.length ?? 0) > 0 && (
-        <div className="hyperly-thumb-strip">
-          {(completion.attachedFiles ?? []).map((file) => (
-            <span key={file.id} className="relative">
-              <img
-                src={`data:${file.type};base64,${file.base64}`}
-                alt={file.name}
-                className="hyperly-thumb"
-              />
-              <button
-                type="button"
-                className="hyperly-thumb-remove"
-                title="Remove image"
-                onClick={() => completion.removeFile(file.id)}
-              >
-                <XIcon className="h-2.5 w-2.5" />
-              </button>
+        {/* Attached images */}
+        {(completion.attachedFiles?.length ?? 0) > 0 && (
+          <div className="hyperly-thumb-strip">
+            {(completion.attachedFiles ?? []).map((file) => (
+              <span key={file.id} className="relative">
+                <img
+                  src={`data:${file.type};base64,${file.base64}`}
+                  alt={file.name}
+                  className="hyperly-thumb"
+                />
+                <button
+                  type="button"
+                  className="hyperly-thumb-remove"
+                  title="Remove image"
+                  onClick={() => completion.removeFile(file.id)}
+                >
+                  <XIcon className="h-2.5 w-2.5" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {completion.knowledgeFile && (
+          <p className="hyperly-knowledge-note flex items-center gap-1 px-0">
+            <span className="truncate">
+              {completion.knowledgeFile.name} · knowledge in this prompt
+              {completion.knowledgeFile.truncated ? " (truncated)" : ""}
             </span>
-          ))}
-        </div>
-      )}
-
-      {completion.knowledgeFile && (
-        <p className="hyperly-knowledge-note flex items-center gap-1 px-0">
-          <span className="truncate">
-            {completion.knowledgeFile.name} · knowledge in this prompt
-            {completion.knowledgeFile.truncated ? " (truncated)" : ""}
-          </span>
-          <button
-            type="button"
-            className="hyperly-icon-btn"
-            onClick={completion.clearKnowledgeFile}
-            title="Remove knowledge file"
-          >
-            <XIcon className="size-3" />
-          </button>
-        </p>
-      )}
-      {completion.knowledgeReadError && (
-        <p className="hyperly-knowledge-note px-0">
-          {completion.knowledgeReadError}
-        </p>
-      )}
-
-      <Answer {...completion} />
+            <button
+              type="button"
+              className="hyperly-icon-btn"
+              onClick={completion.clearKnowledgeFile}
+              title="Remove knowledge file"
+            >
+              <XIcon className="size-3" />
+            </button>
+          </p>
+        )}
+        {completion.knowledgeReadError && (
+          <p className="hyperly-knowledge-note px-0">
+            {completion.knowledgeReadError}
+          </p>
+        )}
+        <Answer {...completion} />
+      </div>
     </div>
   );
 };

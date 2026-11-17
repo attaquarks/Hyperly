@@ -12,12 +12,20 @@ export interface CustomizableState {
   cursor: {
     type: CursorType;
   };
+  /** OS acrylic behind the overlay. Default ON: the frost comes from the OS
+   * (window-vibrancy), and the shell drops its tint only when Rust confirms
+   * it via the overlay-glass-status event. Turning it off restores the
+   * near-opaque fallback surface. */
+  glass: {
+    overlay: boolean;
+  };
 }
 
 export const DEFAULT_CUSTOMIZABLE_STATE: CustomizableState = {
   appIcon: { isVisible: true },
   alwaysOnTop: { isEnabled: false },
   cursor: { type: "default" },
+  glass: { overlay: true },
 };
 
 /**
@@ -50,6 +58,7 @@ export const getCustomizableState = (): CustomizableState => {
       alwaysOnTop:
         parsedState.alwaysOnTop || DEFAULT_CUSTOMIZABLE_STATE.alwaysOnTop,
       cursor: parsedState.cursor || DEFAULT_CUSTOMIZABLE_STATE.cursor,
+      glass: parsedState.glass || DEFAULT_CUSTOMIZABLE_STATE.glass,
     };
 
     // One-time migration of the old "invisible" default (see the marker doc
@@ -110,6 +119,18 @@ export const updateAlwaysOnTop = (isEnabled: boolean): CustomizableState => {
 export const updateCursorType = (type: CursorType): CustomizableState => {
   const currentState = getCustomizableState();
   const newState = { ...currentState, cursor: { type } };
+  setCustomizableState(newState);
+  return newState;
+};
+
+/**
+ * Update the overlay glass (OS acrylic) preference
+ */
+export const updateOverlayGlass = (
+  overlay: boolean
+): CustomizableState => {
+  const currentState = getCustomizableState();
+  const newState = { ...currentState, glass: { overlay } };
   setCustomizableState(newState);
   return newState;
 };

@@ -25,6 +25,12 @@ const App = () => {
   // D10: supplies the screenshot-panel routing getter (see the effect below).
   const globalShortcuts = useGlobalShortcuts();
 
+  // Ambient glass is a pure CSS surface: translucent tint + rim + sheen +
+  // grain, honoring the user's transparency setting. No OS compositing, no
+  // GPU requirement — the acrylic path was removed (embedded GPUs, and the
+  // app must stay lightweight). The toggle flips it live from storage.
+  const glassOS = customizable?.glass?.overlay !== false;
+
   // Mode is user-controlled via the header tabs. The only automatic switch is
   // INTO listen mode the moment a capture starts (e.g. via the global
   // shortcut), so the transcript panel becomes visible. Nothing ever switches
@@ -143,6 +149,7 @@ const App = () => {
           <OverlayChrome
             mode={mode}
             onModeChange={setMode}
+            glassActive={glassOS}
             status={
               systemAudio?.isAIProcessing
                 ? "Answering..."

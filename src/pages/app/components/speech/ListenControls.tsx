@@ -6,12 +6,12 @@ type Props = {
   onModeChange: (mode: ListenMode) => void;
 };
 
+// The three modes the room actually ships. Coding/Translate/Auto remain valid
+// stored modes (a previously selected one stays active in state) but the row
+// shows only these — the toolbar stays minimal and centered.
 const modes: Array<[ListenMode, string]> = [
-  ["auto", "AUTO"],
   ["general", "General"],
   ["interview", "Interview"],
-  ["coding", "<> Coding"],
-  ["translate", "文A Translate"],
   ["meeting", "Meeting"],
 ];
 
@@ -33,4 +33,3 @@ export const ListenControls = ({ mode, onModeChange }: Props) => (
     </div>
   </div>
 );
-

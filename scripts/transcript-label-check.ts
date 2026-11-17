@@ -266,13 +266,45 @@ check(
   () => "TranscriptThread still renders segment.speaker"
 );
 
+// DECISION CHANGE (2026-11-18, user instruction "make sure llm gets the user
+// and system labels right every time"): the stored CONVERSATION message now
+// carries the channel label, because the model reads prior turns as history
+// and unlabelled history collapsed both channels into one speaker — the exact
+// "no user label" report. What R8 was protecting still holds: the transcript
+// EVENTS store keeps its own channel-truth source column and never sees the
+// tag, and the CURRENT turn still goes out through modelInput.
 check(
-  "the model tag cannot reach the persisted record",
+  "the stored conversation message carries the channel label",
   /modelSourceTag\(/.test(systemAudioSource) &&
     /userMessage: modelInput \?\? transcription/.test(systemAudioSource) &&
-    /content: transcription/.test(systemAudioSource) &&
+    /content: modelSourceTag\(source, transcription\)/.test(systemAudioSource) &&
     !/processWithAI\(\s*`User \(microphone\)/.test(systemAudioSource),
-  () => "the tagged utterance is still passed as the stored transcription"
+  () =>
+    "the stored message must be content: modelSourceTag(source, transcription) " +
+    "so the model's history keeps User/System identity"
+);
+
+// The mic-confirm retag: when the close mic transcribes text the room is also
+// hearing, the echo suppression drops the mic copy — and the room's final used
+// to dispatch as "System: <the user's words>". The echo check now records WHAT
+// matched, and the system final flips the model label to User for those words.
+check(
+  "mic-confirmed words are dispatched as User, not System",
+  /micConfirmedRef/.test(systemAudioSource) &&
+    /findMicEcho\(/.test(systemAudioSource) &&
+    /micTokensContained\(/.test(systemAudioSource) &&
+    /modelSourceTag\(modelSource, plan\.text\)/.test(systemAudioSource) &&
+    /modelSource: TranscriptSource = micProvedTheseWords/.test(systemAudioSource),
+  () =>
+    "the echo path must record the match and the system final must retag " +
+    "mic-confirmed words as User (the 'no user label' defect)"
+);
+
+// Every utterance that reaches the model for the CURRENT turn is still tagged.
+check(
+  "the current-turn tag is unchanged (modelInput drives userMessage)",
+  /userMessage: modelInput \?\? transcription/.test(systemAudioSource),
+  () => "the current turn must keep going out through modelInput"
 );
 
 /**

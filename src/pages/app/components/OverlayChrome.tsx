@@ -16,6 +16,8 @@ export type OverlayMode = "ask" | "listen";
 type OverlayChromeProps = {
   mode: OverlayMode;
   onModeChange: (mode: OverlayMode) => void;
+  /** Rust confirmed OS acrylic is active — the shell drops its tint. */
+  glassActive?: boolean;
   status: string;
   statusTone?: "ready" | "active" | "working";
   children: React.ReactNode;
@@ -30,6 +32,7 @@ const statusToneClasses = {
 export const OverlayChrome = ({
   mode,
   onModeChange,
+  glassActive = false,
   status,
   statusTone = "ready",
   children,
@@ -62,7 +65,7 @@ export const OverlayChrome = ({
   };
 
   return (
-    <div className="hyperly-overlay-shell">
+    <div className={cn("hyperly-overlay-shell", glassActive && "glass-os")}>
       <header
         className="hyperly-overlay-header"
         aria-label="Hyperly overlay navigation"

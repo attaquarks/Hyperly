@@ -37,6 +37,7 @@ export const HistoryWing = () => {
               await emit("history-wing-pick", id);
               await invoke("close_history_wing");
             }}
+            showHeader={false}
             className="w-full flex-1 min-h-0 border-0 bg-transparent"
           />
         </div>

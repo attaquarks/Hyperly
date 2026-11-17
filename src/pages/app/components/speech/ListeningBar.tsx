@@ -1,7 +1,13 @@
+import { useRef } from "react";
 import {
+  CameraIcon,
   ChevronDownIcon,
+  Loader2,
   LoaderIcon,
+  MousePointer2Icon,
+  PaperclipIcon,
   PlayIcon,
+  PlusIcon,
   SquareIcon,
 } from "lucide-react";
 import {
@@ -10,6 +16,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components";
+import { useApp } from "@/contexts";
 import { CaptureBehavior } from "@/types";
 import { cn } from "@/lib/utils";
 
@@ -25,19 +32,33 @@ type Props = {
   behavior: CaptureBehavior;
   onBehaviorChange: (behavior: CaptureBehavior) => void;
   onToggleCapture: () => void;
+  /** Screenshot capture (full screen + region) and image attach, relocated
+      from the old action row so the Start bar is the one control strip. */
+  isCapturingScreenshot: boolean;
+  onCapture: () => void;
+  onCaptureRegion: () => void;
+  onAttach: (files: FileList | null) => void;
+  onNewConversation: () => void;
 };
 
-// Capture control under the prompt tabs: EQ, Start/Stop, and the three-way
-// behavior dropdown (Auto / Manual / questions). Switching behavior works
-// live — the capture engine keeps running untouched and the new mode only
-// changes how utterances reach the AI.
+// The Start bar: EQ, Start/Stop, then Capture / Selection / Attach side by
+// side with it, and on the far right the behavior dropdown plus the New
+// conversation button (moved up from the toolbar so the whole control strip
+// lives in one predictable row).
 export const ListeningBar = ({
   capturing,
   isProcessing,
   behavior,
   onBehaviorChange,
   onToggleCapture,
+  isCapturingScreenshot,
+  onCapture,
+  onCaptureRegion,
+  onAttach,
+  onNewConversation,
 }: Props) => {
+  const { supportsImages } = useApp();
+  const attachInputRef = useRef<HTMLInputElement>(null);
   const active = BEHAVIORS.find((b) => b.value === behavior) ?? BEHAVIORS[1];
 
   return (
@@ -70,6 +91,55 @@ export const ListeningBar = ({
         )}
         {capturing ? "Stop" : "Start"}
       </button>
+      <button
+        type="button"
+        className="hyperly-action"
+        disabled={!supportsImages || isCapturingScreenshot}
+        onClick={onCapture}
+        title="Capture the full screen"
+      >
+        {isCapturingScreenshot ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : (
+          <CameraIcon className="h-3 w-3" />
+        )}
+        Capture
+      </button>
+      <button
+        type="button"
+        className="hyperly-action"
+        disabled={!supportsImages}
+        onClick={onCaptureRegion}
+        title="Drag to capture a screen region"
+      >
+        <MousePointer2Icon className="h-3 w-3" />
+        Selection
+      </button>
+      <button
+        type="button"
+        className="hyperly-action"
+        disabled={!supportsImages}
+        onClick={() => attachInputRef.current?.click()}
+        title={
+          supportsImages
+            ? "Attach an image"
+            : "Image upload not supported by current AI provider"
+        }
+      >
+        <PaperclipIcon className="h-3 w-3" />
+        Attach
+      </button>
+      <input
+        ref={attachInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          onAttach(e.target.files);
+          e.target.value = "";
+        }}
+      />
+
       <DropdownMenu>
         <DropdownMenuTrigger
           className="hyperly-action ml-auto"
@@ -94,6 +164,15 @@ export const ListeningBar = ({
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
+      <button
+        type="button"
+        className="hyperly-action"
+        onClick={onNewConversation}
+        title="Start a new conversation"
+      >
+        <PlusIcon className="h-3 w-3" />
+        New
+      </button>
     </div>
   );
 };
