@@ -25,6 +25,28 @@ const App = () => {
   // D10: supplies the screenshot-panel routing getter (see the effect below).
   const globalShortcuts = useGlobalShortcuts();
 
+  // Whether Rust confirmed OS acrylic is active behind the window (it reports
+  // via overlay-glass-status). The shell only drops its tint on CONFIRMATION —
+  // without the OS blur, the near-opaque fallback keeps text readable.
+  const [glassOS, setGlassOS] = useState(false);
+  useEffect(() => {
+    const unlisten = listen<boolean>("overlay-glass-status", (event) => {
+      setGlassOS(event.payload === true);
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
+
+  // Startup sync: apply the stored glass preference to the Rust window. Rust
+  // applies acrylic by default at creation (so the enabled path has no
+  // unblurred flash), and this clears it for users who turned the effect off.
+  useEffect(() => {
+    if (customizable?.glass?.overlay === false) {
+      void invoke("set_overlay_glass", { enabled: false }).catch(() => {});
+    }
+  }, [customizable?.glass?.overlay]);
+
   // Mode is user-controlled via the header tabs. The only automatic switch is
   // INTO listen mode the moment a capture starts (e.g. via the global
   // shortcut), so the transcript panel becomes visible. Nothing ever switches
@@ -143,6 +165,7 @@ const App = () => {
           <OverlayChrome
             mode={mode}
             onModeChange={setMode}
+            glassActive={glassOS}
             status={
               systemAudio?.isAIProcessing
                 ? "Answering..."

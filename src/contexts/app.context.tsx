@@ -11,6 +11,7 @@ import {
   setCustomizableState,
   updateAppIconVisibility,
   updateAlwaysOnTop,
+  updateOverlayGlass,
   CustomizableState,
   DEFAULT_CUSTOMIZABLE_STATE,
   CursorType,
@@ -527,6 +528,19 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
+  // The glass preference: persist it, then push it to the Rust window. The
+  // command applies/clears the OS acrylic and reports the confirmed state via
+  // the overlay-glass-status event (the shell only drops its tint then).
+  const toggleOverlayGlass = async (overlay: boolean) => {
+    const newState = updateOverlayGlass(overlay);
+    setCustomizable(newState);
+    try {
+      await invoke("set_overlay_glass", { enabled: overlay });
+    } catch (error) {
+      console.error("Failed to toggle overlay glass:", error);
+    }
+  };
+
   const setCursorType = (type: CursorType) => {
     setCustomizable((prev) => ({ ...prev, cursor: { type } }));
     updateCursor(type);
@@ -551,6 +565,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     customizable,
     toggleAppIconVisibility,
     toggleAlwaysOnTop,
+    toggleOverlayGlass,
     loadData,
     selectedAudioDevices,
     setSelectedAudioDevices,
