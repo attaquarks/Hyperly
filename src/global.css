@@ -122,19 +122,6 @@
   }
 }
 
-/* Apply global transparency */
-[data-slot="card"] {
-  background-color: rgb(from var(--card) r g b / var(--opacity, 1)) !important;
-  backdrop-filter: var(--backdrop-blur, none);
-}
-
-[data-slot="popover-content"] {
-  background-color: rgb(
-    from var(--popover) r g b / var(--opacity, 1)
-  ) !important;
-  backdrop-filter: var(--backdrop-blur, none);
-}
-
 * {
   scrollbar-width: thin;
   scrollbar-color: rgb(from var(--muted-foreground) r g b / 0.2) transparent !important;
@@ -1138,29 +1125,9 @@ body {
   --glass-blur-panel: 26px;
   --glass-saturation: 1.6;
 
-  /* Dark materials: tint ramp clear → ultra (frostier = more opaque) */
-  --glass-tint-clear: rgb(20 20 24 / 0.34);
-  --glass-tint-thin: rgb(18 18 22 / 0.5);
-  --glass-tint-regular: rgb(16 16 18 / 0.64);
-  --glass-tint-thick: rgb(15 15 17 / 0.8);
-  --glass-tint-ultra: rgb(14 14 16 / 0.9);
-  --glass-line: rgb(255 255 255 / 0.1);
-  --glass-line-soft: rgb(255 255 255 / 0.07);
-  --glass-rim: rgb(255 255 255 / 0.14);
-  --glass-sheen: rgb(255 255 255 / 0.04);
-  --glass-hover: rgb(255 255 255 / 0.06);
-  --glass-shadow-1: 0 8px 24px rgb(0 0 0 / 0.28), 0 2px 8px rgb(0 0 0 / 0.18);
-  --glass-shadow-2: 0 18px 50px rgb(0 0 0 / 0.32);
-  --glass-shadow-3: 0 24px 60px rgb(0 0 0 / 0.38);
-  /* Accent glow for active states (matches the overlay's emerald) */
-  --glass-accent: rgb(52 211 153);
-  --glass-accent-glow: rgb(52 211 153 / 0.14);
-  --glass-accent-line: rgb(52 211 153 / 0.3);
-}
-
-.light-glass {
-  /* Light-mode glass (dashboard only; the overlay stays dark-first). Applied
-     by the theme layer alongside the `.dark` class handling. */
+  /* Light materials (dashboard light theme): white glass, slate hairlines.
+     The overlay is dark-only (its --hyperly-* tokens are hardcoded dark), so
+     these only affect dashboard glass surfaces. */
   --glass-tint-clear: rgb(255 255 255 / 0.38);
   --glass-tint-thin: rgb(255 255 255 / 0.52);
   --glass-tint-regular: rgb(255 255 255 / 0.66);
@@ -1174,6 +1141,27 @@ body {
   --glass-shadow-1: 0 8px 24px rgb(15 23 42 / 0.08), 0 2px 8px rgb(15 23 42 / 0.05);
   --glass-shadow-2: 0 18px 50px rgb(15 23 42 / 0.12);
   --glass-shadow-3: 0 24px 60px rgb(15 23 42 / 0.14);
+  /* Accent glow for active states (matches the overlay's emerald) */
+  --glass-accent: rgb(52 211 153);
+  --glass-accent-glow: rgb(52 211 153 / 0.14);
+  --glass-accent-line: rgb(52 211 153 / 0.3);
+}
+
+/* Dark theme: the classic dark glass materials. */
+.dark {
+  --glass-tint-clear: rgb(20 20 24 / 0.34);
+  --glass-tint-thin: rgb(18 18 22 / 0.5);
+  --glass-tint-regular: rgb(16 16 18 / 0.64);
+  --glass-tint-thick: rgb(15 15 17 / 0.8);
+  --glass-tint-ultra: rgb(14 14 16 / 0.9);
+  --glass-line: rgb(255 255 255 / 0.1);
+  --glass-line-soft: rgb(255 255 255 / 0.07);
+  --glass-rim: rgb(255 255 255 / 0.14);
+  --glass-sheen: rgb(255 255 255 / 0.04);
+  --glass-hover: rgb(255 255 255 / 0.06);
+  --glass-shadow-1: 0 8px 24px rgb(0 0 0 / 0.28), 0 2px 8px rgb(0 0 0 / 0.18);
+  --glass-shadow-2: 0 18px 50px rgb(0 0 0 / 0.32);
+  --glass-shadow-3: 0 24px 60px rgb(0 0 0 / 0.38);
 }
 
 /* ---- Surfaces --------------------------------------------------------------
@@ -1200,14 +1188,6 @@ body {
   background: var(--glass-tint-regular);
   backdrop-filter: blur(var(--glass-blur-card)) saturate(var(--glass-saturation));
   -webkit-backdrop-filter: blur(var(--glass-blur-card)) saturate(var(--glass-saturation));
-}
-
-.glass-card:hover {
-  border-color: rgb(255 255 255 / 0.16);
-}
-
-:root .light-glass .glass-card:hover {
-  border-color: rgb(15 23 42 / 0.14);
 }
 
 .glass-panel {
@@ -1301,7 +1281,9 @@ body {
   overflow: hidden;
   pointer-events: none;
   z-index: 0;
-  background: oklch(0.145 0 0);
+  /* The base follows the theme: deep charcoal in dark, paper in light —
+     the blobs read as pastel aurora on the light base. */
+  background: var(--background);
 }
 
 .hyperly-aurora::before,
