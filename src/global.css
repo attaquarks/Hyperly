@@ -1573,3 +1573,43 @@ html:not(.dark) .hyperly-aurora::before {
   color: var(--hyperly-danger);
   font-size: 10px;
 }
+
+/* ---- Round transcript blocks ----------------------------------------------
+   The thread renders ONE System block and ONE User block per capture round
+   (see TranscriptThread): each block is a hairline glass card holding every
+   utterance of that channel stacked, with the label in its head row. */
+.hyperly-transcript-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--hyperly-chip);
+  border: 1px solid var(--hyperly-line);
+  border-radius: 10px;
+  box-shadow: inset 0 1px 0 0 var(--hyperly-rim);
+}
+
+.hyperly-transcript-block-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hyperly-transcript-block-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hyperly-transcript-block-body p {
+  margin: 0;
+  color: rgb(from var(--hyperly-text) r g b / 0.86);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.hyperly-transcript-block-user .hyperly-transcript-speaker {
+  color: var(--hyperly-live);
+}

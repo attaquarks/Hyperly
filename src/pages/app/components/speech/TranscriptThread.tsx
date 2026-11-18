@@ -118,46 +118,89 @@ export const TranscriptThread = ({
             ref={scrollRef}
             onScroll={handleScroll}
           >
-            {visibleSegments.length === 0 && !userPartial ? (
+            {visibleSegments.length === 0 ? (
               <p className="hyperly-empty-hint">
                 Start listening to transcribe the room's audio. Hyperly suggests
                 answers as the conversation unfolds.
               </p>
             ) : (
               <div className="hyperly-thread-list">
-                {visibleSegments.map((segment) => (
-                  <div className="hyperly-transcript-row" key={segment.id}>
-                    <time className="hyperly-transcript-time">
-                      {formatTimestamp(segment.timestamp)}
-                    </time>
-                    <span className="hyperly-transcript-speaker">
-                      {transcriptLabel(segment)}
-                    </span>
-                    <span
-                      className={
-                        segment.isPartial ? "hyperly-transcript-live" : ""
-                      }
-                    >
-                      {segment.text}
-                    </span>
-                  </div>
-                ))}
-                {userPartial && (
-                  <div className="hyperly-transcript-row">
-                    <time className="hyperly-transcript-time">
-                      {formatTimestamp(
-                        visibleSegments[visibleSegments.length - 1]
-                          ?.timestamp ?? 0
-                      )}
-                    </time>
-                    {/* The trailing live row is the browser mic's partial: label
-                        it by channel, never as a person (Phase 4 R8). */}
-                    <span className="hyperly-transcript-speaker">
-                      {transcriptSourceLabel("microphone")}
-                    </span>
-                    <span className="hyperly-transcript-live">{userPartial}</span>
-                  </div>
-                )}
+                {/* ROUND MODEL: one System block for the whole round — every
+                    room utterance of this capture stacks under the same label,
+                    pauses included — and one User block below it. The mic's
+                    words only appear here AFTER the echo strip validated them
+                    (never as a live partial), so the User label never shows
+                    room audio. */}
+                {(() => {
+                  const systemSegments = visibleSegments.filter(
+                    (segment) => segment.source !== "microphone"
+                  );
+                  const userSegments = visibleSegments.filter(
+                    (segment) => segment.source === "microphone"
+                  );
+                  const systemLive = livePartial?.trim();
+                  const firstTime = systemSegments[0]?.timestamp ?? 0;
+                  return (
+                    <>
+                      {systemSegments.length > 0 || systemLive ? (
+                        <div className="hyperly-transcript-block">
+                          <div className="hyperly-transcript-block-head">
+                            <span className="hyperly-transcript-speaker">
+                              {systemSegments[0]
+                                ? transcriptLabel(systemSegments[0])
+                                : transcriptSourceLabel("system")}
+                            </span>
+                            <time className="hyperly-transcript-time">
+                              {formatTimestamp(firstTime)}
+                              {systemSegments.length > 1
+                                ? ` · ${systemSegments.length} lines`
+                                : ""}
+                            </time>
+                          </div>
+                          <div className="hyperly-transcript-block-body">
+                            {systemSegments.map((segment) => (
+                              <p
+                                key={segment.id}
+                                className={
+                                  segment.isPartial
+                                    ? "hyperly-transcript-live"
+                                    : ""
+                                }
+                              >
+                                {segment.text}
+                              </p>
+                            ))}
+                            {systemLive && (
+                              <p className="hyperly-transcript-live">
+                                {systemLive}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      ) : null}
+                      {userSegments.length > 0 ? (
+                        <div className="hyperly-transcript-block hyperly-transcript-block-user">
+                          <div className="hyperly-transcript-block-head">
+                            <span className="hyperly-transcript-speaker">
+                              {transcriptLabel(userSegments[0])}
+                            </span>
+                            <time className="hyperly-transcript-time">
+                              {formatTimestamp(userSegments[0]?.timestamp ?? 0)}
+                              {userSegments.length > 1
+                                ? ` · ${userSegments.length} lines`
+                                : ""}
+                            </time>
+                          </div>
+                          <div className="hyperly-transcript-block-body">
+                            {userSegments.map((segment) => (
+                              <p key={segment.id}>{segment.text}</p>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  );
+                })()}
               </div>
             )}
           </div>

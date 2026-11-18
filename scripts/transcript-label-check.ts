@@ -258,12 +258,20 @@ check(
   () => "the orphan restore still derives a label from the source"
 );
 
+// ROUND MODEL (2026-11-18): the thread renders ONE System block and ONE User
+// block per capture round, each head labelled through the helpers. The mic's
+// live partial is no longer rendered at all — the sub-segment echo strip
+// (echo-align.ts) validates mic words BEFORE display, so a raw partial row
+// cannot show room audio under the User label.
 check(
   "the UI renders through the label helper, never the raw field",
-  /transcriptLabel\(segment\)/.test(threadSource) &&
+  /transcriptLabel\(/.test(threadSource) &&
     !/segment\.speaker/.test(threadSource) &&
-    /transcriptSourceLabel\("microphone"\)/.test(threadSource),
-  () => "TranscriptThread still renders segment.speaker"
+    /transcriptSourceLabel\("system"\)/.test(threadSource) &&
+    !/\{userPartial\}/.test(threadSource),
+  () =>
+    "TranscriptThread must label blocks through the helpers and must not " +
+    "render the raw mic partial (echo strip runs before display)"
 );
 
 // DECISION CHANGE (2026-11-18, user instruction "make sure llm gets the user
@@ -277,11 +285,14 @@ check(
   "the stored conversation message carries the channel label",
   /modelSourceTag\(/.test(systemAudioSource) &&
     /userMessage: modelInput \?\? transcription/.test(systemAudioSource) &&
-    /content: modelSourceTag\(source, transcription\)/.test(systemAudioSource) &&
+    /content: storedContent \?\? modelSourceTag\(source, transcription\)/.test(
+      systemAudioSource
+    ) &&
     !/processWithAI\(\s*`User \(microphone\)/.test(systemAudioSource),
   () =>
-    "the stored message must be content: modelSourceTag(source, transcription) " +
-    "so the model's history keeps User/System identity"
+    "the stored message must be content: storedContent ?? " +
+    "modelSourceTag(source, transcription) so the model's history keeps " +
+    "User/System identity (composite round trips store the labelled blocks)"
 );
 
 // The mic-confirm retag: when the close mic transcribes text the room is also
@@ -375,9 +386,10 @@ const topLevelArgs = (args: string): string[] => {
 };
 
 const aiCalls = processWithAICalls(systemAudioSource);
-const untagged = aiCalls.filter(
-  (args) => !/modelSourceTag\s*\(/.test(topLevelArgs(args)[3] ?? "")
-);
+const untagged = aiCalls.filter((args) => {
+  const labelArg = topLevelArgs(args)[3] ?? "";
+  return !/modelSourceTag\s*\(/.test(labelArg) && !/^composite$/.test(labelArg.trim());
+});
 
 check(
   `every processWithAI call passes a source tag (${aiCalls.length} call sites)`,
