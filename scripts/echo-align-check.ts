@@ -233,6 +233,30 @@ expect(
 );
 
 // ---------------------------------------------------------------------------
+// 6. TURN-SCOPED ROUNDS: a dispatch or a fresh Start closes the round, so
+//    Stop → Start visibly begins new blocks instead of appending into the old
+//    ones forever.
+// ---------------------------------------------------------------------------
+expect(
+  /roundId: number/.test(read("src/types/system-audio.ts")),
+  "TranscriptSegment",
+  "segments must carry the round they belong to"
+);
+expect(
+  /roundId: roundRef\.current/.test(hook) &&
+    /roundRef\.current \+= 1/.test(hook) &&
+    /roundRef\.current = 1;/.test(hook),
+  "useSystemAudio rounds",
+  "every append must stamp the round, and dispatches + a fresh Start must " +
+    "close/open rounds"
+);
+expect(
+  /rounds\.map\(\(round\) =>/.test(thread),
+  "TranscriptThread",
+  "the thread must render one block pair PER round"
+);
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 if (failures.length > 0) {

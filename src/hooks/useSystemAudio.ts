@@ -145,6 +145,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // running text. When they hit Stop & Send, the final canonical transcript replaces this.
   const [livePartial, setLivePartial] = useState<string>("");
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
+  // The CURRENT round id (see TranscriptSegment.roundId). Bumped by every
+  // dispatch (a trip to the model closes the round) and by a fresh Start.
+  const roundRef = useRef(1);
   const [listenMode, setListenMode] = useState<ListenMode>("auto");
   // Ref mirror so the speech-detected listener — whose effect deps don't
   // include listenMode — always reads the current mode.
@@ -595,6 +598,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         {
           id: nextSegmentId(),
           timestamp,
+          roundId: roundRef.current,
           source: "system",
           text,
           isPartial: true,
@@ -618,6 +622,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         {
           id: nextSegmentId(),
           timestamp,
+          roundId: roundRef.current,
           source: "system",
           text,
           isPartial: false,
@@ -635,6 +640,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       {
         id: nextSegmentId(),
         timestamp,
+        roundId: roundRef.current,
         source: "microphone",
         text,
         isPartial: false,
@@ -1114,14 +1120,17 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             if (disposed || !streamingActiveRef.current) return;
             const text = event.payload.text.trim();
             if (!text) return;
-            // Same epoch discipline as the batch partials: a final or a stop
-            // landing during the stream supersedes this text.
+            // STREAMING PARTIALS ARE CUMULATIVE: Deepgram's interim carries
+            // the full current-utterance text each time (everything since the
+            // last is_final). They REPLACE the live text — feeding them into
+            // the delta-appending `apply` doubled the transcript ("hello" +
+            // "hello world" → "hello hello world"), on screen and inside the
+            // stop-time tail fold that goes to the model.
             const epoch = partialTrackerRef.current.request();
-            if (partialTrackerRef.current.apply(epoch, text)) {
-              const accumulated = partialTrackerRef.current.current();
-              setLivePartial(accumulated);
-              livePartialRef.current = accumulated;
-              upsertPartialSegment(accumulated);
+            if (partialTrackerRef.current.replace(epoch, text)) {
+              setLivePartial(text);
+              livePartialRef.current = text;
+              upsertPartialSegment(text);
             }
           }
         );
@@ -1193,6 +1202,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           return recoverable.map((event) => ({
             id: `restored-${event.id}`,
             timestamp: 0,
+            // Restored orphans form one historical round (round 0).
+            roundId: 0,
             // R8: the row records the CHANNEL, and the real speaker label only
             // when one was actually stored. It used to derive a label from the
             // source, which is exactly the identity claim this item removes.
@@ -1405,6 +1416,11 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       // its signal is what Stop aborts, and `mayPublish` is what refuses a
       // partial answer.
       const turn = getAiTurns().begin();
+      // A trip to the model CLOSES the current round: every utterance that
+      // lands from now on belongs to the next one, so the thread shows each
+      // turn in its own block pair. (The trigger utterance was stamped
+      // before this, so it stays in the round it belongs to.)
+      roundRef.current += 1;
 
       try {
         setIsAIProcessing(true);
@@ -1794,6 +1810,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       pendingUserRef.current = "";
       stopRequestedRef.current = false;
       micConfirmedRef.current = null;
+      roundRef.current = 1;
       sessionStartRef.current = Date.now();
 
       // Manual and Auto both start capturing audio immediately. Manual used
@@ -1855,6 +1872,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       setLivePartial("");
       livePartialRef.current = "";
       sessionStartRef.current = Date.now();
+      // ROUND BOUNDARY: Stop → Start begins a new round. The previous turn's
+      // blocks stay on screen (frozen); everything captured from here stacks
+      // into the next pair.
+      roundRef.current += 1;
 
       const deviceId =
         selectedAudioDevices.output?.id &&
