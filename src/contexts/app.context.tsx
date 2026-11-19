@@ -11,6 +11,7 @@ import {
   setCustomizableState,
   updateAppIconVisibility,
   updateAlwaysOnTop,
+  updateOverlayGlass,
   CustomizableState,
   DEFAULT_CUSTOMIZABLE_STATE,
   CursorType,
@@ -527,6 +528,13 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
+  // The ambient-glass preference: storage only. The overlay shell reads the
+  // context value and flips its CSS surface immediately — no Rust round trip.
+  const toggleOverlayGlass = async (overlay: boolean) => {
+    const newState = updateOverlayGlass(overlay);
+    setCustomizable(newState);
+  };
+
   const setCursorType = (type: CursorType) => {
     setCustomizable((prev) => ({ ...prev, cursor: { type } }));
     updateCursor(type);
@@ -551,6 +559,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     customizable,
     toggleAppIconVisibility,
     toggleAlwaysOnTop,
+    toggleOverlayGlass,
     loadData,
     selectedAudioDevices,
     setSelectedAudioDevices,

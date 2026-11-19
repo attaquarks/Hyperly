@@ -2,3 +2,4 @@ export * from "./AlwaysOnTopToggle";
 export * from "./AppIconToggle";
 export * from "./Theme";
 export * from "./PersonalContext";
+export * from "./GlassToggle";

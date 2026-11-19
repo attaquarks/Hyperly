@@ -12,7 +12,7 @@ export const Sidebar = () => {
   const navigate = useNavigate();
   const activeRoute = useLocation().pathname;
   return (
-    <aside className="flex w-56 flex-col select-none pt-2">
+    <aside className="glass-card relative z-10 my-3 ml-3 flex w-60 flex-col select-none rounded-2xl pt-2 shadow-none">
       {/* Logo */}
       <div
         onClick={() => navigate("/dashboard")}
@@ -38,9 +38,9 @@ export const Sidebar = () => {
             onClick={() => navigate(item.href)}
             key={`${item.label}-${index}`}
             className={cn(
-              "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-xs lg:text-sm text-sidebar-foreground/70 transition-all duration-300 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+              "glass-nav-pill flex w-full items-center justify-between gap-3 px-3 py-2 text-xs lg:text-sm text-sidebar-foreground/70 hover:text-sidebar-accent-foreground",
               activeRoute.includes(item.href)
-                ? "font-medium bg-sidebar-accent text-sidebar-accent-foreground"
+                ? "glass-nav-pill-active font-medium text-sidebar-accent-foreground"
                 : ""
             )}
           >

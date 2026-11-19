@@ -1,30 +1,28 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   CameraIcon,
-  ChevronDownIcon,
+  HistoryIcon,
   LibraryIcon,
   Loader2,
   MousePointer2Icon,
   PaperclipIcon,
 } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "@/components";
 import { UseCompletionReturn } from "@/types";
 import { MAX_FILES } from "@/config";
 import { useApp } from "@/contexts";
+import { cn } from "@/lib/utils";
 import { PushToTalk } from "./PushToTalk";
 
 type Props = UseCompletionReturn;
 
-// The Ask action row: Push to talk first, then full-screen Capture, region
-// Selection, image Attach, and the Library (pick a folder, then pick one file
-// from it to ride the next prompt as knowledge), followed by the knowledge
-// folder/model dropdown.
+// The Ask action row: the Library wing button at the far LEFT (the history
+// wing's twin opens top-left and owns folder picking + the file list), then
+// Push to talk, full-screen Capture, region Selection, and image Attach —
+// with the History button at the far RIGHT (Ask's chat history lives on the
+// dashboard, which opens straight onto the chats page). The old folder
+// dropdown is gone — the wing replaces it.
 //
 // History is gone — it duplicated what the overlay header's conversation
 // control does. The "Use image" toggle is gone too: captured images land in the
@@ -39,23 +37,21 @@ export const ActionRow = (props: Props) => {
     handleFileSelect,
     enableVAD,
     setEnableVAD,
-    knowledgeFolderName,
-    knowledgeFolderFiles,
-    knowledgeFile,
-    isKnowledgeReading,
-    pickKnowledgeFolder,
-    selectKnowledgeFile,
   } = props;
 
-  const { supportsImages, selectedAIProvider } = useApp();
+  const { supportsImages } = useApp();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
-
-  const modelName =
-    selectedAIProvider.variables?.MODEL ??
-    selectedAIProvider.variables?.model ??
-    selectedAIProvider.provider ??
-    "";
+  // The library wing's open state, mirroring the Listen toolbar's history/
+  // library buttons: lit while the wing is open, un-lit when it closes itself.
+  const [showLibrary, setShowLibrary] = useState(false);
+  useEffect(() => {
+    const unlisten = listen("library-wing-closed", () => {
+      setShowLibrary(false);
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
 
   const captureDisabled =
     !supportsImages ||
@@ -65,6 +61,27 @@ export const ActionRow = (props: Props) => {
 
   return (
     <div className="hyperly-action-row">
+      <button
+        type="button"
+        className={cn("hyperly-action", showLibrary && "hyperly-action-active")}
+        data-testid="ask-library-toggle"
+        title={
+          showLibrary
+            ? "Hide the knowledge library"
+            : "Show the knowledge library"
+        }
+        onClick={() => {
+          if (showLibrary) {
+            void invoke("close_library_wing");
+            setShowLibrary(false);
+          } else {
+            void invoke("open_library_wing");
+            setShowLibrary(true);
+          }
+        }}
+      >
+        <LibraryIcon className="h-3 w-3" />
+      </button>
       <PushToTalk enableVAD={enableVAD} setEnableVAD={setEnableVAD} />
 
       <button
@@ -112,58 +129,14 @@ export const ActionRow = (props: Props) => {
       </button>
       <button
         type="button"
-        className="hyperly-action"
-        onClick={() => folderInputRef.current?.click()}
-        title="Pick a knowledge folder"
+        className="hyperly-action ml-auto"
+        onClick={() => void invoke("open_dashboard")}
+        title="Open chat history"
       >
-        <LibraryIcon className="h-3 w-3" />
-        Library
+        <HistoryIcon className="h-3 w-3" />
+        History
       </button>
 
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          className="hyperly-action ml-auto"
-          disabled={isKnowledgeReading}
-          title="Pick a file from the library folder"
-        >
-          {isKnowledgeReading ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
-          ) : (
-            <span className="truncate max-w-28">
-              {knowledgeFolderName || "No folder"}
-            </span>
-          )}
-          {modelName && <span className="opacity-60">· {modelName}</span>}
-          <ChevronDownIcon className="h-3 w-3" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuLabel>
-            {knowledgeFolderName
-              ? `${knowledgeFolderName} files`
-              : "Pick a folder with Library"}
-          </DropdownMenuLabel>
-          {(knowledgeFolderFiles ?? []).map((entry, index) => (
-            <DropdownMenuItem
-              key={`${entry.name}-${index}`}
-              onSelect={() => void selectKnowledgeFile(entry.name)}
-            >
-              {entry.name}
-              {knowledgeFile?.name === entry.name ? " ✓" : ""}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <input
-        ref={folderInputRef}
-        type="file"
-        className="hidden"
-        {...({ webkitdirectory: "" } as any)}
-        onChange={(e) => {
-          pickKnowledgeFolder(e.target.files);
-          e.target.value = "";
-        }}
-      />
       <input
         ref={fileInputRef}
         type="file"

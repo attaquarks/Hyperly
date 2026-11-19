@@ -42,6 +42,21 @@ export class PartialTracker {
     return true;
   }
 
+  /**
+   * Apply a CUMULATIVE partial result: the text is the full transcript of the
+   * current utterance so far (Deepgram streaming interims work this way —
+   * each interim carries everything since the last is_final). It REPLACES the
+   * live text. THE DUPLICATE-TRANSCRIPTION FIX: feeding cumulative interims
+   * into `apply` appended them ("hello" + "hello world" → "hello hello
+   * world"), which doubled the live transcript and, via the stop-time tail
+   * fold, doubled the words inside the round trip to the model.
+   */
+  replace(epoch: number, text: string): boolean {
+    if (epoch !== this.epoch) return false;
+    this.live = text.trim();
+    return true;
+  }
+
   /** A finalized utterance landed: everything older is superseded. */
   finalize(): void {
     this.epoch += 1;

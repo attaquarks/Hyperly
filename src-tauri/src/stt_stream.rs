@@ -4,7 +4,10 @@
 //! window-event forwarding and session teardown — lives in lib.rs, which
 //! wraps `spawn_session` for the tauri event bus.
 
+// NOTE: StreamEventPayload is deliberately NOT re-exported — the app's
+// forwarder handles those values by inference from the engine's receiver, and
+// an unreferenced re-export is a cargo warning on every build.
 pub use streaming_stt::{
     detect_streaming_support, spawn_session, SttStreamConfig, SttStreamSession,
-    StreamEventPayload, StreamingSupport,
+    StreamingSupport,
 };

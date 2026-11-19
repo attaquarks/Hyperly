@@ -63,6 +63,16 @@ export interface VoiceInputOptions {
   sensitivity?: number;
   /** Live partial transcript while the user is still speaking. */
   onPartial?: (text: string) => void;
+  /**
+   * Whether mid-utterance partial STT runs at all. Every partial re-uploads
+   * the WHOLE accumulated buffer (a growing WAV every 600 ms), which is what
+   * produced the HTTP 408 SLOW_UPLOAD storms under load — and in the Listen
+   * round model the partial is not even displayed (the echo strip validates
+   * mic words before display), so those uploads are pure bandwidth theft
+   * from the FINAL that actually matters. Ask keeps them for its live
+   * transcript; Listen passes false.
+   */
+  partialsEnabled?: boolean;
   /** A finalized utterance, already transcribed. */
   onUtterance: (text: string) => void;
   /** Load failures and failed transcriptions. */
@@ -138,6 +148,7 @@ export const useVoiceInput = ({
   active,
   sensitivity,
   onPartial,
+  partialsEnabled = true,
   onUtterance,
   onError,
 }: VoiceInputOptions): VoiceInputState => {
@@ -151,6 +162,7 @@ export const useVoiceInput = ({
   // Latest callbacks and provider selection, so the VAD's own options never
   // need to change identity.
   const onPartialRef = useRef(onPartial);
+  const partialsEnabledRef = useRef(partialsEnabled);
   const onUtteranceRef = useRef(onUtterance);
   const onErrorRef = useRef(onError);
   const providerRef = useRef(selectedSttProvider);
@@ -158,7 +170,8 @@ export const useVoiceInput = ({
 
   useEffect(() => {
     onPartialRef.current = onPartial;
-  }, [onPartial]);
+    partialsEnabledRef.current = partialsEnabled;
+  }, [onPartial, partialsEnabled]);
   useEffect(() => {
     onUtteranceRef.current = onUtterance;
   }, [onUtterance]);
@@ -490,6 +503,11 @@ export const useVoiceInput = ({
 
             if (!accumulatingRef.current) return;
             framesRef.current.push(frame);
+
+            // Partials off (Listen): the whole-buffer re-upload every 600 ms
+            // was the HTTP 408 SLOW_UPLOAD source, and the round model does
+            // not display mic partials. Finals still flow through the queue.
+            if (!partialsEnabledRef.current) return;
 
             const now = Date.now();
             if (

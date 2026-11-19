@@ -511,3 +511,188 @@ pub fn restore_history_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
         let _ = wing.show();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Library wing — the history wing's LEFT-side twin.
+//
+// The knowledge Library (folder + file list) used to live inside the Listen
+// room as a dropdown; the user asked for the same bubble-window treatment the
+// history gets: an icon button at the overlay's far LEFT opens a wing docked
+// top-LEFT. The wing owns folder picking and file reading (File objects live
+// in the window that picked them and cannot cross windows); it ships the
+// finished KnowledgeFile to the overlay over the `library-wing-pick` event.
+// ---------------------------------------------------------------------------
+
+const LIBRARY_WING_LABEL: &str = "library-wing";
+/// Gap between the main overlay's left edge and the wing, in logical px.
+const LIBRARY_WING_GAP_LOGICAL: f64 = 10.0;
+/// Wing size as a fraction of the main overlay (top-left coverage).
+const LIBRARY_WING_WIDTH_RATIO: f64 = 0.6;
+const LIBRARY_WING_HEIGHT_RATIO: f64 = 0.62;
+/// Whether the user considers the wing open, so it can follow the main
+/// overlay's hide/show toggles without the Listen room re-issuing a command.
+static LIBRARY_WING_OPEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Wing geometry in physical pixels, clamped inside the main overlay's
+/// monitor so a left-docked overlay still gets its wing fully on screen.
+fn library_wing_geometry<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(i32, i32, i32, i32, f64), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is missing".to_string())?;
+    let scale = main
+        .scale_factor()
+        .map_err(|e| format!("Failed to read scale factor: {}", e))?;
+    let position = main
+        .outer_position()
+        .map_err(|e| format!("Failed to read main position: {}", e))?;
+    let size = main
+        .outer_size()
+        .map_err(|e| format!("Failed to read main size: {}", e))?;
+
+    let gap = (LIBRARY_WING_GAP_LOGICAL * scale).round() as i32;
+    let width = ((size.width as f64) * LIBRARY_WING_WIDTH_RATIO).round() as i32;
+    let height = ((size.height as f64) * LIBRARY_WING_HEIGHT_RATIO).round() as i32;
+    // LEFT dock: to the left of the overlay, clamped to the monitor's left edge.
+    let mut x = position.x - width - gap;
+    let y = position.y;
+
+    if let Ok(Some(monitor)) = main.current_monitor() {
+        let monitor_pos = monitor.position();
+        x = x.clamp(monitor_pos.x, i32::MAX);
+    }
+
+    Ok((x, y, width, height, scale))
+}
+
+fn create_library_wing_window<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<WebviewWindow<R>, String> {
+    let (x, y, width, height, scale) = library_wing_geometry(app)?;
+    // Builder geometry is logical; the measurement was physical.
+    let window = WebviewWindowBuilder::new(
+        app,
+        LIBRARY_WING_LABEL,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("Hyperly Library")
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .resizable(false)
+    .skip_taskbar(true)
+    .shadow(false)
+    .focused(false)
+    .content_protected(true)
+    .visible(true)
+    .inner_size(width as f64 / scale, height as f64 / scale)
+    .position(x as f64 / scale, y as f64 / scale)
+    .build()
+    .map_err(|e| format!("Failed to create library wing: {}", e))?;
+
+    // Shares the app origin and CSP with the overlay; no extra grants needed
+    // beyond the capability entry that lets it invoke commands.
+    Ok(window)
+}
+
+/// Opens (or reveals and re-docks) the library wing next to the main overlay's
+/// left edge.
+#[tauri::command]
+pub async fn open_library_wing(app: AppHandle) -> Result<(), String> {
+    let (x, y, _, _, _) = library_wing_geometry(&app)?;
+    if let Some(wing) = app.get_webview_window(LIBRARY_WING_LABEL) {
+        wing.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }))
+            .map_err(|e| format!("Failed to position library wing: {}", e))?;
+        wing.show()
+            .map_err(|e| format!("Failed to show library wing: {}", e))?;
+        // Protection back ON while visible (stealth rule).
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&wing, true);
+    } else {
+        create_library_wing_window(&app)?;
+    }
+    LIBRARY_WING_OPEN.store(true, std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+/// Hides the wing and tells the Listen room so its toolbar button un-lights.
+#[tauri::command]
+pub fn close_library_wing(app: AppHandle) -> Result<(), String> {
+    LIBRARY_WING_OPEN.store(false, std::sync::atomic::Ordering::Release);
+    #[cfg(target_os = "windows")]
+    crate::win_activation::release_input_before_hide();
+    if let Some(wing) = app.get_webview_window(LIBRARY_WING_LABEL) {
+        // Capture protection OFF before the hide (stealth rule — see
+        // set_capture_protection).
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&wing, false);
+        wing.hide()
+            .map_err(|e| format!("Failed to hide library wing: {}", e))?;
+    }
+    let _ = app.emit("library-wing-closed", ());
+    Ok(())
+}
+
+/// Keeps the wing glued to the main overlay's top-left while it is dragged.
+pub fn setup_library_wing_sync<R: Runtime>(app: &AppHandle<R>) {
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    let handle = app.clone();
+    main.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Moved(_)) {
+            let Some(wing) = handle.get_webview_window(LIBRARY_WING_LABEL) else {
+                return;
+            };
+            if !wing.is_visible().unwrap_or(false) {
+                return;
+            }
+            if let Ok((x, y, _, _, _)) = library_wing_geometry(&handle) {
+                let _ = wing.set_position(tauri::Position::Physical(
+                    tauri::PhysicalPosition { x, y },
+                ));
+            }
+        }
+    });
+}
+
+/// Hides the wing alongside the main overlay (Ctrl+\ and the Hide button).
+pub fn hide_library_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
+    #[cfg(target_os = "windows")]
+    crate::win_activation::release_input_before_hide();
+    if let Some(wing) = app.get_webview_window(LIBRARY_WING_LABEL) {
+        // Capture protection OFF before the hide — the affinity flag on a
+        // hidden WebView2 surface paints as a static black box in captures.
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&wing, false);
+        let _ = wing.hide();
+    }
+}
+
+/// Re-reveals the wing after the main overlay returns, if the user had it open.
+/// Same foreground rule as the overlay and the history wing: this runs on the
+/// Ctrl+\ show path, so the wing must surface WITHOUT activating.
+pub fn restore_library_wing_with_main<R: Runtime>(app: &AppHandle<R>) {
+    if !LIBRARY_WING_OPEN.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    if let Some(wing) = app.get_webview_window(LIBRARY_WING_LABEL) {
+        if let Ok((x, y, _, _, _)) = library_wing_geometry(app) {
+            let _ = wing.set_position(tauri::Position::Physical(
+                tauri::PhysicalPosition { x, y },
+            ));
+        }
+        #[cfg(target_os = "windows")]
+        if let Err(e) = crate::win_activation::show_window_no_activate(&wing) {
+            eprintln!("Failed to restore library wing without activation: {}", e);
+            let _ = wing.show();
+        }
+        // Protection back ON only while actually visible (stealth rule).
+        #[cfg(target_os = "windows")]
+        crate::win_activation::set_capture_protection(&wing, true);
+        #[cfg(not(target_os = "windows"))]
+        let _ = wing.show();
+    }
+}

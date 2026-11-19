@@ -37,6 +37,10 @@ export const ListenUserMic = ({
     onPartial,
     onUtterance,
     onError,
+    // No mid-utterance partial uploads: the round model does not display mic
+    // partials, and the whole-buffer re-uploads were the HTTP 408
+    // SLOW_UPLOAD storms competing with the final that matters.
+    partialsEnabled: false,
   });
   return null;
 };

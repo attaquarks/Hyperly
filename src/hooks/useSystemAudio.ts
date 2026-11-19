@@ -32,7 +32,12 @@ import { AiTurnGate } from "@/lib/ai-turn";
 import { chronological } from "@/lib/message-order";
 import { PendingSave } from "@/lib/pending-save";
 import { modelSourceTag } from "@/lib/transcript-label";
-import { isMicEchoOfSystem, type DedupCandidate } from "@/lib/mic-echo-dedup";
+import {
+  findMicEcho,
+  micTokensContained,
+  type DedupCandidate,
+} from "@/lib/mic-echo-dedup";
+import { stripEcho } from "@/lib/echo-align";
 import { PartialTracker } from "@/lib/partial-tracking";
 import {
   CaptureBehavior,
@@ -74,7 +79,8 @@ const composeListenPrompt = (base: string, mode: ListenMode): string => {
   // else talking). The model must answer questions FROM the room without
   // treating the user's own words as a question to answer.
   const legend =
-    'Each incoming message is prefixed with its source channel. ' +
+    'Each message - the current one AND every past message in this ' +
+    'conversation - is prefixed with its source channel. ' +
     '"User: ..." is the user speaking directly to you — their words are the ' +
     'request and the context, never a question for you to answer on their behalf. ' +
     '"System: ..." is audio captured from the system/room: someone else ' +
@@ -139,6 +145,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // running text. When they hit Stop & Send, the final canonical transcript replaces this.
   const [livePartial, setLivePartial] = useState<string>("");
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
+  // The CURRENT round id (see TranscriptSegment.roundId). Bumped by every
+  // dispatch (a trip to the model closes the round) and by a fresh Start.
+  const roundRef = useRef(1);
   const [listenMode, setListenMode] = useState<ListenMode>("auto");
   // Ref mirror so the speech-detected listener — whose effect deps don't
   // include listenMode — always reads the current mode.
@@ -171,10 +180,16 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // Mirrors the `active` option for the same reason `capturingRef` exists: the
   // Space listener is registered once and must not read a stale panel state.
   const panelActiveRef = useRef<boolean>(active);
-  // Text transcribed under Manual / "Auto · On questions" that has not been
-  // sent yet. Switching to Auto folds it into the next send; a stop sends it
-  // immediately.
-  const pendingTranscriptRef = useRef<string>("");
+  // ROUND MODEL (2026-11-18, user spec): one capture round = Start → Stop,
+  // and its trip to the model carries ONE System block and ONE User block —
+  // not one labelled turn per utterance. Pauses never split the block: the
+  // room's text keeps accumulating under the same label until Stop. Manual /
+  // "Auto · On questions" hold per channel here; Stop composes the two blocks
+  // into one dispatch (stopAndSend). Auto still dispatches each room
+  // utterance immediately — that is Auto's contract — but the DISPLAY stays
+  // round-shaped (TranscriptThread renders one block per channel).
+  const pendingSystemRef = useRef<string>("");
+  const pendingUserRef = useRef<string>("");
   // Mirrors `livePartial` so a stop can include the in-progress utterance that
   // React state has not committed yet.
   const livePartialRef = useRef<string>("");
@@ -218,6 +233,14 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // Aborts the in-flight delta-partial STT upload when a stop is pressed, so
   // the flush utterance's upload gets the bandwidth instead of racing it.
   const partialAbortRef = useRef<AbortController | null>(null);
+  // Mic-confirmed user words waiting for the room's final. When the close mic
+  // transcribes text the room is ALSO hearing (the user's own voice in the
+  // meeting mix, or the mic simply finalizes first), the mic copy is
+  // suppressed as an echo — and the room's final then dispatched as
+  // "System: <the user's words>", which is exactly the "no user label" bug.
+  // The echo check now records WHAT matched; the system final checks this ref
+  // and dispatches those words as "User: ..." instead. Cleared per session.
+  const micConfirmedRef = useRef<DedupCandidate | null>(null);
   // Tier 2 streaming STT: true while the Rust WebSocket session is live, in
   // which case transcripts arrive as `stt-stream-*` TEXT events and the
   // batch audio round trip is skipped entirely.
@@ -257,7 +280,21 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     pickFolder: pickKnowledgeFolder,
     selectFile: selectKnowledgeFile,
     clearKnowledge: clearKnowledgeFile,
+    applyExternalKnowledge: applyExternalKnowledgeFile,
   } = useKnowledge();
+
+  // The Library wing (its own window, opened by the toolbar's library button)
+  // owns folder picking and file reading. It ships the finished KnowledgeFile
+  // over this event; the overlay applies it verbatim. A previously selected
+  // file is replaced, mirroring selectFile's behaviour.
+  useEffect(() => {
+    const unlisten = listen<KnowledgeFile>("library-wing-pick", (event) => {
+      applyExternalKnowledgeFile(event.payload);
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [applyExternalKnowledgeFile]);
   const knowledgeFileRef = useRef<KnowledgeFile | null>(null);
   useEffect(() => {
     knowledgeFileRef.current = knowledgeFile;
@@ -561,6 +598,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         {
           id: nextSegmentId(),
           timestamp,
+          roundId: roundRef.current,
           source: "system",
           text,
           isPartial: true,
@@ -584,6 +622,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         {
           id: nextSegmentId(),
           timestamp,
+          roundId: roundRef.current,
           source: "system",
           text,
           isPartial: false,
@@ -601,6 +640,7 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       {
         id: nextSegmentId(),
         timestamp,
+        roundId: roundRef.current,
         source: "microphone",
         text,
         isPartial: false,
@@ -698,6 +738,22 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         console.warn("Could not persist transcript event:", persistError);
       }
 
+      // The close mic may have already proven these words are the USER's (see
+      // micConfirmedRef): the echo suppression dropped the mic copy, so the
+      // label has to flip here or the model reads the user's own words as the
+      // room. Only the finalized utterance itself is retagged — an accumulated
+      // Manual blob stays channel-truth, because one label cannot cover mixed
+      // speakers.
+      const confirmed = micConfirmedRef.current;
+      const micProvedTheseWords =
+        !!confirmed && micTokensContained(text, confirmed.text);
+      if (micProvedTheseWords) {
+        micConfirmedRef.current = null;
+      }
+      const modelSource: TranscriptSource = micProvedTheseWords
+        ? "microphone"
+        : "system";
+
       // One call decides the outcome for every mode - send now, hold, or apply a
       // stop pressed while this utterance was transcribing - so Auto cannot
       // drift into the Manual/Questions path. D1: the room path — only
@@ -705,29 +761,30 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       const plan = planUtterance(
         captureBehaviorRef.current,
         text,
-        pendingTranscriptRef.current,
+        pendingSystemRef.current,
         stopRequestedRef.current,
         "system"
       );
       stopRequestedRef.current = false;
-      pendingTranscriptRef.current = plan.pending;
+      pendingSystemRef.current = plan.pending;
 
       if (plan.kind === "hold") {
         // A final that lands after the capture ended cannot wait for a stop
         // that already happened — that is the stop-during-flight race where
         // the engine's flushed utterance (or a late block) finalizes after
         // the deferred stop sent. Flush the held text now, or it strands
-        // unsent until the next session.
-        if (!engineActiveRef.current && pendingTranscriptRef.current) {
-          const held = pendingTranscriptRef.current;
-          pendingTranscriptRef.current = "";
-          await stopAndSend(held, "system");
+        // unsent until the next session. The composite carries the User
+        // block too if the mic held anything.
+        if (!engineActiveRef.current && pendingSystemRef.current) {
+          const held = pendingSystemRef.current;
+          pendingSystemRef.current = "";
+          await stopAndSend(held, modelSource);
         }
         return;
       }
 
       if (plan.kind === "stop-and-send") {
-        await stopAndSend(plan.text, "system");
+        await stopAndSend(plan.text, modelSource);
         return;
       }
 
@@ -747,7 +804,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         plan.text,
         effectiveSystemPrompt,
         conversation.messages ?? [],
-        modelSourceTag("system", plan.text)
+        modelSourceTag(modelSource, plan.text),
+        modelSource
       );
     };
   });
@@ -833,11 +891,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           if (stopRequestedRef.current && !engineActiveRef.current) {
             stopRequestedRef.current = false;
             stopFlushSeenRef.current = false;
-            const held = pendingTranscriptRef.current;
-            pendingTranscriptRef.current = "";
-            if (held.trim()) {
-              void stopAndSendRef.current?.(held, "system");
-            }
+            const held = pendingSystemRef.current;
+            pendingSystemRef.current = "";
+            void stopAndSendRef.current?.(held, "system");
           }
         },
       });
@@ -1021,11 +1077,11 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           if (stopRequestedRef.current && !stopFlushSeenRef.current) {
             stopRequestedRef.current = false;
             stopFlushSeenRef.current = false;
-            const held = pendingTranscriptRef.current;
-            pendingTranscriptRef.current = "";
-            if (held.trim()) {
-              void stopAndSendRef.current?.(held, "system");
-            }
+            // Round model: flush BOTH channels' held text — stopAndSend
+            // composes the one System block + one User block trip.
+            const held = pendingSystemRef.current;
+            pendingSystemRef.current = "";
+            void stopAndSendRef.current?.(held, "system");
           }
         });
         if (disposed) {
@@ -1064,14 +1120,17 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             if (disposed || !streamingActiveRef.current) return;
             const text = event.payload.text.trim();
             if (!text) return;
-            // Same epoch discipline as the batch partials: a final or a stop
-            // landing during the stream supersedes this text.
+            // STREAMING PARTIALS ARE CUMULATIVE: Deepgram's interim carries
+            // the full current-utterance text each time (everything since the
+            // last is_final). They REPLACE the live text — feeding them into
+            // the delta-appending `apply` doubled the transcript ("hello" +
+            // "hello world" → "hello hello world"), on screen and inside the
+            // stop-time tail fold that goes to the model.
             const epoch = partialTrackerRef.current.request();
-            if (partialTrackerRef.current.apply(epoch, text)) {
-              const accumulated = partialTrackerRef.current.current();
-              setLivePartial(accumulated);
-              livePartialRef.current = accumulated;
-              upsertPartialSegment(accumulated);
+            if (partialTrackerRef.current.replace(epoch, text)) {
+              setLivePartial(text);
+              livePartialRef.current = text;
+              upsertPartialSegment(text);
             }
           }
         );
@@ -1143,6 +1202,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
           return recoverable.map((event) => ({
             id: `restored-${event.id}`,
             timestamp: 0,
+            // Restored orphans form one historical round (round 0).
+            roundId: 0,
             // R8: the row records the CHANNEL, and the real speaker label only
             // when one was actually stored. It used to derive a label from the
             // source, which is exactly the identity claim this item removes.
@@ -1249,7 +1310,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         const userMessage = {
           id: generateMessageId("user", timestamp),
           role: "user" as const,
-          content: lastTranscription,
+          // The quick action is a typed user action — the stored message
+          // carries the User label like every other Listen turn.
+          content: modelSourceTag("microphone", lastTranscription),
           timestamp,
         };
         updatedMessages.push(userMessage);
@@ -1275,7 +1338,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       action,
       effectiveSystemPrompt,
       updatedMessages,
-      modelSourceTag("microphone", action)
+      modelSourceTag("microphone", action),
+      "microphone"
     );
   };
 
@@ -1324,18 +1388,39 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       prompt: string,
       priorMessages: ChatMessage[],
       /**
-       * What the model is asked with, when that must differ from what is stored.
-       * The source tag ("User (microphone): ...") belongs here: the model needs to
-       * tell the user's own words from the room, while the stored message must stay
-       * the plain transcript (Phase 4 R8).
+       * What the model is asked with for the CURRENT turn when it must differ
+       * from what is stored. The source tag ("User: ..."/"System: ...")
+       * belongs here.
        */
-      modelInput?: string
+      modelInput?: string,
+      /**
+       * The capture channel this turn's words came from. DECISION CHANGE
+       * (2026-11-18, user instruction "make sure llm gets the user and system
+       * labels right every time"): the stored conversation message now carries
+       * the channel label, because the model reads PRIOR turns as history and
+       * unlabelled history collapsed both channels into one speaker — the
+       * exact "no user label" report. R8's prompt-only rule survives for what
+       * it was protecting: the transcript EVENTS store (kind=final rows) keeps
+       * its own channel-truth source column and never sees the tag.
+       */
+      source: TranscriptSource = "system",
+      /**
+       * Verbatim stored content for composite turns (the round trip carries a
+       * labelled System block AND a labelled User block — `modelSourceTag`
+       * only prefixes one channel, so the composite brings its own labels).
+       */
+      storedContent?: string
     ) => {
       // R6: one in-flight turn per session. `begin()` supersedes (and cancels) a
       // turn that is still streaming, so two answers can no longer interleave;
       // its signal is what Stop aborts, and `mayPublish` is what refuses a
       // partial answer.
       const turn = getAiTurns().begin();
+      // A trip to the model CLOSES the current round: every utterance that
+      // lands from now on belongs to the next one, so the thread shows each
+      // turn in its own block pair. (The trigger utterance was stamped
+      // before this, so it stays in the round it belongs to.)
+      roundRef.current += 1;
 
       try {
         setIsAIProcessing(true);
@@ -1414,9 +1499,13 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
               {
                 id: generateMessageId("user", timestamp),
                 role: "user" as const,
-                // The stored message is the plain transcript - never the model's
-                // source tag (Phase 4 R8).
-                content: transcription,
+                // The stored message carries the channel label ("User: ..."/
+                // "System: ..."): the model reads prior turns as HISTORY, and
+                // unlabelled history is exactly how the user's words ended up
+                // inside the System stream (decision change, 2026-11-18). The
+                // transcript EVENTS store keeps its plain channel-truth text.
+                // Composite round trips bring both labels verbatim.
+                content: storedContent ?? modelSourceTag(source, transcription),
                 timestamp,
               },
               {
@@ -1478,15 +1567,55 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
   // `stopCapture`, which belongs to Auto's Stop button.
   const stopAndSend = useCallback(
     async (text: string, source: TranscriptSource) => {
+      // Round model: the triggering utterance folds into ITS channel's
+      // accumulator, and ONE trip carries both blocks — `System: <room>` and
+      // `User: <user>` — however long the pause between them was. A block is
+      // omitted when its channel said nothing this round.
+      if (source === "system") {
+        pendingSystemRef.current = pendingSystemRef.current
+          ? `${pendingSystemRef.current} ${text}`.trim()
+          : text.trim();
+      } else {
+        pendingUserRef.current = pendingUserRef.current
+          ? `${pendingUserRef.current} ${text}`.trim()
+          : text.trim();
+      }
       // Streaming mode: the WS teardown at engine-stop means the provider's
       // final for the unfinalized tail will never arrive — fold the live
-      // tail into the outgoing text instead of losing it.
+      // tail (room audio) into the system block instead of losing it.
       if (streamingActiveRef.current) {
         const tail = partialTrackerRef.current.current().trim();
-        if (tail && !text.includes(tail)) {
-          text = text ? `${text} ${tail}` : tail;
+        if (tail && !pendingSystemRef.current.includes(tail)) {
+          pendingSystemRef.current = pendingSystemRef.current
+            ? `${pendingSystemRef.current} ${tail}`.trim()
+            : tail;
         }
       }
+      const systemText = pendingSystemRef.current.trim();
+      const userText = pendingUserRef.current.trim();
+      pendingSystemRef.current = "";
+      pendingUserRef.current = "";
+      if (!systemText && !userText) {
+        // Nothing was said in this round — still stop the engine cleanly.
+        await stopReferenceTap();
+        try {
+          await invoke<string>("stop_system_audio_capture");
+        } catch (err) {
+          console.error("Failed to stop capture:", err);
+        }
+        engineActiveRef.current = false;
+        partialTrackerRef.current.stop();
+        stopRequestedRef.current = false;
+        setCapturing(false);
+        setIsProcessing(false);
+        setLivePartial("");
+        livePartialRef.current = "";
+        return;
+      }
+      // The plain text the turn is ABOUT (titles, follow-ups): both blocks in
+      // speech order. The labelled composite is what the model receives and
+      // what gets stored (see storedContent below).
+      const roundText = [systemText, userText].filter(Boolean).join(" ");
       await stopReferenceTap();
       try {
         await invoke<string>("stop_system_audio_capture");
@@ -1505,8 +1634,15 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       setLivePartial("");
       livePartialRef.current = "";
 
-      const outbound = text.trim();
+      const outbound = roundText.trim();
       if (!outbound) return;
+      // The labelled round trip: one System block and/or one User block.
+      const composite = [
+        systemText ? `System: ${systemText}` : "",
+        userText ? `User: ${userText}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
 
       const baseSystemPrompt = useSystemPrompt
         ? systemPrompt || DEFAULT_SYSTEM_PROMPT
@@ -1516,17 +1652,17 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         listenModeRef.current
       );
 
-      // The stored messages go to the boundary as-is; it orders them once (R6).
-      // D1 Gap 1 (the remaining half): `source` is threaded in rather than
-      // assumed, so this path labels the room's words `System: ...` instead of
-      // sending them bare. Untagged text here made the model read a Manual-mode
-      // send as "the user asked", which is the reported symptom. `modelInput` is
-      // prompt-only; the stored message stays the plain transcript (R8).
+      // ROUND MODEL: one trip carries both blocks, each with its own channel
+      // label — never one label for a mixed blob. The stored message is the
+      // same composite (verbatim), so the model's history keeps the identity
+      // of both channels for every later turn.
       await processWithAI(
         outbound,
         effectiveSystemPrompt,
         conversation.messages ?? [],
-        modelSourceTag(source, outbound)
+        composite,
+        source,
+        composite
       );
     },
     [systemPrompt, contextContent, conversation.messages, processWithAI, stopReferenceTap]
@@ -1569,30 +1705,45 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
             },
           ]
         : systemHistoryRef.current;
-      if (
-        isMicEchoOfSystem(
-          transcript,
-          systemCandidates,
-          elapsedSeconds()
-        )
-      ) {
+      const nowSeconds = elapsedSeconds();
+      // SUB-SEGMENT ECHO CANCELLATION (user spec, 2026-11-18): the mic always
+      // hears some room audio, so its transcript is stripped against the
+      // room's words — finals AND the live partial — BEFORE anything is
+      // displayed. Matching spans are dropped; only genuinely novel words
+      // survive. If nothing novel survives, the user did not speak this
+      // turn and the whole transcript is dropped. This is why the User
+      // transcript appears with a delay: it shows only after the strip.
+      const systemTexts = systemCandidates.map((c) => c.text);
+      const strip = stripEcho(transcript, systemTexts);
+      if (strip.fullyEchoed) {
+        // Whole utterance echoed. If the match was the room's LIVE partial,
+        // the room's final has NOT been dispatched yet — record the
+        // confirmation so that final goes to the model as "User: ..." (the
+        // close mic is the stronger evidence of whose words these are).
+        const echo = findMicEcho(transcript, systemCandidates, nowSeconds);
+        if (echo && echo.atSeconds === nowSeconds) {
+          micConfirmedRef.current = { atSeconds: echo.atSeconds, text: transcript };
+        }
         return;
       }
+      // Original casing and punctuation preserved (see echo-align.ts).
+      const kept = strip.keptText;
+      if (!kept.trim()) return;
 
-      pushUserSegment(transcript);
+      pushUserSegment(kept);
 
       // D1 Gap 2: the microphone path. Passing `source: "microphone"` is
       // what keeps "Auto · On questions" from answering the user's own
       // words — the gate holds every mic utterance regardless of shape.
       const plan = planUtterance(
         captureBehaviorRef.current,
-        transcript,
-        pendingTranscriptRef.current,
+        kept,
+        pendingUserRef.current,
         stopRequestedRef.current,
         "microphone"
       );
       stopRequestedRef.current = false;
-      pendingTranscriptRef.current = plan.pending;
+      pendingUserRef.current = plan.pending;
 
       if (plan.kind === "hold") return;
 
@@ -1601,8 +1752,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         return;
       }
 
-      // The model's source tag is applied at the processWithAI call below; it is
-      // never part of the stored record (Phase 4 R8).
+      // The model's source tag is applied at the processWithAI call below;
+      // the stored record carries the same label (see processWithAI).
       const baseSystemPrompt = useSystemPrompt
         ? systemPrompt || DEFAULT_SYSTEM_PROMPT
         : contextContent || DEFAULT_SYSTEM_PROMPT;
@@ -1615,7 +1766,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
         plan.text,
         effectiveSystemPrompt,
         conversation.messages ?? [],
-        modelSourceTag("microphone", plan.text)
+        modelSourceTag("microphone", plan.text),
+        "microphone"
       );
     },
     [
@@ -1654,8 +1806,11 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       setLivePartial("");
       livePartialRef.current = "";
       setTranscriptSegments([]);
-      pendingTranscriptRef.current = "";
+      pendingSystemRef.current = "";
+      pendingUserRef.current = "";
       stopRequestedRef.current = false;
+      micConfirmedRef.current = null;
+      roundRef.current = 1;
       sessionStartRef.current = Date.now();
 
       // Manual and Auto both start capturing audio immediately. Manual used
@@ -1717,6 +1872,10 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       setLivePartial("");
       livePartialRef.current = "";
       sessionStartRef.current = Date.now();
+      // ROUND BOUNDARY: Stop → Start begins a new round. The previous turn's
+      // blocks stay on screen (frozen); everything captured from here stacks
+      // into the next pair.
+      roundRef.current += 1;
 
       const deviceId =
         selectedAudioDevices.output?.id &&
@@ -1806,7 +1965,8 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       setIsPopoverOpen(false);
       setLivePartial("");
       livePartialRef.current = "";
-      pendingTranscriptRef.current = "";
+      pendingSystemRef.current = "";
+      pendingUserRef.current = "";
       stopRequestedRef.current = false;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -1847,8 +2007,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
     if (streamingActiveRef.current) {
       const tail = partialTrackerRef.current.current();
       if (tail.trim()) {
-        pendingTranscriptRef.current = pendingTranscriptRef.current
-          ? `${pendingTranscriptRef.current} ${tail}`
+        // The live tail is room audio — it folds into the System block.
+        pendingSystemRef.current = pendingSystemRef.current
+          ? `${pendingSystemRef.current} ${tail}`
           : tail;
       }
     }
@@ -1880,9 +2041,9 @@ export function useSystemAudio({ active = true }: { active?: boolean } = {}) {
       if (stopRequestedRef.current && !stopFlushSeenRef.current) {
         stopRequestedRef.current = false;
         stopFlushSeenRef.current = false;
-        const held = pendingTranscriptRef.current;
-        pendingTranscriptRef.current = "";
-        if (held.trim()) void stopAndSendRef.current?.(held, "system");
+        const held = pendingSystemRef.current;
+        pendingSystemRef.current = "";
+        void stopAndSendRef.current?.(held, "system");
       }
     }, 600);
   }, [stopAndSend, stopReferenceTap]);

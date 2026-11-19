@@ -7,7 +7,8 @@ import { KnowledgeFile } from "@/types/system-audio";
 // folder can't be re-opened across restarts without picking it again.
 
 // Cap on injected knowledge so a large document can't blow up the prompt.
-const MAX_KNOWLEDGE_CHARS = 12000;
+// Shared with the Library wing, which ships files to the overlay by event.
+export const MAX_KNOWLEDGE_CHARS = 12000;
 
 const TEXT_EXTENSIONS = new Set([
   "txt", "md", "markdown", "json", "csv", "log",
@@ -20,7 +21,7 @@ export type LibraryEntry = {
   file: File;
 };
 
-const extractText = async (file: File): Promise<string> => {
+export const extractText = async (file: File): Promise<string> => {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
 
   if (ext === "pdf") {
@@ -105,6 +106,15 @@ export const useKnowledge = () => {
     setReadError("");
   }, []);
 
+  // The Library wing (its own window) does the folder picking and file
+  // reading, then hands the finished KnowledgeFile over an event. The overlay
+  // applies it verbatim — it never sees the File objects (they live in the
+  // wing's webview and cannot cross windows).
+  const applyExternalKnowledge = useCallback((file: KnowledgeFile) => {
+    setKnowledgeFile(file);
+    setReadError("");
+  }, []);
+
   return {
     folderName,
     folderFiles,
@@ -114,5 +124,6 @@ export const useKnowledge = () => {
     pickFolder,
     selectFile,
     clearKnowledge,
+    applyExternalKnowledge,
   };
 };

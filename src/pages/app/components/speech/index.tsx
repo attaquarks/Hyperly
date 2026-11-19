@@ -1,14 +1,13 @@
 import { lazy, Suspense, useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { HistoryIcon, PlusIcon, XIcon } from "lucide-react";
+import { HistoryIcon, LibraryIcon, XIcon } from "lucide-react";
 import { ErrorBoundary } from "react-error-boundary";
 import { ResultsSection } from "./ResultsSection";
 import { PermissionFlow } from "./PermissionFlow";
 import { TranscriptThread } from "./TranscriptThread";
 import { ListenControls } from "./ListenControls";
 import { FollowUps } from "./FollowUps";
-import { ListenActionRow } from "./ListenActionRow";
 import { ListeningBar } from "./ListeningBar";
 import { ListenFooter } from "./ListenFooter";
 import {
@@ -64,13 +63,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
     captureBehavior,
     setCaptureBehavior,
     suggestedFollowUps,
-    knowledgeFolderName,
-    knowledgeFolderFiles,
     knowledgeFile,
-    isKnowledgeReading,
     knowledgeReadError,
-    pickKnowledgeFolder,
-    selectKnowledgeFile,
     clearKnowledgeFile,
   } = props;
 
@@ -86,6 +80,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
   // wing can close itself (its X, or picking a conversation), and Rust
   // reports that back over this event.
   const [showHistory, setShowHistory] = useState(false);
+  // The Library wing is the history wing's LEFT-side twin: same bubble window
+  // pattern, docked top-left by Rust, owning folder picking + the file list.
+  const [showLibrary, setShowLibrary] = useState(false);
 
   useEffect(() => {
     const unlistenClosed = listen("history-wing-closed", () => {
@@ -94,9 +91,13 @@ export const SystemAudio = (props: useSystemAudioType) => {
     const unlistenPick = listen("history-wing-pick", (event) => {
       void loadConversation(event.payload as string);
     });
+    const unlistenLibraryClosed = listen("library-wing-closed", () => {
+      setShowLibrary(false);
+    });
     return () => {
       void unlistenClosed.then((off) => off());
       void unlistenPick.then((off) => off());
+      void unlistenLibraryClosed.then((off) => off());
     };
   }, [loadConversation]);
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
@@ -209,21 +210,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
   return (
     <div className="hyperly-listen-body">
-      {/* Streaming STT is LIVE: the WebSocket path is running, words arrive
-      while people talk, and Stop sends instantly. The user must be able to
-      SEE which transcription mode is running — its absence is exactly how
-      the silent batch fallback went unnoticed. */}
-      {sttStreaming && capturing ? (
-        <div
-          className="flex items-center gap-1.5 px-2 py-0.5 w-fit rounded-full border border-green-500/40"
-          data-testid="listen-streaming-badge"
-        >
-          <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
-          <span className="text-[10px] uppercase tracking-wide text-green-500">
-            Live streaming
-          </span>
-        </div>
-      ) : null}
       <ErrorBoundary
         fallbackRender={() => null}
         onError={(micError) => {
@@ -248,7 +234,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
         </Suspense>
       </ErrorBoundary>
       {setupRequired ? (
-        <div className="hyperly-section">
+        <div className="hyperly-section hyperly-zone-setup">
           <PermissionFlow
             onPermissionGranted={() => {
               startCapture();
@@ -260,10 +246,49 @@ export const SystemAudio = (props: useSystemAudioType) => {
         </div>
       ) : (
         <>
-          {/* Mode toolbar: prompt pills + history/new chat on the right */}
-          <div className="hyperly-section">
+          {/* Mode toolbar: the Live-streaming badge rides here so the grid's
+              rows stay fixed — a conditional top-level badge would occupy the
+              first grid row and shift every zone below it. Library (far left,
+              opens the left wing) · mode pills (centered) · history (far
+              right, opens the right wing). */}
+          <div className="hyperly-section hyperly-zone-toolbar">
+            {sttStreaming && capturing ? (
+              <div
+                className="flex items-center gap-1.5 px-2 py-0.5 w-fit rounded-full border border-green-500/40 mb-1.5"
+                data-testid="listen-streaming-badge"
+              >
+                <span className="size-1.5 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-[10px] uppercase tracking-wide text-green-500">
+                  Live streaming
+                </span>
+              </div>
+            ) : null}
             <div className="hyperly-listen-toolbar">
-              <div className="flex-1 min-w-0">
+              <button
+                type="button"
+                className={cn(
+                  "hyperly-action",
+                  showLibrary && "hyperly-action-active"
+                )}
+                data-testid="listen-library-toggle"
+                title={
+                  showLibrary
+                    ? "Hide the knowledge library"
+                    : "Show the knowledge library"
+                }
+                onClick={() => {
+                  if (showLibrary) {
+                    void invoke("close_library_wing");
+                    setShowLibrary(false);
+                  } else {
+                    void invoke("open_library_wing");
+                    setShowLibrary(true);
+                  }
+                }}
+              >
+                <LibraryIcon className="h-3 w-3" />
+              </button>
+              <div className="flex-1 min-w-0 flex justify-center">
                 <ListenControls mode={listenMode} onModeChange={setListenMode} />
               </div>
               <div className="hyperly-listen-toolbar-actions">
@@ -295,15 +320,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
                 >
                   <HistoryIcon className="h-3 w-3" />
                 </button>
-                <button
-                  type="button"
-                  className="hyperly-action"
-                  onClick={startNewConversation}
-                  title="Start a new conversation"
-                >
-                  <PlusIcon className="h-3 w-3" />
-                  New
-                </button>
               </div>
             </div>
           </div>
@@ -314,6 +330,11 @@ export const SystemAudio = (props: useSystemAudioType) => {
             behavior={captureBehavior}
             onBehaviorChange={setCaptureBehavior}
             onToggleCapture={() => void handleToggleCapture()}
+            isCapturingScreenshot={isCapturingScreenshot}
+            onCapture={() => void handleCapture()}
+            onCaptureRegion={() => void handleCaptureRegion()}
+            onAttach={handleAttach}
+            onNewConversation={startNewConversation}
           />
 
           {/* Transcript. History no longer overlays the room: it opens as the
@@ -329,7 +350,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
           />
 
           {error && (
-            <div className="hyperly-section">
+            <div className="hyperly-section hyperly-zone-error">
               <div className="hyperly-error">
                 <strong>Error:</strong> {error}
               </div>
@@ -350,20 +371,12 @@ export const SystemAudio = (props: useSystemAudioType) => {
             onAddCustom={addQuickAction}
           />
 
-          {/* Action row: Capture / Selection / Attach / Library + file dropdown */}
-          <div className="hyperly-section">
-            <ListenActionRow
-              isCapturing={isCapturingScreenshot}
-              onCapture={() => void handleCapture()}
-              onCaptureRegion={() => void handleCaptureRegion()}
-              onAttach={handleAttach}
-              folderName={knowledgeFolderName}
-              folderFiles={knowledgeFolderFiles}
-              selectedFileName={knowledgeFile?.name}
-              isReading={isKnowledgeReading}
-              onPickFolder={pickKnowledgeFolder}
-              onSelectFile={(name) => void selectKnowledgeFile(name)}
-            />
+          {/* Attachment previews + the knowledge note. The Capture / Selection
+              / Attach buttons live in the Start bar above, and the Library
+              moved to the toolbar wing — this section only shows what is
+              attached, and collapses to nothing when nothing is. */}
+          {(screenshotImages.length > 0 || knowledgeFile || knowledgeReadError) && (
+          <div className="hyperly-section hyperly-zone-actions">
             {screenshotImages.length > 0 && (
               <div className="hyperly-thumb-strip mt-2">
                 {screenshotImages.map((image, index) => (
@@ -412,6 +425,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
               <p className="hyperly-knowledge-note px-0">{knowledgeReadError}</p>
             )}
           </div>
+          )}
 
           <ListenFooter />
         </>

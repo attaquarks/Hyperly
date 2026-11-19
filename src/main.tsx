@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppRoutes from "./routes";
 import { HistoryWing } from "./pages/HistoryWing";
+import { LibraryWing } from "./pages/LibraryWing";
 import { MicConsentDialog } from "./components/mic-consent/MicConsentDialog";
 import { syncMicConsentToBackend } from "./lib/mic-consent";
 
@@ -73,6 +74,17 @@ try {
       <React.StrictMode>
         <ThemeProvider>
           <HistoryWing />
+        </ThemeProvider>
+      </React.StrictMode>
+    );
+  } else if (windowLabel === "library-wing") {
+    // The knowledge Library wing: the history wing's LEFT-side twin. It owns
+    // folder picking and file reading (File objects cannot cross windows) and
+    // ships the finished KnowledgeFile to the overlay by event.
+    ReactDOM.createRoot(rootEl).render(
+      <React.StrictMode>
+        <ThemeProvider>
+          <LibraryWing />
         </ThemeProvider>
       </React.StrictMode>
     );

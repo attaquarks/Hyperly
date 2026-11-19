@@ -38,6 +38,8 @@ export type IContextType = {
   customizable: CustomizableState;
   toggleAppIconVisibility: (isVisible: boolean) => Promise<void>;
   toggleAlwaysOnTop: (isEnabled: boolean) => Promise<void>;
+  /** Persist the pref and push it to the Rust window (set_overlay_glass). */
+  toggleOverlayGlass: (overlay: boolean) => Promise<void>;
   loadData: () => void;
   selectedAudioDevices: {
     input: { id: string; name: string };

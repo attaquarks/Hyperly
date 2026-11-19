@@ -10,6 +10,14 @@ export type TranscriptSegment = {
   id: string;
   /** Seconds elapsed since the current listen session started. */
   timestamp: number;
+  /**
+   * WHICH TURN the words belong to. One round = one trip to the model: a
+   * dispatch (or a fresh Start) closes the current round, and every
+   * utterance after it starts the next. The thread renders one System block
+   * + one User block PER round, so Stop → Start visibly begins new blocks
+   * instead of appending into the old ones forever.
+   */
+  roundId: number;
   /** The capture channel the words arrived on. Never an identity. */
   source: TranscriptSource;
   /**
